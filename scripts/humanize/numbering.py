@@ -285,7 +285,7 @@ def _find_j_anchor(s: str, start: int, end: int, chain_type: str) -> Optional[in
         pats = [r"W[GRASLVQFKY][GRASLVQFKT]G", r"W[GRASLVQFY][QGS]"]
         j_tail = r"[GQ][GT][QLV][TV][VT][VS]"
     else:
-        pats = [r"FG[GQSTPE][GTKQE]", r"F[GSTPE][GQSTPEK]"]
+        pats = [r"FG[GQSTPEA][GTKQE]", r"FG[A-Z]", r"F[GSTPEA][GQSTPEK]"]
         j_tail = r"[GQ][GT][QKE][GT][KLTV]"
     best = None
     best_tail = False

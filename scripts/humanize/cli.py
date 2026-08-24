@@ -35,6 +35,8 @@ def cmd_run(args):
         antigen_seq=args.antigen,
         donor_structure=args.donor_structure,
         calibration_path=args.calibration,
+        biophi_env=args.biophi_env,
+        oasis_db=args.oasis_db,
         af3=AF3Config(
             mode=args.af3_mode,
             binary=args.af3_binary or "",
@@ -159,6 +161,10 @@ def main(argv=None):
     p_run.add_argument("--antigen", default=None, help="antigen sequence (AF3 complex)")
     p_run.add_argument("--calibration", default=None,
                        help="calibration.json from `humanize learn` (empirical scoring)")
+    p_run.add_argument("--biophi-env", default=None,
+                       help="conda env name containing biophi (Sapiens humanness cross-check)")
+    p_run.add_argument("--oasis-db", default=None,
+                       help="OASis 9-mer DB path (biophi oasis identity)")
     p_run.add_argument("--donor-structure", default=None, help="donor PDB/CIF")
     p_run.add_argument("--af3-mode", default="off", choices=["off", "local", "api"])
     p_run.add_argument("--af3-binary", default="", help="path to run_alphafold.py")

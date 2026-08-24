@@ -44,6 +44,8 @@ class PipelineConfig:
     antigen_seq: Optional[str] = None  # for AF3 complex prediction
     donor_structure: Optional[str] = None  # PDB/CIF of donor (for CDR RMSD)
     calibration_path: Optional[str] = None  # calibration.json from `humanize learn`
+    biophi_env: Optional[str] = None        # conda env with biophi (server)
+    oasis_db: Optional[str] = None          # OASis 9-mer DB path (server)
     mock_structures: bool = True       # run without AF3/MPNN
 
     def __post_init__(self):
@@ -64,6 +66,7 @@ class ChainReport:
     minimal_reversion: Optional["MinimalReversion"] = None
     sdr_graft: Optional[GraftResult] = None
     matrix: List = field(default_factory=list)
+    humanness: Dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -254,6 +257,19 @@ def _process_chain(
     for scheme, graft in grafts.items():
         hl[scheme] = round(human_likeness_percent(graft.numbered, v_gene), 1)
 
+    # ---- BioPhi/Sapiens humanness cross-check (server, optional) ----
+    humanness = {}
+    if config.biophi_env:
+        from .humanness import run_oasis, run_sapiens
+        seqs = {f"{chain.name}|{v.name}": v.sequence for v in variants}
+        sap = run_sapiens(seqs, env=config.biophi_env)
+        for k, r in sap.items():
+            humanness[k] = {"sapiens_mean": r.sapiens_mean, "note": r.note}
+        if config.oasis_db:
+            oas = run_oasis(seqs, config.oasis_db, env=config.biophi_env)
+            for k, r in oas.items():
+                humanness.setdefault(k, {})["oasis_identity"] = r.oasis_identity
+
     return ChainReport(
         input_chain=chain,
         germline=choice,
@@ -266,6 +282,7 @@ def _process_chain(
         minimal_reversion=minrev,
         sdr_graft=sdr_graft,
         matrix=matrix,
+        humanness=humanness,
     )
 
 

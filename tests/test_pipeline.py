@@ -210,6 +210,66 @@ def test_learning_loop():
     os.unlink(exp_path)
 
 
+def test_humanness_adapter():
+    print("BioPhi/Sapiens adapter (mock)")
+    from humanize.humanness import run_sapiens
+    script = os.path.join(tempfile.gettempdir(), "fake_biophi.py")
+    with open(script, "w") as fh:
+        fh.write(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "fa = [a for a in sys.argv if a.endswith('.fa') or a.endswith('.fasta')]\n"
+            "out = os.path.join(os.path.dirname(os.path.abspath(fa[0])), 'scores.csv')\n"
+            "with open(out, 'w') as f:\n"
+            "    f.write('sequence,mean_score\\n')\n"
+            "    name = ''\n"
+            "    for line in open(fa[0]):\n"
+            "        if line.startswith('>'):\n"
+            "            name = line[1:].strip()\n"
+            "        else:\n"
+            "            f.write(f'{name},0.85\\n')\n"
+        )
+    os.chmod(script, 0o755)
+    shim_dir = tempfile.mkdtemp()
+    shim = os.path.join(shim_dir, "biophi")
+    with open(shim, "w") as fh:
+        fh.write(f"#!/bin/bash\nexec python3 {script} \"$@\"\n")
+    os.chmod(shim, 0o755)
+    old_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = shim_dir + os.pathsep + old_path
+    try:
+        seq = "EVQLQQSGPELVKPGASVKMSCKASGYTFTDTYIHWVRQAPGKGLEWVG"
+        res = run_sapiens({"test1": seq})
+        r = res.get("test1")
+        check("sapiens adapter parses scores", r is not None and r.sapiens_mean == 0.85,
+              str(r))
+    finally:
+        os.environ["PATH"] = old_path
+
+
+def test_docx_report():
+    print("Word report generation")
+    from humanize.report import write_all
+    try:
+        import docx  # noqa
+    except ImportError:
+        print("  [SKIP] python-docx not installed")
+        return
+    with tempfile.TemporaryDirectory() as out:
+        result = run_pipeline(
+            os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"),
+            PipelineConfig(), outdir=out)
+        paths = write_all(out, result)
+        check("docx generated", os.path.exists(paths.get("docx", "")), str(paths.keys()))
+        if paths.get("docx"):
+            from docx import Document
+            d = Document(paths["docx"])
+            texts = "\n".join(p.text for p in d.paragraphs)
+            check("docx has exec summary", "Executive Summary" in texts)
+            check("docx has appendix sequences", "Appendix A" in texts)
+            check("docx has tables", len(d.tables) >= 10, str(len(d.tables)))
+
+
 def test_end_to_end():
     print("end-to-end")
     with tempfile.TemporaryDirectory() as out:
@@ -233,6 +293,8 @@ def main():
     test_backmut_variants()
     test_vhh_protection()
     test_minimal_reversion()
+    test_humanness_adapter()
+    test_docx_report()
     test_end_to_end()
     print()
     if FAILURES:

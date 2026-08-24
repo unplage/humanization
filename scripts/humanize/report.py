@@ -185,6 +185,18 @@ def write_markdown(path: str, result: RunResult) -> None:
         for v in rep.variants:
             L.append(f"| {v.name} | {v.description} | {len(v.backmutations)} | `{v.sequence}` |")
         L.append("")
+        if rep.humanness:
+            L.append("### BioPhi/Sapiens humanness cross-check")
+            L.append("")
+            L.append("| variant | Sapiens mean | OASis identity |")
+            L.append("|---------|--------------|----------------|")
+            for k in sorted(rep.humanness):
+                h = rep.humanness[k]
+                sap = h.get("sapiens_mean")
+                oas = h.get("oasis_identity")
+                L.append(f"| {k} | {sap if sap is not None else '-'} | "
+                         f"{oas if oas is not None else '-'} |")
+            L.append("")
         L.append("### Variant differences (vs pure graft V0)")
         L.append("")
         L.append("| variant | positions reverted |")
@@ -219,6 +231,15 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
         csvp = os.path.join(outdir, f"backmutations_{rep.input_chain.name}.csv")
         write_csv(csvp, rep.backmut)
         paths[f"csv_{rep.input_chain.name}"] = csvp
+    # Word report (python-docx; skipped when unavailable)
+    try:
+        from .report_docx import write_docx_report
+        docx_path = write_docx_report(result, outdir)
+        if docx_path:
+            paths["docx"] = docx_path
+    except Exception as e:
+        paths["docx_error"] = f"docx generation failed: {e}"
+
     # FASTA of all variants
     fasta = os.path.join(outdir, "variants.fasta")
     with open(fasta, "w") as fh:
