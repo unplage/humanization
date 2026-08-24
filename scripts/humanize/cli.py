@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Antibody humanization pipeline CLI.
+
+Usage:
+  humanize run    --input seq.fasta [--outdir outputs] [--format fab|vhh|auto]
+                  [--scheme kabat|chothia|abm|imgt] [--germline-dir DIR]
+                  [--af3-mode off|local|api] [--mpnn-mode off|local]
+                  [--antigen SEQ] [--donor-structure PDB]
+  humanize setup-germline [--dir DIR]      # download NCBI IgBLAST germline
+  humanize setup-check                     # report tool availability
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from humanize.pipeline import PipelineConfig, run_pipeline
+from humanize.report import write_all
+from humanize.structure import AF3Config
+from humanize.mpnn import MPNNConfig
+
+
+def cmd_run(args):
+    cfg = PipelineConfig(
+        germline_dir=args.germline_dir or "",
+        cdr_scheme=args.scheme,
+        report_schemes=["kabat", "chothia", "abm", "imgt"],
+        format=args.format,
+        antigen_seq=args.antigen,
+        donor_structure=args.donor_structure,
+        af3=AF3Config(
+            mode=args.af3_mode,
+            binary=args.af3_binary or "",
+            workdir=os.path.join(args.outdir, "af3"),
+            api_url=args.af3_api or "",
+            api_token=os.environ.get("AF3_TOKEN", ""),
+        ),
+        mpnn=MPNNConfig(
+            mode=args.mpnn_mode,
+            script=args.mpnn_script or "",
+            outdir=os.path.join(args.outdir, "mpnn"),
+        ),
+    )
+    os.makedirs(args.outdir, exist_ok=True)
+    result = run_pipeline(args.input, cfg, outdir=args.outdir)
+    paths = write_all(args.outdir, result)
+    print(f"\n[humanize] format: {result.format.upper()}")
+    for rep in result.chains:
+        c = rep.input_chain
+        v = rep.germline.v_gene
+        j = rep.germline.j_gene
+        s = rep.germline.scores
+        print(f"\n  {c.name} ({c.chain_type}{'|VHH' if c.is_vhh else ''})")
+        print(f"    germline: {v.gene_id if v else '?'} + {j.gene_id if j else '?'} "
+              f"(FR id {s.get('fr_identity')}, CDR id {s.get('cdr_identity')})")
+        tiers = {}
+        for b in rep.backmut.candidates:
+            tiers[b.tier] = tiers.get(b.tier, 0) + 1
+        print(f"    back-mutations: {sum(tiers.values())} "
+              f"({', '.join(f'{k}:{v}' for k, v in sorted(tiers.items()))})")
+        hl = rep.human_likeness
+        if hl:
+            print(f"    human-likeness (graft): {', '.join(f'{k} {v}%' for k, v in hl.items())}")
+        for v in rep.variants:
+            print(f"    {v.name}: {len(v.backmutations)} back-mutations")
+    if result.warnings:
+        print("\n  warnings:")
+        for w in result.warnings:
+            print(f"    - {w}")
+    print("\n[humanize] outputs:")
+    for k, p in paths.items():
+        print(f"  {k}: {p}")
+    return 0
+
+
+def cmd_setup_germline(args):
+    from humanize.germline import download_germline_db
+    d = args.dir or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "germline")
+    print(f"[humanize] downloading NCBI IgBLAST germline into {d} ...")
+    db = download_germline_db(d)
+    print(f"[humanize] done: {len(db.v_for('H'))} IGHV, "
+          f"{len(db.v_for('L'))} IG[KL]V, {len(db.j_for('H'))} IGHJ, "
+          f"{len(db.j_for('L'))} IG[KL]J genes")
+    return 0
+
+
+def cmd_setup_check(args):
+    checks = [
+        ("python3", sys.executable),
+        ("biopython", None),
+        ("anarci", None),
+        ("igblastn", shutil.which("igblastn")),
+        ("protein_mpnn.py", shutil.which("protein_mpnn.py")),
+        ("run_alphafold.py", shutil.which("run_alphafold.py")),
+    ]
+    print("[humanize] setup-check")
+    for name, path in checks:
+        if name == "biopython":
+            try:
+                import Bio  # type: ignore
+                path = Bio.__version__
+            except ImportError:
+                path = None
+        if name == "anarci":
+            try:
+                import anarci  # type: ignore
+                path = "python module OK"
+            except ImportError:
+                path = None
+        print(f"  {name:20s}: {path or 'NOT FOUND (optional)'}")
+    print("\n  portable mode (no external tools) is fully functional.")
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="humanize", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_run = sub.add_parser("run", help="run the humanization pipeline")
+    p_run.add_argument("--input", required=True, help="input FASTA (VH+VL or VHH)")
+    p_run.add_argument("--outdir", default="outputs")
+    p_run.add_argument("--format", default="auto", choices=["auto", "fab", "vhh"])
+    p_run.add_argument("--scheme", default="kabat",
+                       choices=["kabat", "chothia", "abm", "imgt"],
+                       help="CDR definition used for the variant ladder")
+    p_run.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
+    p_run.add_argument("--antigen", default=None, help="antigen sequence (AF3 complex)")
+    p_run.add_argument("--donor-structure", default=None, help="donor PDB/CIF")
+    p_run.add_argument("--af3-mode", default="off", choices=["off", "local", "api"])
+    p_run.add_argument("--af3-binary", default="", help="path to run_alphafold.py")
+    p_run.add_argument("--af3-api", default="", help="AF3 API base URL")
+    p_run.add_argument("--mpnn-mode", default="off", choices=["off", "local"])
+    p_run.add_argument("--mpnn-script", default="", help="path to protein_mpnn.py")
+    p_run.set_defaults(func=cmd_run)
+
+    p_g = sub.add_parser("setup-germline", help="download NCBI IgBLAST germline")
+    p_g.add_argument("--dir", default="")
+    p_g.set_defaults(func=cmd_setup_germline)
+
+    p_c = sub.add_parser("setup-check", help="report available tools")
+    p_c.set_defaults(func=cmd_setup_check)
+
+    args = ap.parse_args(argv)
+    try:
+        return args.func(args)
+    except RuntimeError as e:
+        print(f"[humanize] error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,5 @@
+# Core pipeline: stdlib only (no dependencies required)
+# Optional (server, full mode):
+biopython>=1.79
+abnumber>=0.4.0
+anarci

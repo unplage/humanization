@@ -1,0 +1,5 @@
+outputs/
+__pycache__/
+*.pyc
+data/germline/human_gl_*.fasta
+data/igblast/
