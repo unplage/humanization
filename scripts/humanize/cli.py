@@ -34,6 +34,7 @@ def cmd_run(args):
         format=args.format,
         antigen_seq=args.antigen,
         donor_structure=args.donor_structure,
+        calibration_path=args.calibration,
         af3=AF3Config(
             mode=args.af3_mode,
             binary=args.af3_binary or "",
@@ -90,6 +91,31 @@ def cmd_setup_germline(args):
     return 0
 
 
+def cmd_learn(args):
+    from humanize.learning import (
+        compute_position_effects,
+        parse_experiments,
+        write_calibration,
+    )
+    from humanize.germline import load_germline_db
+    db = load_germline_db(args.germline_dir or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "..", "data", "germline"))
+    records = parse_experiments(args.experiments)
+    effects, warnings = compute_position_effects(records, db)
+    write_calibration(args.out, effects, meta={
+        "n_experiments": len(records),
+        "n_positions": len(effects),
+    })
+    for w in warnings:
+        print(f"[humanize] warn: {w}")
+    print(f"[humanize] learned effects for {len(effects)} framework positions "
+          f"from {len(records)} experiments -> {args.out}")
+    n_sig = sum(1 for e in effects.values() if abs(e.effect) >= 0.20)
+    print(f"[humanize] positions with |ddG| >= 0.20 kcal/mol: {n_sig}")
+    return 0
+
+
 def cmd_setup_check(args):
     checks = [
         ("python3", sys.executable),
@@ -131,6 +157,8 @@ def main(argv=None):
                        help="CDR definition used for the variant ladder")
     p_run.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
     p_run.add_argument("--antigen", default=None, help="antigen sequence (AF3 complex)")
+    p_run.add_argument("--calibration", default=None,
+                       help="calibration.json from `humanize learn` (empirical scoring)")
     p_run.add_argument("--donor-structure", default=None, help="donor PDB/CIF")
     p_run.add_argument("--af3-mode", default="off", choices=["off", "local", "api"])
     p_run.add_argument("--af3-binary", default="", help="path to run_alphafold.py")
@@ -145,6 +173,15 @@ def main(argv=None):
 
     p_c = sub.add_parser("setup-check", help="report available tools")
     p_c.set_defaults(func=cmd_setup_check)
+
+    p_l = sub.add_parser(
+        "learn", help="fit empirical position effects from experiment data")
+    p_l.add_argument("--experiments", required=True,
+                     help="experiments JSON (parent + variants + KD)")
+    p_l.add_argument("--out", default="calibration.json",
+                     help="output calibration file")
+    p_l.add_argument("--germline-dir", default="")
+    p_l.set_defaults(func=cmd_learn)
 
     args = ap.parse_args(argv)
     try:

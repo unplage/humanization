@@ -138,21 +138,22 @@ def _dist(a, b):
 def compute_hints(
     model: PDBModel,
     chain_label: str,
-    cdr_positions: Dict[str, List[str]],
+    position_map: Dict[str, int],
+    cdr_positions: Dict[str, int],
     antigen_chains: Optional[List[str]] = None,
 ) -> StructureHints:
     """Compute per-position hints for a chain in the model.
 
-    chain_label: PDB chain id of the target chain (e.g. "H").
-    cdr_positions: Kabat positions per CDR (or plain residue numbers).
+    chain_label:  PDB chain id of the target chain (e.g. "H").
+    position_map: {Kabat pos: residue number} for ALL residues of the chain.
+    cdr_positions:{Kabat pos: residue number} for CDR residues only.
     """
     heavy = model.heavy_atoms()
     by_res: Dict[Tuple[str, int], List] = {}
     for (ch, resseq), name, xyz in heavy:
         by_res.setdefault((ch, resseq), []).append((name, xyz))
 
-    # which residues are CDR residues (by Kabat pos -> resseq mapping
-    # provided by caller via cdr_positions: {pos: resseq})
+    # which residues are CDR residues
     cdr_resseqs = {v for v in cdr_positions.values() if isinstance(v, int)}
     cdr_atoms = [a for a in heavy if (a[0][1] in cdr_resseqs)]
     ag_resseqs = set()
@@ -161,11 +162,12 @@ def compute_hints(
     ag_atoms = [a for a in heavy if (a[0][1] in ag_resseqs)]
 
     # map resseq -> kabat pos
-    resseq_to_pos = {v: k for k, v in cdr_positions.items()}
+    resseq_to_pos = {v: k for k, v in position_map.items()}
 
     buried: Dict[str, bool] = {}
     cdr_contact: Dict[str, bool] = {}
     ag_contact: Dict[str, bool] = {}
+    cdr_partners: Dict[str, List[str]] = {}
     for (ch, resseq), atoms in by_res.items():
         if ch != chain_label:
             continue
@@ -184,11 +186,16 @@ def compute_hints(
                         contacts += 1
                         break
         buried[pos] = contacts >= 20 or (n_heavy >= 6 and contacts / max(n_heavy, 1) >= 4)
-        # CDR contact: any atom within 4.5 A of a CDR atom
-        cdr_contact[pos] = any(
-            _dist(a2[2], a1[2]) < 4.5
-            for (r2, _n2, a2) in cdr_atoms for (_n1, a1) in atoms
-        )
+        # CDR contact: any atom within 4.5 A of a CDR atom; record partners
+        partners = set()
+        for (r2, _n2, a2) in cdr_atoms:
+            if _dist(a2[2], atoms[0][1]) < 4.5:
+                ppos = resseq_to_pos.get(r2[1])
+                if ppos:
+                    partners.add(ppos)
+        cdr_contact[pos] = bool(partners)
+        if partners:
+            cdr_partners[pos] = sorted(partners)
         if ag_atoms:
             ag_contact[pos] = any(
                 _dist(a2[2], a1[2]) < 4.5
@@ -198,6 +205,7 @@ def compute_hints(
         "buried": buried,
         "cdr_contact": cdr_contact,
         "antigen_contact": ag_contact,
+        "cdr_partners": cdr_partners,
     })
 
 

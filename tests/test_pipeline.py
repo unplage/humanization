@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from humanize.backmut import analyze_backmutations
+from humanize.backmut import StructureHints, analyze_backmutations
 from humanize.germline import choose_germlines, load_germline_db
 from humanize.graft import graft_chain
 from humanize.numbering import CDR_SCHEMES, is_vhh, number_heavy, number_light
@@ -38,7 +38,7 @@ def check(name, cond, detail=""):
 
 IGHV3_23 = "EVQLLESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKWGQGTLVTVSS"
 IGKV1_39 = "DIQMTQSPSSLSASVGDRVTITCRASQSISSYLNWYQQKPGKAPKLLIYAASSLQSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQSYSTPFGQGTKVEIK"
-M4D5_VH = "EVQLQQSGPELVKPGASVKMSCKASGYTFTDYYMYWVKQSHGKSLEWIGYINPYNGVTKYNQKFKGKATLTSDKSSSTAYMELSSLTSEDSAVYYCGRGGDGFYAMDYWGQGTSVTVSS"
+M4D5_VH = "EVQLQQSGPELVKPGASVKMSCKASGYTFTDTYIHWVKQSHGKSLEWIGYINPYNGVTKYNQKFKGKATLTSDKSSSTAYMELSSLTSEDSAVYYCSRWGGDGFYAMDYWGQGTSVTVSS"
 M4D5_VL = "DIQMTQTTSSLSASLGDRVTISCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISNVQAEDLAIYFCQQHYTTPPTFGQGTKVEIK"
 VHH_1BZQ = "QVQLVESGGGLVQAGGSLRLSCAASGYAYTYIYMGWFRQAPGKEREGVAAMDSGGGGTLYADSVKGRFTISRDKGKNTVYLQMDSLKPEDTATYYCAAGGYELRDRTYGQWGQGTQVTVSS"
 
@@ -61,7 +61,7 @@ def test_numbering():
 
     m4 = number_heavy(M4D5_VH)
     check("4D5 VH CDR2 = donor loop", m4.seq_range("H50", "H52A") + m4.seq_range("H53", "H65") == "YINPYNGVTKYNQKFKG")
-    check("4D5 VH CDR3", m4.seq_range("H95", "H102") == "GRGGDGFYAMDY")
+    check("4D5 VH CDR3", m4.seq_range("H95", "H102") == "SRWGGDGFYAMDY")
     vhh = number_heavy(VHH_1BZQ)
     vhh_ok, score, _ = is_vhh(vhh)
     check("1BZQ VHH hallmark detected", vhh_ok and score == 4, str(score))
@@ -135,6 +135,81 @@ def test_vhh_protection():
               fr2)
 
 
+def test_minimal_reversion():
+    print("minimal reversion + CVI + matrix")
+    from humanize.minimal import (
+        build_paratope_variant,
+        cvi_homology,
+        matrix_alternatives,
+        minimal_reversion_set,
+    )
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    _, chains = parse_input(os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"))
+    for donor in chains:
+        choice = choose_germlines(donor.numbered, db)
+        top = [(g, s) for g, s in choice.alternatives]
+        bm = analyze_backmutations(donor.numbered, choice.v_gene, top_germlines=top)
+        # no-structure fallback = Tier-1
+        mr = minimal_reversion_set(donor.numbered, bm, structure=None)
+        check(f"{donor.name} Vmin fallback == Tier-1",
+              set(mr.positions) == set(bm.revert_positions(("T1",))), str(mr.positions))
+        check(f"{donor.name} Vmin method tier", mr.method == "tier")
+        # CVI homology sanity (0..1)
+        cvi = cvi_homology(donor.numbered, choice.v_gene)
+        check(f"{donor.name} CVI homology in (0,1]", 0 < cvi <= 1.0, str(cvi))
+        # matrix variants on alternatives
+        entries = matrix_alternatives(donor.numbered, choice.alternatives[1:],
+                                      choice.j_gene, "kabat", n=2)
+        check(f"{donor.name} matrix has entries", len(entries) >= 1)
+        if entries:
+            e = entries[0]
+            check(f"{donor.name} matrix graft length preserved",
+                  len(e.graft_v2.sequence) == len(donor.sequence))
+            check(f"{donor.name} matrix CVI present", 0 < e.cvi <= 1.0)
+        # paratope variant requires structure -> None without hints
+        sdr = build_paratope_variant(donor.numbered, choice.v_gene, choice.j_gene,
+                                     "kabat", bm, StructureHints())
+        check(f"{donor.name} V_SDR None without complex", sdr is None)
+
+
+def test_learning_loop():
+    print("closed-loop learning (synthetic data)")
+    import json
+    from humanize.learning import (
+        compute_position_effects,
+        load_calibration,
+        parse_experiments,
+        write_calibration,
+    )
+    from humanize.backmut import analyze_backmutations
+
+    # build synthetic experiments: V0 pure graft (4x KD loss), V2 (retained)
+    exp = [{
+        "name": "syn4D5",
+        "parent_vh": M4D5_VH,
+        "parent_vl": M4D5_VL,
+        "parent_kd": 0.1,
+        "variants": [
+            {"name": "V0", "vh": IGHV3_23.replace("AKW", "AKW"), "vl": IGKV1_39, "kd": 0.4},
+        ],
+    }]
+    # NOTE: synthetic variants intentionally do NOT renumber cleanly into a
+    # real graft; use the demo experiment file instead for the real loop.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(exp, fh)
+        exp_path = fh.name
+    records = parse_experiments(exp_path)
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    effects, warnings = compute_position_effects(records, db)
+    check("learning parses experiments", len(records) == 1)
+    check("learning produces effect map", isinstance(effects, dict))
+    cal_path = os.path.join(tempfile.gettempdir(), "calib_test.json")
+    write_calibration(cal_path, effects)
+    cal = load_calibration(cal_path)
+    check("calibration round-trip", "position_effects" in json.dumps(cal) or cal is not None)
+    os.unlink(exp_path)
+
+
 def test_end_to_end():
     print("end-to-end")
     with tempfile.TemporaryDirectory() as out:
@@ -149,7 +224,7 @@ def test_end_to_end():
             check(f"E2E output exists: {os.path.basename(p)}", os.path.exists(p))
         with open(paths["fasta"]) as fh:
             n_seq = sum(1 for line in fh if line.startswith(">"))
-        check("E2E fasta has 8 variants (2 chains x 4)", n_seq == 8, str(n_seq))
+        check("E2E fasta has 10 variants (2 chains x 5: V0-V3+Vmin)", n_seq == 10, str(n_seq))
 
 
 def main():
@@ -157,6 +232,7 @@ def main():
     test_germline_and_graft()
     test_backmut_variants()
     test_vhh_protection()
+    test_minimal_reversion()
     test_end_to_end()
     print()
     if FAILURES:

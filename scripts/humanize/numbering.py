@@ -275,20 +275,32 @@ def _find_c92(s: str, w_idx: int, n: int) -> Optional[int]:
 
 def _find_j_anchor(s: str, start: int, end: int, chain_type: str) -> Optional[int]:
     """Find the J-region anchor (H: W of 'WGXG..', L: F of 'FGQG..').
-    Uses the LAST plausible match so internal CDR3 motifs are not mistaken
-    for the J region."""
+    Strategies (in order of preference):
+      1. 4-char motif  W-X-X-G / F-X-X-Q  (matches WGQG, not CDR3 'WGG..')
+      2. 3-char motif  W-[GRA...]-[QGS]   (fallback for unusual J alleles)
+      3. LAST match is preferred (the J region follows the CDR3), and a
+         candidate whose downstream 6 residues match the J consensus
+         (G..GTLVTVSS / G..GTKLTVL) is strongly preferred."""
     if chain_type == "H":
-        pats = [r"W[GRASLVQFY]G", r"W[GRASLVQFY][QGS]"]
+        pats = [r"W[GRASLVQFKY][GRASLVQFKT]G", r"W[GRASLVQFY][QGS]"]
+        j_tail = r"[GQ][GT][QLV][TV][VT][VS]"
     else:
         pats = [r"FG[GQSTPE][GTKQE]", r"F[GSTPE][GQSTPEK]"]
+        j_tail = r"[GQ][GT][QKE][GT][KLTV]"
+    best = None
+    best_tail = False
     for pat in pats:
-        ms = list(re.finditer(pat, s[start:end]))
-        if ms:
-            return start + ms[-1].start()
-    # fallback: the anchor is the first F of the J region (<=3 residues past
-    # the CDR3 end), typically right after the C-terminal Cys of the FR3
+        for m in re.finditer(pat, s[start:end]):
+            idx = start + m.start()
+            tail_ok = bool(re.match(j_tail, s[idx + 2 : idx + 8]))
+            if best is None or (tail_ok and not best_tail) or (tail_ok == best_tail and idx > best):
+                best, best_tail = idx, tail_ok
+    if best is not None:
+        return best
+    # final fallback: the anchor is the first W/F at the start of the
+    # J-consensus stretch (<=3 residues past the CDR3 end)
     for i in range(start, min(start + 4, end)):
-        if s[i] == "F":
+        if s[i] == ("W" if chain_type == "H" else "F"):
             return i
     return None
 

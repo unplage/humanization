@@ -26,6 +26,7 @@ from .config import (
     VHH_HALLMARK,
     WEIGHTS,
 )
+from .learning import effect_thresholds
 from .germline import GermlineDB, GermlineGene
 from .numbering import NumberedChain
 
@@ -52,6 +53,9 @@ class BackMutationCandidate:
     buried: Optional[bool] = None
     cdr_contact: Optional[bool] = None
     antigen_contact: Optional[bool] = None
+    empirical_ddG: Optional[float] = None   # kcal/mol from experiments
+    empirical_n: int = 0
+    empirical_note: str = ""
 
 
 @dataclass
@@ -69,7 +73,15 @@ class BackMutationResult:
 
 
 class StructureHints:
-    """Structural annotations from AF3 (optional). None = unknown."""
+    """Structural annotations from AF3 (optional). None = unknown.
+
+    data keys:
+      buried          {pos: bool}
+      cdr_contact     {pos: bool}      framework residue contacts any CDR
+      antigen_contact {pos: bool}      framework/CDR residue contacts antigen
+      cdr_partners    {fr_pos: [cdr_pos, ...]}  which CDR residues a
+                       framework residue contacts (heavy atom < 4.5 A)
+    """
 
     def __init__(self, data: Optional[dict] = None):
         self.data = data or {}
@@ -85,6 +97,11 @@ class StructureHints:
     def antigen_contact(self, chain: str, pos: str) -> Optional[bool]:
         d = self.data.get("antigen_contact")
         return d.get(pos) if d else None
+
+    def cdr_partners(self, pos: str) -> set:
+        d = self.data.get("cdr_partners") or {}
+        v = d.get(pos) or []
+        return set(v)
 
     def exposure(self, pos: str) -> float:
         b = self.buried("", pos)
@@ -103,6 +120,7 @@ def analyze_backmutations(
     is_vhh: bool = False,
     structure: Optional[StructureHints] = None,
     top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
+    calibration: Optional[Dict[str, dict]] = None,
 ) -> BackMutationResult:
     """Score all framework positions where donor != chosen germline."""
     chain_type = donor.chain_type
@@ -203,8 +221,40 @@ def analyze_backmutations(
             + WEIGHTS["blend"][2] * max(0, min(1, chem))
         ), 1)
 
+        # ---- empirical calibration (from experiment data) ----
+        empirical_ddG = None
+        empirical_n = 0
+        empirical_note = ""
+        if calibration:
+            entry = calibration.get(pos)
+            if entry:
+                empirical_ddG = float(entry.get("ddG_kcal", 0.0))
+                empirical_n = int(entry.get("n_variants", 0))
+                adj = effect_thresholds(empirical_ddG, empirical_n)
+                if adj == "keep_donor":
+                    if tier in ("T1", "T2", "T3"):
+                        tier = "T1"
+                        empirical_note = (f"empirical: donor retains affinity "
+                                          f"(ddG +{empirical_ddG:.2f}, n={empirical_n})")
+                        composite = max(composite, 70.0)
+                elif adj == "promote":
+                    if tier == "T3":
+                        tier = "T2"
+                    empirical_note = (f"empirical: mild benefit of donor "
+                                      f"(ddG +{empirical_ddG:.2f}, n={empirical_n})")
+                elif adj == "demote":
+                    if tier in ("T1", "T2"):
+                        tier = "T3"
+                    empirical_note = (f"empirical: human residue tolerated "
+                                      f"(ddG {empirical_ddG:.2f}, n={empirical_n})")
+                    composite = min(composite, 40.0)
+                elif adj == "neutral" and empirical_n >= 2:
+                    empirical_note = f"empirical: no effect (ddG {empirical_ddG:+.2f}, n={empirical_n})"
+
         rationale = _rationale(features, tier, buried, cdr_contact, ag_contact,
                                exposure, conservation_val, donor_aa, human_aa)
+        if empirical_note:
+            rationale.append(empirical_note)
 
         candidates.append(BackMutationCandidate(
             position=pos,
@@ -220,6 +270,8 @@ def analyze_backmutations(
             buried=buried,
             cdr_contact=cdr_contact,
             antigen_contact=ag_contact,
+            empirical_ddG=empirical_ddG,
+            empirical_n=empirical_n,
         ))
 
     return BackMutationResult(

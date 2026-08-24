@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+from .minimal import MinimalReversion
 
 from .backmut import BackMutationResult, StructureHints, analyze_backmutations
 from .germline import (
@@ -42,6 +43,7 @@ class PipelineConfig:
     mpnn: MPNNConfig = field(default_factory=MPNNConfig)
     antigen_seq: Optional[str] = None  # for AF3 complex prediction
     donor_structure: Optional[str] = None  # PDB/CIF of donor (for CDR RMSD)
+    calibration_path: Optional[str] = None  # calibration.json from `humanize learn`
     mock_structures: bool = True       # run without AF3/MPNN
 
     def __post_init__(self):
@@ -58,6 +60,10 @@ class ChainReport:
     variants: List[Variant] = field(default_factory=list)
     human_likeness: Dict[str, float] = field(default_factory=dict)
     structure_hints: StructureHints = field(default_factory=StructureHints)
+    cvi_homology: float = 0.0
+    minimal_reversion: Optional["MinimalReversion"] = None
+    sdr_graft: Optional[GraftResult] = None
+    matrix: List = field(default_factory=list)
 
 
 @dataclass
@@ -168,15 +174,43 @@ def _process_chain(
         if model:
             # map Kabat positions to model residue numbers (chain label H/L/A)
             label = "H" if ctype == "H" else "L"
-            cdrs = {r.pos: r.index + 1 for r in donor.residues if r.region.startswith("CDR")}
+            all_pos = {r.pos: r.index + 1 for r in donor.residues}
+            cdrs = {p: n for p, n in all_pos.items() if (donor.region_of(p) or "").startswith("CDR")}
             ag_chains = ["A"] if antigen else None
-            hints = _compute_hints_with_model(model, label, cdrs, ag_chains)
+            hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains)
 
     # ---- back-mutation analysis ----
     top = [(g, s) for g, s in choice.alternatives]
+    calibration = None
+    if config.calibration_path and os.path.exists(config.calibration_path):
+        from .learning import load_calibration
+        calibration = load_calibration(config.calibration_path)
     backmut = analyze_backmutations(
         donor, v_gene, is_vhh=is_vhh, structure=hints, top_germlines=top,
+        calibration=calibration,
     )
+
+    # ---- minimal-reversion & precision design ----
+    from .minimal import (
+        build_paratope_variant,
+        cvi_homology,
+        matrix_alternatives,
+        minimal_reversion_set,
+    )
+    minrev = minimal_reversion_set(donor, backmut, structure=hints)
+    sdr_graft = None
+    if config.antigen_seq:
+        sdr_graft = build_paratope_variant(
+            donor, v_gene, j_gene, config.cdr_scheme, backmut, hints,
+            is_vhh=is_vhh,
+        )
+    cvi = cvi_homology(donor, v_gene)
+    matrix: List[MatrixEntry] = []
+    if len(choice.alternatives) > 1:
+        matrix = matrix_alternatives(
+            donor, choice.alternatives[1:], j_gene, config.cdr_scheme,
+            is_vhh=is_vhh, n=min(3, len(choice.alternatives) - 1),
+        )
 
     # ---- grafts (all requested schemes, for reporting) ----
     grafts = {}
@@ -191,6 +225,29 @@ def _process_chain(
     variants = assemble_variants(
         donor, v_gene, j_gene, config.cdr_scheme, backmut, is_vhh=is_vhh,
     )
+    # append the affinity-preserving minimal variant (V2 + V_min comparison)
+    if minrev.positions and set(minrev.positions) != set(backmut.revert_positions(("T1", "T2"))):
+        from .variants import Variant
+        from .graft import graft_variant
+        g_min = graft_variant(
+            donor, v_gene, j_gene, config.cdr_scheme, minrev.positions, is_vhh=is_vhh,
+        )
+        variants.append(Variant(
+            name=f"{ctype}_Vmin",
+            description=f"minimal reversion set ({minrev.method}, "
+                        f"{minrev.covered_contacts}/{minrev.total_contacts} contacts kept)",
+            graft=g_min,
+            backmutations=minrev.positions,
+        ))
+    if sdr_graft is not None:
+        from .variants import Variant
+        variants.append(Variant(
+            name=f"{ctype}_V_SDR",
+            description="paratope-only grafting (antigen-contacting CDR "
+                        "residues + structural pillars)",
+            graft=sdr_graft,
+            backmutations=[],
+        ))
 
     # ---- human-likeness ----
     hl = {}
@@ -205,6 +262,10 @@ def _process_chain(
         variants=variants,
         human_likeness=hl,
         structure_hints=hints,
+        cvi_homology=cvi,
+        minimal_reversion=minrev,
+        sdr_graft=sdr_graft,
+        matrix=matrix,
     )
 
 
@@ -212,6 +273,6 @@ def _partner_sequence(chain: InputChain, _all_chains) -> Optional[str]:
     return None  # Fv-only partner chain prediction handled at pipeline level
 
 
-def _compute_hints_with_model(model, label, cdrs, ag_chains):
+def _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains):
     from .structure import compute_hints
-    return compute_hints(model, label, cdrs, ag_chains)
+    return compute_hints(model, label, all_pos, cdrs, ag_chains)

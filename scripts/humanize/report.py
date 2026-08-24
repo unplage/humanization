@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 from .backmut import BackMutationResult
 from .config import TIER_LABELS
+from .minimal import MatrixEntry, MinimalReversion
 from .pipeline import ChainReport, RunResult
 
 
@@ -24,13 +25,14 @@ def write_csv(path: str, backmut: BackMutationResult) -> None:
         w.writerow([
             "position", "donor_aa", "human_aa", "tier", "composite",
             "structural", "benefit", "chemical", "buried", "cdr_contact",
-            "antigen_contact", "features", "rationale",
+            "antigen_contact", "empirical_ddG", "empirical_n", "features", "rationale",
         ])
         for c in backmut.candidates:
             w.writerow([
                 c.position, c.donor_aa, c.human_aa, c.tier, c.composite,
                 c.structural_score, c.benefit_score, c.chemical_score,
                 c.buried, c.cdr_contact, c.antigen_contact,
+                c.empirical_ddG, c.empirical_n,
                 "+".join(c.features), "; ".join(c.rationale),
             ])
 
@@ -49,6 +51,7 @@ def write_json(path: str, result: RunResult) -> None:
             "chain_type": chain.chain_type,
             "is_vhh": chain.is_vhh,
             "sequence": chain.sequence,
+            "cvi_homology": rep.cvi_homology,
             "germline": {
                 "v_gene": rep.germline.v_gene.gene_id if rep.germline.v_gene else None,
                 "j_gene": rep.germline.j_gene.gene_id if rep.germline.j_gene else None,
@@ -58,6 +61,23 @@ def write_json(path: str, result: RunResult) -> None:
                     (g.gene_id, s) for g, s in rep.germline.alternatives[:5]
                 ],
             },
+            "minimal_reversion": (
+                {
+                    "positions": rep.minimal_reversion.positions,
+                    "method": rep.minimal_reversion.method,
+                    "covered_contacts": rep.minimal_reversion.covered_contacts,
+                    "total_contacts": rep.minimal_reversion.total_contacts,
+                    "note": rep.minimal_reversion.note,
+                } if rep.minimal_reversion else None
+            ),
+            "framework_matrix": [
+                {
+                    "germline": e.germline.gene_id,
+                    "cvi_homology": e.cvi,
+                    "n_backmutations": len(e.backmut.revert_positions(("T1", "T2"))),
+                }
+                for e in rep.matrix
+            ],
             "human_likeness": rep.human_likeness,
             "backmutations": [
                 {
@@ -71,6 +91,8 @@ def write_json(path: str, result: RunResult) -> None:
                     "chemical": c.chemical_score,
                     "features": c.features,
                     "rationale": c.rationale,
+                    "empirical_ddG": c.empirical_ddG,
+                    "empirical_n": c.empirical_n,
                 }
                 for c in rep.backmut.candidates
             ],
@@ -119,14 +141,35 @@ def write_markdown(path: str, result: RunResult) -> None:
             L.append(f"**Human-likeness (FR germline identity, pure graft):** "
                      + ", ".join(f"{k} {v:.1f}%" for k, v in rep.human_likeness.items()))
             L.append("")
+        L.append(f"**CVI homology (canonical+vernier+interface vs donor, BI 2024):** "
+                 f"{rep.cvi_homology:.3f}")
+        if rep.minimal_reversion is not None:
+            mr = rep.minimal_reversion
+            L.append("")
+            L.append(f"**Minimal reversion set** ({mr.method}): "
+                     f"{', '.join(mr.positions) or '(none beyond graft)'} "
+                     f"| contacts preserved {mr.covered_contacts}/{mr.total_contacts} "
+                     f"| {mr.note}")
+        if rep.matrix:
+            L.append("")
+            L.append("**Framework matrix (alternative germlines, V2-class):**")
+            L.append("")
+            L.append("| germline | CVI homology | # back-mutations |")
+            L.append("|----------|--------------|-----------------|")
+            for e in rep.matrix:
+                L.append(f"| {e.germline.gene_id} | {e.cvi:.3f} | "
+                         f"{len(e.backmut.revert_positions(('T1', 'T2')))} |")
+            L.append("")
+        L.append("")
 
         L.append("### Back-mutation candidates (framework positions)")
         L.append("")
-        L.append("| pos | donor | human | tier | score | features |")
-        L.append("|-----|-------|-------|------|-------|----------|")
+        L.append("| pos | donor | human | tier | score | empirical ddG | features |")
+        L.append("|-----|-------|-------|------|-------|---------------|----------|")
         for c in sorted(rep.backmut.candidates, key=lambda c: -c.composite):
             tier_txt = c.tier + (" " + TIER_LABELS[c.tier][:24] if c.tier in TIER_LABELS else "")
-            L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {tier_txt} | {c.composite} | "
+            emp = f"{c.empirical_ddG:+.2f} (n={c.empirical_n})" if c.empirical_ddG is not None else "-"
+            L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {tier_txt} | {c.composite} | {emp} | "
                      f"{'+'.join(c.features) or '-'} |")
         L.append("")
         counts = {}

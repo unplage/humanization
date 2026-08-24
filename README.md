@@ -25,6 +25,9 @@ AlphaFold3 结构评分与 ProteinMPNN 设计。
 - [变体梯度](#变体梯度)
 - [结构模式（服务器）](#结构模式服务器)
 - [验证与金标准](#验证与金标准)
+- [改进路线图与行业对比](#改进路线图与行业对比)
+- [回测报告](#回测报告)
+- [实验数据闭环学习](#实验数据闭环学习)
 - [实验验证 SOP](#实验验证-sop)
 - [服务器部署](#服务器部署)
 - [FAQ](#faq)
@@ -41,8 +44,9 @@ AlphaFold3 结构评分与 ProteinMPNN 设计。
 | 零依赖便携核心 | anchor-based Kabat 编号引擎为纯标准库实现；germline 数据内置（373 V + 28 J 人源基因） |
 | 多套 CDR 定义 | Kabat / Chothia / AbM / IMGT 边界同时报告；变体梯度可任选一套 |
 | 回复突变量化评分 | 结构（vernier/界面/canonical/接触/埋藏）+ 免疫原性 + 可开发性三维评分，输出 T1/T2/T3/KEEP_DONOR 分级与依据 |
-| 变体梯度 | V0 纯移植 → V1(T1) → V2(T1+T2，推荐) → V3(+暴露 T3) |
-| 结构模式 | AlphaFold3 预测 → 埋藏度/CDR 接触/抗原接触回注评分；变体 CDR 环 RMSD、界面与抗原接触保留率验收 |
+| 变体梯度 | V0 纯移植 → V1(T1) → V2(T1+T2，推荐) → V3(+暴露 T3) → **Vmin**（最小回复集）→ **V_SDR**（paratope 精确移植，需抗原复合物） |
+| 结构模式 | AlphaFold3 预测 → 埋藏度/CDR 接触/**接触对**/抗原接触回注评分；变体 CDR 环 RMSD、界面与抗原接触保留率验收 |
+| 亲和力优先设计 | **CVI 同源性指标**（BI 2024）、**最小回复突变集**（set-cover，Vmin）、**框架矩阵变体**（多 germline 面板）、**paratope 移植**（V_SDR） |
 | 可开发性检查 | N-糖基化 / 脱酰胺 / 异构化 / 氧化风险基序自动扫描 |
 | 完整报告 | Markdown + JSON + 逐位点 CSV + variants FASTA |
 | 实验 SOP | 基因合成 → Expi293 表达 → BLI/SPR → 可开发性面板 → Go/No-Go 标准（6–10 周） |
@@ -276,6 +280,30 @@ chemical       = 去除 NxS/T(+0.8) / NG,NS(+0.5) / DG(+0.4) / M,W(+0.3)
 完整验证方案（含 ANARCI 交叉验证与结构验收）见 `docs/validation.md`。
 
 ---
+
+## 改进路线图与行业对比
+
+`docs/improvement_roadmap.md`：当前版本差距分析、业界方案对比
+（WeMol / BioPhi / CUMAb / 矩阵移植 / paratope 移植 / HuAbDiffusion / SITA）、
+专利要点、经典案例对照与 P0–P2 优先路线图。
+
+## 回测报告
+
+`docs/backtest_report.md` + `tests/backtest.py`：用真实获批案例
+（4D5→曲妥珠单抗、A4.6.1→贝伐珠单抗）回测管线——结构关键位点召回率 1.0，
+无关键漏报；并修正了流传的鼠源 4D5 CDR 序列错误（应为 DTYIH/SRWGGDGFYAMDY）。
+
+## 实验数据闭环学习
+
+`docs/learning_loop.md`：把实测 KD 数据回注到评分模型——`humanize learn`
+从实验记录（亲本+变体+KD）拟合逐位点效应（ΔΔG），生成 `calibration.json`；
+后续 `humanize run --calibration ...` 自动用实测效应修正 T1/T2/T3 分级
+与分数（报告新增 empirical ddG 列）。支持多轮迭代与跨项目资产复用。
+
+```bash
+python3 scripts/humanize/cli.py learn --experiments experiments.json --out calibration.json
+python3 scripts/humanize/cli.py run --input seq.fasta --calibration calibration.json
+```
 
 ## 实验验证 SOP
 
