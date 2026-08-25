@@ -69,11 +69,21 @@ WEIGHTS = {
         "buried_mismatch": 0.35,    # buried non-human residue (weak benefit)
     },
     "chemical": {
-        "removes_nglycan": 0.8,     # NxS/T motif broken by reversion
-        "removes_deamidation": 0.5, # NG / NS
-        "removes_isomerization": 0.4,  # DG
-        "removes_oxidation": 0.3,   # M / W in exposed loops
-        "introduces_nglycan": -0.8, # reversion would CREATE an N-glycan motif
+        "removes_nglycan": 0.80,              # NxS/T motif broken by reversion (高风险)
+        "removes_deamidation_ng": 0.55,       # NG 热点脱酰胺 (Lu 2018: CDR H2/L1)
+        "removes_deamidation_ns": 0.50,       # NS 中等脱酰胺
+        "removes_deamidation_nh": 0.40,       # NH 中低风险
+        "removes_deamidation_nd": 0.35,       # ND 低风险
+        "removes_isomerization_dg": 0.50,     # DG 最常见异构化位点 (FRIDA 2024)
+        "removes_isomerization_ds": 0.40,     # DS 中等异构化
+        "removes_isomerization_dt": 0.40,     # DT 中等异构化
+        "removes_isomerization_dh": 0.35,     # DH 中低风险
+        "removes_acid_hydrolysis": 0.45,      # D-X (X=small residue) 肽键断裂
+        "removes_acid_hydrolysis_dd": 0.55,   # DD 高风险：异构化+酸性水解 (PubMed 2013)
+        "removes_oxidation": 0.30,            # M / W / C 氧化
+        "removes_base_hydrolysis": 0.25,      # K-X (X=D/E) 碱性水解 (罕见)
+        "removes_met_lyscleavage": 0.25,      # MK 金属蛋白酶裂解
+        "introduces_nglycan": -0.80,          # reversion would CREATE an N-glycan motif (惩罚)
     },
     "blend": (0.55, 0.30, 0.15),    # structural, immunogenicity, chemical
 }
@@ -113,13 +123,42 @@ TIER_LABELS = {
 # ---------------------------------------------------------------------------
 # Developability risk motifs (sequence level)
 # ---------------------------------------------------------------------------
+# WARNING: 以下风险基团仅基于序列模式检测，未考虑三维结构暴露状态。
+# 埋藏在蛋白核心的位点实际风险较低，表面暴露位点风险更高。
+# 如需精确评估，请结合 AF3/结构数据判断 relSASA 或溶剂可及性。
+# 参考：Rajan et al., MAbs 2021; Boosted et al., J Pharm Sci 2022.
 
 RISK_MOTIFS = {
-    "N-glycan (NxS/T)": r"N[^P][ST]",
-    "deamidation (NG)": r"NG",
-    "deamidation (NS)": r"NS",
-    "isomerization (DG)": r"DG",
-    "oxidation (M)": r"M",
-    "oxidation (W)": r"W",
-    "unpaired Cys": r"C",
+    # === 糖基化风险 ===
+    "N-glycan (NxS/T)": r"N[^P][ST]",           # N-X-S/T (X≠P) 被糖基化
+
+    # === 脱酰胺风险 (Asn → Asp/isoAsp) ===
+    "deamidation (NG)": r"NG",                   # 高风险：Asn-Gly
+    "deamidation (NS)": r"NS",                   # 中风险：Asn-Ser
+    "deamidation (NH)": r"NH",                   # 中风险：Asn-His（新增）
+    "deamidation (ND)": r"ND",                   # 低风险：Asn-Asp（新增）
+
+    # === 异构化风险 (Asp → isoAsp) ===
+    "isomerization (DG)": r"DG",                 # 高风险：Asp-Gly
+    "isomerization (DS)": r"DS",                 # 中风险：Asp-Ser（新增）
+    "isomerization (DT)": r"DT",                 # 中风险：Asp-Thr（新增）
+    "isomerization (DH)": r"DH",                 # 低风险：Asp-His（新增）
+
+    # === 酸性水解风险 (Asp-X 肽键断裂) ===
+    "acid hydrolysis (D-X)": r"D[AGSVTLIP]",    # Asp 后接小侧链残基（新增）
+    "acid hydrolysis (DD)": r"DD",               # Asp-Asp 高风险：酸性水解（新增）
+
+    # === 氧化风险 ===
+    "oxidation (M)": r"M",                       # 甲硫氨酸 → 亚砜/砜
+    "oxidation (W)": r"W",                       # 色氨酸 → 氧化产物
+    "oxidation (C)": r"C",                       # 半胱氨酸 → 磺基丙氨酸（新增）
+
+    # === 二硫键/聚集风险 ===
+    "unpaired Cys": r"C",                        # 未配对半胱氨酸 → 错误配对/聚集
+
+    # === 碱性水解风险（新增）===
+    "base hydrolysis (K-X)": r"K[DE]",           # Lys-Asp/Glu 肽键在碱性条件断裂
+
+    # === Met-Lys 裂解（新增）===
+    "met-lyscleavage (MK)": r"MK",               # 金属蛋白酶裂解位点
 }

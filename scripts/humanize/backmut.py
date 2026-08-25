@@ -199,6 +199,8 @@ def analyze_backmutations(
             benefit = min(benefit, 0.45)   # exposed non-structural: low value
 
         # ---- chemical score (developability) ----
+        # WARNING: 仅基于序列模式检测，未考虑结构暴露状态；
+        # 埋藏位点实际风险较低，表面暴露位点风险更高。
         wc = WEIGHTS["chemical"]
         chem = 0.0
         # effect of reverting donor->human at this position: scan a window
@@ -208,9 +210,27 @@ def analyze_backmutations(
         else:
             ridx = rpos.index
         win_d = donor.sequence[max(0, ridx - 2): ridx + 3]
+        # N-glycan (NxS/T)
         chem += wc["removes_nglycan"] if _motif_hit(win_d, r"N[^P][ST]") else 0
-        chem += wc["removes_deamidation"] if _motif_hit(win_d, r"N[GS]") else 0
-        chem += wc["removes_isomerization"] if _motif_hit(win_d, r"DG") else 0
+        # deamidation: NG > NS > NH > ND (不同权重)
+        chem += wc["removes_deamidation_ng"] if _motif_hit(win_d, r"NG") else 0
+        chem += wc["removes_deamidation_ns"] if _motif_hit(win_d, r"NS") else 0
+        chem += wc["removes_deamidation_nh"] if _motif_hit(win_d, r"NH") else 0
+        chem += wc["removes_deamidation_nd"] if _motif_hit(win_d, r"ND") else 0
+        # isomerization: DG > DS = DT > DH (不同权重)
+        chem += wc["removes_isomerization_dg"] if _motif_hit(win_d, r"DG") else 0
+        chem += wc["removes_isomerization_ds"] if _motif_hit(win_d, r"DS") else 0
+        chem += wc["removes_isomerization_dt"] if _motif_hit(win_d, r"DT") else 0
+        chem += wc["removes_isomerization_dh"] if _motif_hit(win_d, r"DH") else 0
+        # acid hydrolysis (D-X where X is small residue) and DD (high risk)
+        chem += wc["removes_acid_hydrolysis"] if _motif_hit(win_d, r"D[AGSVTLIP]") else 0
+        chem += wc["removes_acid_hydrolysis_dd"] if _motif_hit(win_d, r"DD") else 0
+        # oxidation (M / W / C)
+        chem += wc["removes_oxidation"] if _motif_hit(win_d, r"[MWC]") else 0
+        # base hydrolysis (K-X where X is D/E)
+        chem += wc["removes_base_hydrolysis"] if _motif_hit(win_d, r"K[DE]") else 0
+        # metalloprotease cleavage (MK)
+        chem += wc["removes_met_lyscleavage"] if _motif_hit(win_d, r"MK") else 0
 
         # ---- tier ----
         tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
