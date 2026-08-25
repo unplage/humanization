@@ -89,14 +89,30 @@ Recommended production variant: **V2 (T1+T2)**. V1 when framework identity is
 high and risk tolerance low; V3 only when additional humanization is demanded
 (e.g. repeated anti-drug-antibody responses), accepting affinity risk.
 
-## 4. Germline selection (why "hybrid")
+## 4. Germline selection (multi-strategy)
 
-- Primary: **framework identity** (FR1+FR2+FR3) — a poor framework match means
-  many back-mutations.
-- Tie-break within top-FR genes: **highest CDR1+2 identity** — preserves more
-  CDR residues as-is and minimizes structural perturbation (Olimpieri et al.,
-  Bioinformatics 31:434, 2015).
-- J gene: highest FR4 identity, matching CDR3/J junction length.
+The pipeline offers 9 selection strategies (`--germline-strategy`), all
+computed on the same per-position comparison (FR / CDR / CVI identity):
+
+| Strategy | Rule | Rationale |
+|----------|------|-----------|
+| `fr_best` | highest FR identity | framework stability priority |
+| `cdr_best` | highest CDR1+2 identity | CDR conservation, fewer reversions |
+| `composite` | 0.7·FR + 0.3·CDR | balanced |
+| `cvi_best` | highest CVI identity | BI 2024: CVI predicts expression + affinity retention |
+| `min_backmutations` | fewest T1+T2+T3 | minimal change (actual back-mutation analysis, not a raw diff count) |
+| `adimab_frequency` | Adimab-recommended + usage frequency | therapeutic-antibody track record |
+| `pioneer_frequency` | Pioneer-library gene + frequency | 600+ clinical-stage antibodies |
+| `composite_3axis` | 0.5·CVI + 0.3·frequency + 0.2·FR | combined optimum |
+| `auto` (default) | VH=cvi_best, VL=cdr_best | per-chain best practice |
+
+Selection notes:
+- **FR threshold**: default 60% (graft viability). When no human gene reaches
+  it (highly non-human sequences), the threshold auto-degrades
+  (50% → 40% → …) with a warning, and the highest-FR feasible gene is chosen.
+- **J gene**: highest FR4 identity, matching CDR3/J junction length.
+- The legacy single-strategy "hybrid" (top-30% FR, then max CDR1+2) is kept
+  as the `current` strategy for backward compatibility.
 
 ## 5. Validation case
 
@@ -104,3 +120,19 @@ Mouse anti-HER2 4D5 (PDB 1N8Z/1FVE family) → trastuzumab (Carter et al.,
 PNAS 89:4285, 1992). The pipeline reproduces the structurally critical
 reversions (VH 48/67/69/71/73; VL 4/66/87) in T1/T2, with the same germline
 families used historically. Run `tests/test_pipeline.py` for regression checks.
+
+## 6. Numbering edge cases (known & handled)
+
+The anchor-based Kabat engine handles non-canonical inputs with explicit
+warnings; ANARCI cross-validation is recommended before synthesis:
+
+- **Cys22 anchor shift** (e.g. an extra N-terminal residue moves Cys to
+  position 23): FR1 is capped to the standard 30 residues and CDR1 absorbs
+  the extra residue, so H31 is never double-assigned and no residue is
+  silently dropped on grafting.
+- **V-region-only germline sequences** (no J region, e.g. bundled JSON V
+  genes): numbered without a Trp103/Phe98 anchor; the tail is treated as CDR3
+  and FR4 stays empty. J genes are loaded from the curated position map.
+- **Germline gap positions** (e.g. VH3-family H49 empty for VHH): the donor
+  residue is kept on grafting so the domain stays complete; dropping it would
+  shift every downstream position and corrupt CDR2/CDR3.

@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from .minimal import MinimalReversion
+from .minimal import MinimalReversion, MatrixEntry
 
 from .backmut import BackMutationResult, StructureHints, analyze_backmutations
 from .germline import (
@@ -36,6 +36,7 @@ from .variants import Variant, assemble_variants
 @dataclass
 class PipelineConfig:
     germline_dir: str = ""
+    germline_strategy: str = "auto"    # fr_best|cdr_best|composite|cvi_best|min_backmutations|current|auto
     cdr_scheme: str = "kabat"          # kabat|chothia|abm|imgt (graft def)
     report_schemes: List[str] = field(default_factory=lambda: ["kabat", "chothia", "imgt"])
     format: str = "auto"               # auto|fab|vhh
@@ -139,6 +140,59 @@ def _default_germline_dir() -> str:
     )
 
 
+def _top_homologous_germlines(
+    donor: NumberedChain,
+    db: GermlineDB,
+    n: int = 20,
+    min_fr: float = 0.60,
+) -> List[tuple]:
+    """Top-N most homologous germlines (by FR identity), used as the
+    reference panel for donor-residue conservation scoring.
+    Distinct from the per-strategy winners: this panel reflects the full
+    human germline repertoire, so conservation estimates are unbiased."""
+    from .germline import compare_to_germline
+    ctype = donor.chain_type
+    scored = []
+    for g in db.human(ctype):
+        if g.numbered is None:
+            continue
+        s = compare_to_germline(donor, g)
+        if s["fr_identity"] < min_fr:
+            continue
+        scored.append((g, s))
+    scored.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"]))
+    return scored[:n]
+
+
+def _matrix_alternatives(
+    donor: NumberedChain,
+    main_v_gene,
+    db: GermlineDB,
+    n: int = 3,
+    min_fr: float = 0.60,
+) -> List[tuple]:
+    """Deduplicated germline panel for the framework-matrix variants:
+    keep the best allele per gene family (by FR identity), exclude the
+    main choice's family, then take the top-N by FR identity."""
+    from .germline import compare_to_germline
+    ctype = donor.chain_type
+    best_by_family: Dict[str, tuple] = {}
+    for g in db.human(ctype):
+        if g.numbered is None:
+            continue
+        s = compare_to_germline(donor, g)
+        if s["fr_identity"] < min_fr:
+            continue
+        fam = g.gene_id.split("*")[0]
+        cur = best_by_family.get(fam)
+        if cur is None or s["fr_identity"] > cur[1]["fr_identity"]:
+            best_by_family[fam] = (g, s)
+    main_fam = main_v_gene.gene_id.split("*")[0]
+    alts = [(g, s) for fam, (g, s) in best_by_family.items() if fam != main_fam]
+    alts.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"]))
+    return alts[:n]
+
+
 def _process_chain(
     chain: InputChain,
     fmt: str,
@@ -154,8 +208,42 @@ def _process_chain(
     is_vhh = chain.is_vhh and ctype == "H"
 
     # ---- germline selection ----
-    choice = choose_germlines(donor, db)
-    v_gene, j_gene = choice.v_gene, choice.j_gene
+    from .multi_strategy_germline import choose_germlines_multi_strategy
+    
+    strategy = config.germline_strategy
+    if strategy == "auto":
+        # 自动策略：VH 使用 cvi_best，VL 使用 cdr_best
+        strategy = "cvi_best" if ctype == "H" else "cdr_best"
+    
+    multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
+    candidate = multi_result.get_best(strategy)
+    
+    if candidate is None:
+        # 回退到默认策略
+        choice = choose_germlines(donor, db)
+        v_gene, j_gene = choice.v_gene, choice.j_gene
+    else:
+        v_gene = candidate.gene
+        # 选择 J 基因
+        from .germline import score_j_match
+        j_genes = db.j_for(ctype)
+        j_scored = []
+        for jg in j_genes:
+            idn, n = score_j_match(donor, jg)
+            j_scored.append((jg, idn, n))
+        j_scored.sort(key=lambda t: (-t[1], -t[2]))
+        j_gene = j_scored[0][0] if j_scored else None
+        
+        # 创建兼容的 choice 对象
+        from .germline import GermlineChoice
+        choice = GermlineChoice(
+            v_gene=v_gene,
+            j_gene=j_gene,
+            scores={"fr_identity": candidate.fr_identity, "cdr_identity": candidate.cdr_identity},
+            alternatives=[(c.gene, {"fr_identity": c.fr_identity, "cdr_identity": c.cdr_identity}) 
+                         for c in multi_result.candidates.values()],
+        )
+    
     if v_gene is None or j_gene is None:
         raise RuntimeError(f"[{chain.name}] no viable human germline found")
 
@@ -183,7 +271,9 @@ def _process_chain(
             hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains)
 
     # ---- back-mutation analysis ----
-    top = [(g, s) for g, s in choice.alternatives]
+    # Conservation reference: top-N homologous germlines (unbiased panel),
+    # not the per-strategy winners (which can repeat the same gene).
+    top = _top_homologous_germlines(donor, db)
     calibration = None
     if config.calibration_path and os.path.exists(config.calibration_path):
         from .learning import load_calibration
@@ -209,10 +299,11 @@ def _process_chain(
         )
     cvi = cvi_homology(donor, v_gene)
     matrix: List[MatrixEntry] = []
-    if len(choice.alternatives) > 1:
+    matrix_alts = _matrix_alternatives(donor, v_gene, db)
+    if matrix_alts:
         matrix = matrix_alternatives(
-            donor, choice.alternatives[1:], j_gene, config.cdr_scheme,
-            is_vhh=is_vhh, n=min(3, len(choice.alternatives) - 1),
+            donor, matrix_alts, j_gene, config.cdr_scheme,
+            is_vhh=is_vhh, n=min(3, len(matrix_alts)),
         )
 
     # ---- grafts (all requested schemes, for reporting) ----

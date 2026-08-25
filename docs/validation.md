@@ -25,6 +25,12 @@ Checks:
   must hit the same residues).
 - Insertion-letter placements in long loops (CDR-H1 >5, CDR-H2 >16,
   CDR-H3 >8, CDR-L1 >11) must match.
+- Known engine edge cases to double-check in ANARCI:
+  - Cys22 anchor shifted (N-terminal extra residue) → FR1 capped to 30;
+    confirm the CDR1 boundary and that no residue was dropped.
+  - V-region-only germline / VHH with a germline gap (e.g. VH3 H49):
+    confirm the donor residue is kept and the grafted sequence length
+    equals the donor's.
 
 Expected agreement: >99% of positions for standard V domains; any divergence
 must be resolved before synthesis (adjust numbering or ANARCI-mode config).

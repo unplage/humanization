@@ -231,6 +231,18 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
         csvp = os.path.join(outdir, f"backmutations_{rep.input_chain.name}.csv")
         write_csv(csvp, rep.backmut)
         paths[f"csv_{rep.input_chain.name}"] = csvp
+    
+    # 增强版报告 (借鉴 WeMol 格式)
+    try:
+        from .report_enhanced import generate_enhanced_report
+        enhanced_md = os.path.join(outdir, "enhanced_report.md")
+        enhanced_content = generate_enhanced_report(result, outdir)
+        with open(enhanced_md, "w") as fh:
+            fh.write(enhanced_content)
+        paths["enhanced_markdown"] = enhanced_md
+    except Exception as e:
+        paths["enhanced_error"] = f"enhanced report generation failed: {e}"
+    
     # Word report (python-docx; skipped when unavailable)
     try:
         from .report_docx import write_docx_report

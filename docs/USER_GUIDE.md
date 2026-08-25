@@ -85,6 +85,7 @@ python3 scripts/humanize/cli.py run \
   --format auto|fab|vhh \              # 格式强制（默认自动检测）
   --scheme kabat|chothia|abm|imgt \    # 变体梯度的 CDR 定义（默认 kabat）
   --germline-dir <dir> \               # NCBI germline FASTA 目录（可选）
+  --germline-strategy <strategy> \     # germline 选择策略（见下表）
   --antigen <seq> \                    # 抗原序列（AF3 复合物 + V_SDR）
   --calibration calibration.json \     # 实验数据校准文件
   --biophi-env biophi \                # BioPhi conda 环境（人源度交叉验证）
@@ -102,6 +103,22 @@ python3 scripts/humanize/cli.py setup-germline       # 下载 NCBI germline
 python3 scripts/humanize/cli.py learn \
   --experiments experiments.json --out calibration.json
 ```
+
+### Germline 选择策略 (--germline-strategy)
+
+| 策略 | 说明 | 推荐场景 |
+|------|------|----------|
+| `fr_best` | FR 同源性最高 | 框架稳定性优先 |
+| `cdr_best` | CDR 同源性最高 | CDR 保守性优先 |
+| `composite` | 0.7*FR + 0.3*CDR | 平衡考虑 |
+| `cvi_best` | CVI 同源性最高 | **推荐：BI 2024 策略** |
+| `min_backmutations` | 估计回复突变最少 | 最小改动 |
+| `adimab_frequency` | Adimab 推荐 germline + 频率 | 治疗性抗体优化 |
+| `pioneer_frequency` | Pioneer 库 germline + 频率 | 600+ 临床阶段抗体 |
+| `composite_3axis` | 0.5*CVI + 0.3*频率 + 0.2*FR | **综合最优** |
+| `auto` (默认) | VH=cvi_best, VL=cdr_best | **默认推荐** |
+
+**使用频率数据**：基于已获批和临床阶段的治疗性抗体分析，IGHV3-23 (~18%)、IGHV1-69 (~12%)、IGKV1-39 (~15%) 是最常用的 germline。
 
 ---
 
@@ -132,6 +149,7 @@ open outputs/humanization_report.docx     # Word 版（需 python-docx）
 |------|------|
 | `humanization_report.md` | 完整报告（文本） |
 | `humanization_report.docx` | 完整报告（Word，专业排版：封面/摘要/表格/附录） |
+| `enhanced_report.md` | 增强报告（借鉴 WeMol 格式：Template Score 表、Mutation Score、Back-Mutation 摘要、Hotspot 摘要、人源化序列） |
 | `humanization_result.json` | 结构化数据（脚本/下游处理用） |
 | `backmutations_<链>.csv` | 逐位点回复突变明细 |
 | `variants.fasta` | 全部变体序列（基因合成直接可用） |
@@ -147,6 +165,12 @@ open outputs/humanization_report.docx     # Word 版（需 python-docx）
    - `features`：vernier / interface_core / canonical / buried / cdr_contact 等
    - `ddG(emp)`：实验数据校准后的实测效应（kcal/mol，正值 = 保留 donor 有益）
 5. **变体表**：V0（纯移植）→ V2（推荐）→ V3（激进），序列完整列出
+6. **增强报告**（`enhanced_report.md`）：WeMol 风格——
+   - Template Score：候选 germline 按 FR%/FR1%/FR2%/FR3% 排名
+   - Mutation Score：回复突变评分（可与 WeMol 平台结果对比核对）
+   - Back-Mutation Summary + KABAT 编号突变摘要
+   - Hotspot Summary：CDR 与全长的人源度、风险位点
+   - Humanized Sequences：人源化序列总览
 
 ---
 
@@ -208,9 +232,10 @@ python3 scripts/humanize/cli.py run --input seq.fasta --biophi-env biophi
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | `could not number as VH or VL` | 序列残缺/非 V 区/特殊环长 | 检查序列完整性；用 ANARCI 模式交叉验证 |
-| `no viable human germline found` | 亲本与人源框架同源性过低（<60%） | 属正常警示：此人源化难度高，考虑 SDR/paratope 路线 |
+| 警告 `自动降级至 FR >= xx% 继续选择` | 亲本与人源框架同源性过低（<60%） | 属正常警示：人源化难度高、回复突变会很多；考虑 SDR/paratope 路线 |
 | `FR identity 0.5x`（VHH 常见） | VHH 与人类框架天然差距大 | 正常；hallmark 位点已自动保护 |
 | 报告出现 `unusual CDR2/FR3` 警告 | 长环/插入 | 服务器 ANARCI 精确编号复核 |
+| 报告出现 `Cys22 anchor shifted` | N 端多残基使 Cys 不在 22 位 | 引擎已自动 cap FR1=30 并吸收多余残基；建议 ANARCI 复核 |
 | 变体数 < 5 | Vmin 与 V2 集相同时不重复输出 | 正常 |
 | `trailing residue(s) ignored` | 序列含 CH1/CL 或标签 | 正常（报告已忽略） |
 | docx 未生成 | 未安装 python-docx | `pip install python-docx` |

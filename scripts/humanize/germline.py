@@ -131,12 +131,23 @@ def _load_bundled_json(path: str) -> GermlineDB:
         ctype = "H" if gene.startswith("IGHV") else "L"
         seq = "".join(pmap.values())
         g = GermlineGene(gene, ctype, "V", seq)
-        g.numbered = _chain_from_map(seq, pmap, ctype)
+        # Re-number with the (fixed) portable engine so H93/H94 are
+        # present and CDR3 starts at H95 (Kabat standard).
+        try:
+            if ctype == "H":
+                g.numbered = number_heavy(seq)
+            else:
+                g.numbered = number_light(seq)
+        except ValueError:
+            g.numbered = None
         genes.append(g)
     for gene, pmap in blob["J"].items():
         ctype = "H" if gene.startswith("IGHJ") else "L"
         seq = "".join(pmap.values())
         g = GermlineGene(gene, ctype, "J", seq)
+        # J genes contain only FR4 (no V-region anchors), so the full
+        # number_heavy/number_light engines cannot number them; keep the
+        # curated JSON position map instead.
         g.numbered = _chain_from_map(seq, pmap, ctype)
         genes.append(g)
     return GermlineDB(

@@ -127,6 +127,14 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
     if c_idx != 21:
         warnings.append(f"[VH] Cys22 anchor at index {c_idx + 1} (expected 22); FR1 length adjusted")
     fr1_len = c_idx + 9                  # Cys pos 22 -> FR1 ends at pos 30
+    if fr1_len > 30:
+        # Cys22 anchor shifted (e.g. extra N-terminal residue): keep the
+        # standard 30-residue FR1 and let CDR1 absorb the extra residue.
+        # Capping avoids double-assigning H31 (FR1 tail vs CDR1 start),
+        # which would silently drop one residue on grafting.
+        warnings.append(f"[VH] Cys22 anchor shifted (C at {c_idx + 1}); "
+                        f"FR1 capped to 30 residues, CDR1 absorbs the extra")
+        fr1_len = 30
     if fr1_len > n:
         raise ValueError("[VH] FR1 extends beyond sequence end")
     for i, aa in enumerate(s[:fr1_len]):
@@ -227,8 +235,16 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
     j_start = c92_idx + 1
     w103_idx = _find_j_anchor(s, j_start, min(j_start + 35, n), "H")
     if w103_idx is None:
-        raise ValueError("[VH] no Trp103 (J region start) anchor found")
-    cdr3_seq = s[j_start:w103_idx]
+        # V-region-only germline sequence (no J region): treat the tail as
+        # CDR3; FR4 stays empty. Callers that need J regions provide them.
+        w103_idx = n
+    raw_cdr3 = s[j_start:w103_idx]
+    # H93/H94 are fixed FR3 tail residues after Cys92 (Kabat):
+    # Cys92 -> H93 -> H94 -> CDR3 starts at H95.
+    for k, pos in enumerate(("H93", "H94")):
+        if k < len(raw_cdr3):
+            res.append(NumberedResidue(pos, raw_cdr3[k], "FR3", j_start + k))
+    cdr3_seq = raw_cdr3[2:]
     cdr3_len = len(cdr3_seq)
     ins = max(0, cdr3_len - 8)
     for j, aa in enumerate(cdr3_seq):
@@ -238,7 +254,7 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
             pos = f"H100{_letters(j - 5)[-1]}"
         else:
             pos = f"H{101 + j - 6 - ins}"
-        res.append(NumberedResidue(pos, aa, "CDR3", j_start + j))
+        res.append(NumberedResidue(pos, aa, "CDR3", j_start + 2 + j))
     fr4 = s[w103_idx : w103_idx + 11]
     if len(fr4) < 11:
         warnings.append(f"[VH] FR4 shorter than expected ({len(fr4)}/11) - truncated J region?")
@@ -386,7 +402,8 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
     j_start = c88_idx + 1
     f98_idx = _find_j_anchor(s, j_start, min(j_start + 16, n), "L")
     if f98_idx is None:
-        raise ValueError("[VL] no Phe98 (J region start) anchor found")
+        # V-region-only germline sequence (no J region): treat the tail as CDR3.
+        f98_idx = n
     cdr3_seq = s[j_start:f98_idx]
     for j, aa in enumerate(cdr3_seq):
         if j < 9:

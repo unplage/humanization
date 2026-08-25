@@ -33,9 +33,11 @@ benefit = 0.3 + 0.5 * exposure * (1 - conservation)
 ```
 
 - exposure: 0.85 exposed / 0.15 buried (AF3); 0.5 default without structure.
-- conservation: fraction of the top-10 human germlines carrying the DONOR
-  residue at that position. A rare donor residue (low conservation) = more
-  foreign = higher benefit of reverting.
+- conservation: fraction of the top-20 human germlines (by FR identity)
+  carrying the DONOR residue at that position. A rare donor residue (low
+  conservation) = more foreign = higher benefit of reverting. The panel is
+  the top-N homologous germlines, not the per-strategy winners, so the
+  estimate is unbiased across the human repertoire.
 - Positions with no structural feature are capped at 0.45 (surface
   humanization is still worth something, but low priority).
 
@@ -82,3 +84,7 @@ Bonus for reverting away from a donor residue that creates a risk motif in a
   (see validation.md).
 - Germline identity uses the bundled human IMGT-derived set; the NCBI
   IgBLAST FASTA set (identical origin) is used when downloaded.
+- When no human germline reaches the 60% FR-identity threshold, selection
+  automatically degrades (FR ≥ 50% → 40% → …) with a warning; the chosen
+  gene is the highest-FR feasible one, but the many back-mutations expected
+  (FR < 60%) mean affinity retention is at risk (BI 2024).

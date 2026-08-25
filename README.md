@@ -19,16 +19,50 @@
 python3 scripts/humanize/cli.py run \
   --input data/examples/mouse_4d5_fab.fasta --outdir outputs
 
-# 2. 查看报告（Markdown / Word / JSON）
+# 2. 使用多策略 Germline 选择（推荐）
+python3 scripts/humanize/cli.py run \
+  --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
+  --germline-strategy auto  # 默认：VH=cvi_best, VL=cdr_best
+
+# 3. 查看所有策略的选择结果
+python3 scripts/custom_humanize.py
+
+# 4. 查看报告（Markdown / Word / JSON）
 open outputs/humanization_report.md
 open outputs/humanization_report.docx        # 需 pip install python-docx
 
-# 3. 自检与测试
+# 5. 自检与测试
 python3 scripts/humanize/cli.py setup-check
 python3 tests/test_pipeline.py
 ```
 
 详细使用手册见 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**。
+
+---
+
+## Germline 选择策略
+
+支持 9 种选择策略，基于 BI 2024 矩阵移植研究和治疗性抗体数据优化：
+
+| 策略 | 说明 | 适用场景 |
+|------|------|----------|
+| `fr_best` | FR 同源性最高 | 框架稳定性优先 |
+| `cdr_best` | CDR 同源性最高 | CDR 保守性优先 |
+| `composite` | 综合评分 (0.7*FR + 0.3*CDR) | 平衡考虑 |
+| `cvi_best` | CVI 同源性最高 | **推荐：BI 2024 策略** |
+| `min_backmutations` | 估计回复突变最少 | 最小改动 |
+| `adimab_frequency` | Adimab 推荐 germline + 频率 | 治疗性抗体优化 |
+| `pioneer_frequency` | Pioneer 库 germline + 频率 | 600+ 临床阶段抗体 |
+| `composite_3axis` | 0.5*CVI + 0.3*频率 + 0.2*FR | **综合最优** |
+| `auto` | 自动：VH=cvi_best, VL=cdr_best | **默认推荐** |
+
+**CVI 同源性** = Canonical + Vernier + Interface 同源性，基于 BI 2024 研究，
+与表达量和亲和力保留显著相关。
+
+**使用频率数据** 基于已获批和临床阶段的治疗性抗体分析：
+- IGHV3-23 是最常用的 VH germline (~18%)
+- IGHV1-69 是第二常用的 VH germline (~12%)
+- IGKV1-39 是最常用的 VK germline (~15%)
 
 ---
 
@@ -38,6 +72,7 @@ python3 tests/test_pipeline.py
 |------|------|
 | **Fab / VHH 双格式** | 自动链型检测；VHH hallmark（Kabat 37/44/45/47）识别并全程保护 |
 | **零依赖便携核心** | anchor-based Kabat 编号引擎（纯标准库）；内置 373 V + 28 J 人源 germline |
+| **多策略 Germline 选择** | 9 种策略（FR/CDR/综合/CVI/最小突变/Adimab频率/Pioneer频率/3轴/自动），基于 BI 2024 和治疗性抗体数据优化 |
 | **多套 CDR 定义** | Kabat / Chothia / AbM / IMGT 四套边界同时报告 |
 | **回复突变量化评分** | 结构（vernier/界面/canonical/接触/埋藏）+ 免疫原性 + 可开发性三维评分 → T1/T2/T3/KEEP_DONOR 分级与逐条依据 |
 | **变体梯度** | V0 纯移植 → V1(T1) → **V2(T1+T2，推荐)** → V3(+暴露T3) → Vmin(最小回复集) → V_SDR(paratope 精确移植) |
@@ -56,6 +91,7 @@ python3 tests/test_pipeline.py
 |------|------|
 | `humanization_report.md` | 完整报告：执行摘要、编号、germline 选择、回复突变表、变体序列 |
 | `humanization_report.docx` | **Word 专业版**：封面 + 12 章 + 2 附录（含全部完整序列与逐位点对照表） |
+| `enhanced_report.md` | **增强报告**（借鉴 WeMol 格式）：Template Score、Mutation Score、回复突变摘要、Hotspot 摘要、人源化序列 |
 | `humanization_result.json` | 机器可读完整结果 |
 | `backmutations_<链>.csv` | 逐位点评分明细（含实验 ddG 列） |
 | `variants.fasta` | 全部变体序列（直接用于基因合成） |

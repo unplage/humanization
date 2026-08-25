@@ -4,6 +4,7 @@
 Usage:
   humanize run    --input seq.fasta [--outdir outputs] [--format fab|vhh|auto]
                   [--scheme kabat|chothia|abm|imgt] [--germline-dir DIR]
+                  [--germline-strategy fr_best|cdr_best|composite|cvi_best|min_backmutations|current|auto]
                   [--af3-mode off|local|api] [--mpnn-mode off|local]
                   [--antigen SEQ] [--donor-structure PDB]
   humanize setup-germline [--dir DIR]      # download NCBI IgBLAST germline
@@ -29,6 +30,7 @@ from humanize.mpnn import MPNNConfig
 def cmd_run(args):
     cfg = PipelineConfig(
         germline_dir=args.germline_dir or "",
+        germline_strategy=args.germline_strategy or "auto",
         cdr_scheme=args.scheme,
         report_schemes=["kabat", "chothia", "abm", "imgt"],
         format=args.format,
@@ -54,6 +56,7 @@ def cmd_run(args):
     result = run_pipeline(args.input, cfg, outdir=args.outdir)
     paths = write_all(args.outdir, result)
     print(f"\n[humanize] format: {result.format.upper()}")
+    print(f"[humanize] germline strategy: {args.germline_strategy}")
     for rep in result.chains:
         c = rep.input_chain
         v = rep.germline.v_gene
@@ -158,6 +161,19 @@ def main(argv=None):
                        choices=["kabat", "chothia", "abm", "imgt"],
                        help="CDR definition used for the variant ladder")
     p_run.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
+    p_run.add_argument("--germline-strategy", default="auto",
+                       choices=["fr_best", "cdr_best", "composite", "cvi_best", 
+                                "min_backmutations", "current", "auto",
+                                "adimab_frequency", "pioneer_frequency", "composite_3axis"],
+                       help="germline selection strategy: "
+                            "fr_best=FR identity, cdr_best=CDR identity, "
+                            "composite=0.7*FR+0.3*CDR, cvi_best=CVI homology, "
+                            "min_backmutations=fewest back-mutations, "
+                            "current=current system (top 30% FR with max CDR), "
+                            "auto=cvi_best for VH, cdr_best for VL, "
+                            "adimab_frequency=Adimab recommended + frequency, "
+                            "pioneer_frequency=Pioneer library + frequency, "
+                            "composite_3axis=0.5*CVI+0.3*freq+0.2*FR")
     p_run.add_argument("--antigen", default=None, help="antigen sequence (AF3 complex)")
     p_run.add_argument("--calibration", default=None,
                        help="calibration.json from `humanize learn` (empirical scoring)")

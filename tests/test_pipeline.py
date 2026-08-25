@@ -61,11 +61,15 @@ def test_numbering():
 
     m4 = number_heavy(M4D5_VH)
     check("4D5 VH CDR2 = donor loop", m4.seq_range("H50", "H52A") + m4.seq_range("H53", "H65") == "YINPYNGVTKYNQKFKG")
-    check("4D5 VH CDR3", m4.seq_range("H95", "H102") == "SRWGGDGFYAMDY")
+    # Standard Kabat: H93/H94 are FR3 (e.g. "S" "R" in ...VYYC S R WGGD...);
+    # CDR3 starts at H95.
+    check("4D5 VH FR3 H93/H94", m4.seq_range("H93", "H94") == "SR", m4.seq_range("H93", "H94"))
+    check("4D5 VH CDR3", m4.seq_range("H95", "H102") == "WGGDGFYAMDY", m4.seq_range("H95", "H102"))
     vhh = number_heavy(VHH_1BZQ)
     vhh_ok, score, _ = is_vhh(vhh)
     check("1BZQ VHH hallmark detected", vhh_ok and score == 4, str(score))
-    check("1BZQ VHH CDR3", vhh.seq_range("H95", "H102") == "AAGGYELRDRTYGQ")
+    check("1BZQ VHH FR3 H93/H94", vhh.seq_range("H93", "H94") == "AA", vhh.seq_range("H93", "H94"))
+    check("1BZQ VHH CDR3", vhh.seq_range("H95", "H102") == "GGYELRDRTYGQ", vhh.seq_range("H95", "H102"))
     for scheme in CDR_SCHEMES:
         _ = CDR_SCHEMES[scheme]  # table integrity
 

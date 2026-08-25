@@ -117,6 +117,13 @@ def graft_chain(
             if pos in gmap and gmap[pos]:
                 out[pos] = gmap[pos]
                 origin[pos] = "germline"
+            elif pos in dmap and dmap[pos]:
+                # germline lacks this FR position (e.g. VH3-family H49 for
+                # VHH): keep the donor residue so the domain stays complete.
+                # Dropping it would shift every downstream position and
+                # corrupt CDR2/CDR3.
+                out[pos] = dmap[pos]
+                origin[pos] = "donor(vhh)" if (is_vhh and chain_type == "H") else "donor"
 
     seq = "".join(aa for pos, aa in sorted(out.items(), key=lambda kv: (kv[0][0], _pos_num(kv[0]), kv[0])))
     try:
