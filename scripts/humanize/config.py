@@ -89,6 +89,25 @@ WEIGHTS = {
 }
 
 # ---------------------------------------------------------------------------
+# Empirically no-effect positions (from gold-standard backtests)
+# ---------------------------------------------------------------------------
+# Positions where the approved humanized antibody kept the HUMAN germline
+# residue while retaining affinity, although the literature position sets
+# would classify them as structural (interface/vernier). Without structure
+# data supporting burial/CDR-contact, these are demoted to T3 (see
+# docs/backtest_report.md - 4D5 -> trastuzumab: VL L87 F->Y kept germline,
+# KD ~0.1 nM retained).
+EMPIRICAL_NO_EFFECT = {
+    "H": set(),
+    "L": {87},   # L87: interface+vernier by literature; germline Y87 fine
+}
+EMPIRICAL_NO_EFFECT_NOTE = {
+    "L87": "backtest gold standard (trastuzumab): kept germline Y87, "
+           "affinity retained; demoted to T3 unless structure shows "
+           "burial/CDR-contact (AF3 mode overrides this demotion).",
+}
+
+# ---------------------------------------------------------------------------
 # Tier rules (final recommendation)
 # ---------------------------------------------------------------------------
 
@@ -145,7 +164,9 @@ RISK_MOTIFS = {
     "isomerization (DH)": r"DH",                 # 低风险：Asp-His（新增）
 
     # === 酸性水解风险 (Asp-X 肽键断裂) ===
-    "acid hydrolysis (D-X)": r"D[AGSVTLIP]",    # Asp 后接小侧链残基（新增）
+    # D-X 仅统计未被异构化类覆盖的残基 (G/S/T/H 已在上方单独计分，
+    # D 在 DD 单独计分)，避免同一位点双计。
+    "acid hydrolysis (D-X)": r"D[AVLIP]",        # Asp 后接小侧链残基（不含 G/S/T/H/D）
     "acid hydrolysis (DD)": r"DD",               # Asp-Asp 高风险：酸性水解（新增）
 
     # === 氧化风险 ===

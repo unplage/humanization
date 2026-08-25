@@ -74,6 +74,86 @@ def test_numbering():
         _ = CDR_SCHEMES[scheme]  # table integrity
 
 
+def _full_cdr3_loop(chain):
+    """Full CDR3 loop = Kabat 93-102 (+insertions) for H, 89-97 for L."""
+    lo, hi = (93, 102) if chain.chain_type == "H" else (89, 97)
+    out = []
+    for r in chain.residues:
+        n = int("".join(c for c in r.pos if c.isdigit()))
+        if lo <= n <= hi:
+            out.append(r.aa)
+    return "".join(out)
+
+
+def test_graft_loop_conservation():
+    """Regression: the FULL CDR3 loop (incl. Kabat 93/94) must be grafted
+    from the donor. The strict-Kabat H93/H94 labels are FR3, but they carry
+    the first two loop residues and must not be replaced by germline."""
+    print("graft full-loop conservation (regression for H93/H94)")
+    from humanize.graft import graft_chain
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    cases = [
+        ("4D5 VH", number_heavy(M4D5_VH), "IGHV1-3*01", "IGHJ1*01", "H"),
+        ("1BZQ VHH", number_heavy(VHH_1BZQ), "IGHV3-11*01", "IGHJ1*01", "H"),
+        ("IGKV1-39", number_light(IGKV1_39), "IGKV1-39*01", "IGKJ1*01", "L"),
+        ("1MEL VHH (Cys-CDR3)", number_heavy(
+            "DVQLQASGGGSVQAGGSLRLSCAASGYTIGPYCMGWFRQAPGKEREGVAAINMGGGITYYADSVKGRFTISQDNAKNTVYLLMNSLEPEDTAIYYCAADSTIYASYYECGHGLSTGGYGYDSWGQGTQVTVSS"),
+            "IGHV3-11*01", "IGHJ1*01", "H"),
+    ]
+    for name, donor, vgene, jgene, _ in cases:
+        v = [g for g in db.v_genes if g.gene_id == vgene][0]
+        j = [g for g in db.j_genes if g.gene_id == jgene][0]
+        graft = graft_chain(donor, v, j, "kabat")
+        d_loop = _full_cdr3_loop(donor)
+        g_loop = _full_cdr3_loop(graft.numbered)
+        check(f"{name} full CDR3 loop conserved",
+              d_loop == g_loop, f"donor={d_loop} graft={g_loop}")
+        check(f"{name} H93/H94 donor origin",
+              graft.origin.get("H93") in ("donor", "donor(vhh)")
+              if graft.chain_type == "H" else True,
+              str(graft.origin.get("H93")))
+
+
+def test_vhh_humanization_gold_standard():
+    """VHH humanization effectiveness vs the Vincke 2009 gold standard.
+
+    cAb-Lys3 (PDB 1MEL) -> hCAb-Lys3: the documented universal scaffold
+    design = IGHV3-23 consensus + camelid hallmark + donor CDRs. The
+    pipeline must (1) detect VHH, (2) keep hallmark as KEEP_DONOR,
+    (3) graft CDR1/2/3 (incl. the CDR1-Cys + CDR3-Cys disulfide pair)
+    unchanged, (4) choose the VH3-23 family germline.
+    """
+    print("VHH humanization gold standard (cAb-Lys3 -> hCAb-Lys3)")
+    from humanize.backmut import analyze_backmutations
+    from humanize.germline import choose_germlines
+    from humanize.graft import graft_chain
+    CAbLys3 = ("DVQLQASGGGSVQAGGSLRLSCAASGYTIGPYCMGWFRQAPGKEREGV"
+               "AAINMGGGITYYADSVKGRFTISQDNAKNTVYLLMNSLEPEDTAIYYCAADSTIYASYYECGHGLSTGGYGYDSWGQGTQVTVSS")
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor = number_heavy(CAbLys3)
+    vhh, score, matched = is_vhh(donor)
+    check("VHH detected (hallmark 4/4)", vhh and score == 4, str(matched))
+    choice = choose_germlines(donor, db)
+    check("VH3-23-family germline chosen",
+          choice.v_gene is not None and choice.v_gene.gene_id.startswith("IGHV3-23"),
+          str(choice.v_gene.gene_id if choice.v_gene else None))
+    bm = analyze_backmutations(donor, choice.v_gene, is_vhh=True)
+    kd = {c.position for c in bm.candidates if c.tier == "KEEP_DONOR"}
+    check("hallmark positions all KEEP_DONOR",
+          {"H37", "H44", "H45", "H47"} <= kd, str(sorted(kd)))
+    graft = graft_chain(donor, choice.v_gene, choice.j_gene, "kabat", is_vhh=True)
+    for cdr in ("CDR1", "CDR2", "CDR3"):
+        d = "".join(r.aa for r in donor.residues if r.region == cdr)
+        g = "".join(r.aa for r in graft.numbered.residues if r.region == cdr)
+        check(f"CDR{cdr} loop conserved", d == g, f"d={d} g={g}")
+    check("disulfide Cys pair grafted (CDR1 C + CDR3 C)",
+          graft.sequence.count("C") >= 2
+          and "PYCMG" in graft.sequence and "YEC" in graft.sequence)
+    check("hallmark intact in graft FR2",
+          graft.numbered.seq_range("H36", "H48") == "WFRQAPGKEREGV",
+          graft.numbered.seq_range("H36", "H48"))
+
+
 def test_germline_and_graft():
     print("germline + graft")
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
@@ -106,7 +186,14 @@ def test_backmut_variants():
         top = [(g, s) for g, s in choice.alternatives]
         bm = analyze_backmutations(donor.numbered, choice.v_gene, is_vhh=False, top_germlines=top)
         tiers = {c.tier for c in bm.candidates}
-        check(f"{donor.name} has T1 candidates", "T1" in tiers, str(sorted(tiers)))
+        # VH keeps T1 (structural pillars); VL L87 is demoted to T3 by the
+        # gold-standard empirical no-effect table (trastuzumab kept Y87).
+        if donor.chain_type == "H":
+            check(f"{donor.name} has T1 candidates", "T1" in tiers, str(sorted(tiers)))
+        else:
+            l87 = [c for c in bm.candidates if c.position == "L87"]
+            check("L87 demoted to T3 by empirical table",
+                  bool(l87) and l87[0].tier == "T3", str([(c.position, c.tier) for c in l87]))
         check(f"{donor.name} has T3 candidates", "T3" in tiers)
         variants = assemble_variants(donor.numbered, choice.v_gene, choice.j_gene,
                                      "kabat", bm, is_vhh=False)
@@ -274,6 +361,32 @@ def test_docx_report():
             check("docx has tables", len(d.tables) >= 10, str(len(d.tables)))
 
 
+def test_enhanced_report():
+    print("WeMol-style enhanced report")
+    import tempfile as _tf
+    from humanize.report_enhanced import generate_enhanced_report
+    with _tf.TemporaryDirectory() as out:
+        result = run_pipeline(
+            os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"),
+            PipelineConfig(), outdir=out)
+        content = generate_enhanced_report(result, out)
+        check("enhanced report has template score", "Template Score" in content)
+        check("enhanced report has mutation score", "Mutation Score" in content)
+        # VL template table must not be all zeros (old hardcoded-H bug)
+        import re
+        vh_block = content.split("VL Chain (selected")[0]
+        vl_block = content.split("VL Chain (selected")[1] if "VL Chain (selected" in content else ""
+        rows = [l for l in vl_block.splitlines() if "\t" in l and l[0].isdigit()]
+        nonzero = [l for l in rows if float(l.split("\t")[4]) > 0]
+        check("VL template rows non-zero", len(nonzero) > 5,
+              f"{len(nonzero)}/{len(rows)} rows with FR% > 0")
+        # humanized sequences section populated with real sequences
+        seqs = [l for l in content.split("5. Humanized Sequences")[-1].splitlines()
+                if l.startswith((">", "EVQL", "DIQM"))]
+        check("humanized sequences populated", any(l.startswith("EVQL") for l in seqs))
+        check("enhanced report variant headers", any(">H V" in l or ">H" in l for l in seqs))
+
+
 def test_end_to_end():
     print("end-to-end")
     with tempfile.TemporaryDirectory() as out:
@@ -288,17 +401,22 @@ def test_end_to_end():
             check(f"E2E output exists: {os.path.basename(p)}", os.path.exists(p))
         with open(paths["fasta"]) as fh:
             n_seq = sum(1 for line in fh if line.startswith(">"))
-        check("E2E fasta has 10 variants (2 chains x 5: V0-V3+Vmin)", n_seq == 10, str(n_seq))
+        # H: V0-V3 + Vmin (T1 non-empty); L: V0-V3 only (T1 empty after L87
+        # gold-standard demotion, Vmin == V0). Total = 5 + 4.
+        check("E2E fasta has 9 variants (H:5, L:4)", n_seq == 9, str(n_seq))
 
 
 def main():
     test_numbering()
+    test_graft_loop_conservation()
+    test_vhh_humanization_gold_standard()
     test_germline_and_graft()
     test_backmut_variants()
     test_vhh_protection()
     test_minimal_reversion()
     test_humanness_adapter()
     test_docx_report()
+    test_enhanced_report()
     test_end_to_end()
     print()
     if FAILURES:

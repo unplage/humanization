@@ -169,7 +169,7 @@ def main(argv=None):
                             "fr_best=FR identity, cdr_best=CDR identity, "
                             "composite=0.7*FR+0.3*CDR, cvi_best=CVI homology, "
                             "min_backmutations=fewest back-mutations, "
-                            "current=current system (top 30% FR with max CDR), "
+                            "current=current system (top 30%% FR with max CDR), "
                             "auto=cvi_best for VH, cdr_best for VL, "
                             "adimab_frequency=Adimab recommended + frequency, "
                             "pioneer_frequency=Pioneer library + frequency, "

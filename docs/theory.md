@@ -114,6 +114,13 @@ Selection notes:
 - The legacy single-strategy "hybrid" (top-30% FR, then max CDR1+2) is kept
   as the `current` strategy for backward compatibility.
 
+## 4.5 CDR3 loop residues at Kabat H93/H94 (严格 Kabat 语义)
+
+严格 Kabat 编号中 CDR3 = H95-102，而 CDR3 环的前两个残基占据 H93/H94
+（形式上属 FR3；IMGT 105-106）。**移植时整个环（含 93/94）必须来自供体**；
+编号表中 H93/H94 仍标注为 FR3。回复突变分析将 H93/H94 视为环残基排除
+（不是框架候选），见 docs/backtest_report.md 的 P0 修复记录。
+
 ## 5. Validation case
 
 Mouse anti-HER2 4D5 (PDB 1N8Z/1FVE family) → trastuzumab (Carter et al.,

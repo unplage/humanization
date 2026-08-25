@@ -162,10 +162,13 @@ def minimal_reversion_set(
 # ---------------------------------------------------------------------------
 
 def paratope_positions(donor: NumberedChain, structure: StructureHints) -> List[str]:
-    """CDR residues that contact the antigen in the complex model."""
+    """CDR-loop residues that contact the antigen in the complex model."""
+    from .graft import is_cdr_loop_position
     out = []
     for r in donor.residues:
-        if r.region.startswith("CDR") and structure.antigen_contact("", r.pos):
+        num = int("".join(c for c in r.pos if c.isdigit()))
+        if is_cdr_loop_position(donor.chain_type, num) \
+                and structure.antigen_contact("", r.pos):
             out.append(r.pos)
     return out
 
@@ -193,9 +196,10 @@ def build_paratope_variant(
     pillars = backmut.revert_positions(("T1", "T2"))
     # remove CDR residues that are NOT in the paratope (humanize them)
     force_human = []
+    from .graft import is_cdr_loop_position
     for pos in base.donor_positions:
-        reg = donor.region_of(pos) or ""
-        if reg.startswith("CDR") and pos not in sdr:
+        num = int("".join(c for c in pos if c.isdigit()))
+        if is_cdr_loop_position(donor.chain_type, num) and pos not in sdr:
             force_human.append(pos)
     result = graft_variant(
         donor, v_gene, j_gene, scheme, pillars,

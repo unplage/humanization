@@ -20,6 +20,8 @@ from typing import Dict, List, Optional, Tuple
 
 from .config import (
     CANONICAL,
+    EMPIRICAL_NO_EFFECT,
+    EMPIRICAL_NO_EFFECT_NOTE,
     INTERFACE_CORE,
     INTERFACE_EXTENDED,
     VERNIER_ZONE,
@@ -150,6 +152,11 @@ def analyze_backmutations(
             continue
         if donor.region_of(pos) not in FR_REGIONS:
             continue
+        # H93/H94 carry the first two CDR3-loop residues (strict-Kabat FR3
+        # labels, IMGT CDR3 105-106). They are grafted from the donor as part
+        # of the loop and must never become back-mutation candidates.
+        if chain_type == "H" and num in (93, 94):
+            continue
         donor_aa = dmap[pos].upper()
         human_aa = gmap[pos].upper()
         if donor_aa == human_aa or donor_aa in ("", "X"):
@@ -223,10 +230,10 @@ def analyze_backmutations(
         chem += wc["removes_isomerization_dt"] if _motif_hit(win_d, r"DT") else 0
         chem += wc["removes_isomerization_dh"] if _motif_hit(win_d, r"DH") else 0
         # acid hydrolysis (D-X where X is small residue) and DD (high risk)
-        chem += wc["removes_acid_hydrolysis"] if _motif_hit(win_d, r"D[AGSVTLIP]") else 0
+        chem += wc["removes_acid_hydrolysis"] if _motif_hit(win_d, r"D[AVLIP]") else 0
         chem += wc["removes_acid_hydrolysis_dd"] if _motif_hit(win_d, r"DD") else 0
         # oxidation (M / W / C)
-        chem += wc["removes_oxidation"] if _motif_hit(win_d, r"[MWC]") else 0
+        chem += wc["removes_oxidation"] if _motif_hit(win_d, r"[MW]") else 0
         # base hydrolysis (K-X where X is D/E)
         chem += wc["removes_base_hydrolysis"] if _motif_hit(win_d, r"K[DE]") else 0
         # metalloprotease cleavage (MK)
@@ -240,6 +247,16 @@ def analyze_backmutations(
             + WEIGHTS["blend"][1] * benefit
             + WEIGHTS["blend"][2] * max(0, min(1, chem))
         ), 1)
+
+        # Gold-standard demotion: positions empirically shown to tolerate the
+        # human residue (docs/backtest_report.md) are demoted to T3 UNLESS
+        # structure data supports burial or CDR contact (AF3 mode overrides).
+        demoted_note = ""
+        if (tier in ("T1", "T2") and num in EMPIRICAL_NO_EFFECT[chain_type]
+                and buried is not True and cdr_contact is not True):
+            tier = "T3"
+            composite = min(composite, 40.0)
+            demoted_note = f"empirical: {EMPIRICAL_NO_EFFECT_NOTE.get(pos, '')}"
 
         # ---- empirical calibration (from experiment data) ----
         empirical_ddG = None
@@ -275,6 +292,8 @@ def analyze_backmutations(
                                exposure, conservation_val, donor_aa, human_aa)
         if empirical_note:
             rationale.append(empirical_note)
+        if demoted_note:
+            rationale.append(demoted_note)
 
         candidates.append(BackMutationCandidate(
             position=pos,

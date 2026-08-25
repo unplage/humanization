@@ -19,64 +19,39 @@ def generate_template_score_table(
     db: GermlineDB,
     selected_germline: GermlineGene,
 ) -> str:
-    """生成 Template Score 表格 (类似 WeMol)"""
-    
+    """生成 Template Score 表格 (类似 WeMol)
+
+    按链型（H/L）逐位点比较 FR 区（FR1/FR2/FR3）同源性，
+    避免旧实现对轻链使用硬编码的 H 位置表（导致 VL 全零）。
+    """
     v_genes = db.human(chain_type)
-    
-    # 计算每个 germline 的评分
+
+    def region_of(pos: str) -> str:
+        return query.region_of(pos) or ""
+
     results = []
     for g in v_genes:
         if g.numbered is None:
             continue
-        
-        # 计算各种指标
         q = query.posmap()
         gn = g.numbered.posmap()
-        
-        # FR mismatch 计数
-        fr_mismatch = 0
-        fr_length = 0
-        for pos in ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'H7', 'H8', 'H9', 'H10',
-                     'H11', 'H12', 'H13', 'H14', 'H15', 'H16', 'H17', 'H18', 'H19', 'H20',
-                     'H21', 'H22', 'H23', 'H24', 'H25', 'H26', 'H27', 'H28', 'H29', 'H30',
-                     'H31', 'H32', 'H33', 'H34', 'H35', 'H35A', 'H36', 'H37', 'H38', 'H39',
-                     'H40', 'H41', 'H42', 'H43', 'H44', 'H45', 'H46', 'H47', 'H48', 'H49',
-                     'H50', 'H51', 'H52', 'H52A', 'H52B', 'H52C', 'H53', 'H54', 'H55', 'H56',
-                     'H57', 'H58', 'H59', 'H60', 'H61', 'H62', 'H63', 'H64', 'H65', 'H66',
-                     'H67', 'H68', 'H69', 'H70', 'H71', 'H72', 'H73', 'H74', 'H75', 'H76',
-                     'H77', 'H78', 'H79', 'H80', 'H81', 'H82', 'H82A', 'H82B', 'H82C', 'H83',
-                     'H84', 'H85', 'H86', 'H87', 'H88', 'H89', 'H90', 'H91', 'H92', 'H93',
-                     'H94', 'H95', 'H96', 'H97', 'H98', 'H99', 'H100', 'H100A', 'H100B',
-                     'H100C', 'H100D', 'H100E', 'H100F', 'H100G', 'H101', 'H102', 'H103']:
-            pos_str = f"H{pos}" if not pos.startswith('H') else pos
-            if pos_str in q and pos_str in gn:
-                fr_length += 1
-                if q[pos_str] != gn[pos_str]:
-                    fr_mismatch += 1
-        
-        # 计算 FR1%, FR2%, FR3%
-        fr1_positions = [f'H{i}' for i in range(1, 26)]
-        fr2_positions = [f'H{i}' for i in range(36, 50)]
-        fr3_positions = [f'H{i}' for i in range(66, 95)]
-        
-        def calc_fr_pct(positions):
-            match = 0
-            total = 0
-            for pos in positions:
-                if pos in q and pos in gn:
-                    total += 1
-                    if q[pos] == gn[pos]:
-                        match += 1
-            return (match / total * 100) if total > 0 else 0
-        
-        fr1_pct = calc_fr_pct(fr1_positions)
-        fr2_pct = calc_fr_pct(fr2_positions)
-        fr3_pct = calc_fr_pct(fr3_positions)
-        
-        # 计算综合分数
-        fr_identity = 1 - (fr_mismatch / fr_length) if fr_length > 0 else 0
+        common = [p for p in q if p in gn and region_of(p) in ("FR1", "FR2", "FR3")]
+        fr_mismatch = sum(1 for p in common if q[p] != gn[p])
+        fr_length = len(common)
+
+        def calc_fr_pct(region):
+            ps = [p for p in common if region_of(p) == region]
+            if not ps:
+                return 0.0
+            return 100.0 * sum(1 for p in ps if q[p] == gn[p]) / len(ps)
+
+        fr1_pct = calc_fr_pct("FR1")
+        fr2_pct = calc_fr_pct("FR2")
+        fr3_pct = calc_fr_pct("FR3")
+        fr_identity = 1 - (fr_mismatch / fr_length) if fr_length > 0 else 0.0
+        # 与 FR 同源性主导、FR1-3 分段微调的综合分数
         score = fr_identity * 100 + fr1_pct * 0.1 + fr2_pct * 0.1 + fr3_pct * 0.1
-        
+
         results.append({
             'gene': g.gene_id,
             'fr_mismatch': fr_mismatch,
@@ -87,22 +62,18 @@ def generate_template_score_table(
             'fr3_pct': fr3_pct,
             'score': score,
         })
-    
-    # 按分数排序
+
     results.sort(key=lambda x: -x['score'])
-    
-    # 生成表格
+
     lines = []
     lines.append("NO.\tHit\tFR_Length_Diff\t#FR_Mismatch\tFR%\tFR1%\tFR2%\tFR3%\tScore")
     lines.append("-" * 100)
-    
     for i, r in enumerate(results[:30], 1):
         lines.append(
             f"{i}\t{r['gene']}\t0\t{r['fr_mismatch']}\t"
             f"{r['fr_identity']*100:.1f}\t{r['fr1_pct']:.1f}\t"
             f"{r['fr2_pct']:.1f}\t{r['fr3_pct']:.1f}\t{r['score']:.1f}"
         )
-    
     return "\n".join(lines)
 
 
@@ -110,22 +81,23 @@ def generate_mutation_score_table(
     backmut: BackMutationResult,
     germline: GermlineGene,
 ) -> str:
-    """生成 Mutation Score 表格 (类似 WeMol)"""
-    
+    """生成 Mutation Score 表格 (类似 WeMol)
+
+    Germline Frequency = 供体残基在人源 germline 参考面板中的出现频率
+    （来自 backmut.germline_conservation，top-20 同源 germline 面板）。
+    """
+    cons = backmut.germline_conservation
     lines = []
     lines.append("Chain\tPosition\tDonor Residue\tTemplate Residue\tScore\tGermline Frequency")
     lines.append("-" * 100)
-    
     for c in backmut.candidates:
-        if c.tier in ["T1", "T2", "T3"]:
-            # 计算 germline 频率
-            freq = "100%"  # 默认
-            
+        if c.tier in ("T1", "T2", "T3"):
+            freq = cons.get(c.position)
+            freq_txt = f"{freq:.0%}" if freq is not None else "-"
             lines.append(
                 f"{c.position[0]}\t{c.position}\t{c.donor_aa}\t{c.human_aa}\t"
-                f"{c.composite:.1f}\t{freq}"
+                f"{c.composite:.1f}\t{freq_txt}"
             )
-    
     return "\n".join(lines)
 
 
@@ -279,27 +251,18 @@ def generate_hotspot_summary(
 def generate_humanized_sequences(
     chain_reports: List[ChainReport],
 ) -> str:
-    """生成人源化序列"""
-    
+    """生成人源化序列（V0 纯移植 + V1/V2/V3 变体，来自真实 graft 结果）"""
     lines = []
-    lines.append(">VL")
-    lines.append(chain_reports[0].input_chain.sequence if chain_reports else "")
-    
-    for i, rep in enumerate(chain_reports):
+    for rep in chain_reports:
         chain_type = rep.input_chain.chain_type
         v_gene = rep.germline.v_gene.gene_id if rep.germline.v_gene else "None"
-        
-        # V0: 纯移植
-        if hasattr(rep, 'graft_sequence'):
+        graft = rep.grafts.get("kabat")
+        if graft is not None:
             lines.append(f">{chain_type}0 Graft({v_gene})")
-            lines.append(rep.graft_sequence)
-        
-        # V2: T1+T2 回复突变
-        if hasattr(rep, 'variants') and len(rep.variants) > 1:
-            v2 = rep.variants[1]
-            lines.append(f">{chain_type}2 Graft({v_gene}) + T1T2 mutations")
-            lines.append(v2.sequence)
-    
+            lines.append(graft.sequence)
+        for v in rep.variants[1:]:
+            lines.append(f">{chain_type} {v.name} ({v.description})")
+            lines.append(v.sequence)
     return "\n".join(lines)
 
 

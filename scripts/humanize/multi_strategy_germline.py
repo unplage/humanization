@@ -122,16 +122,16 @@ def _estimate_n_backmutations(
 ) -> int:
     """估计回复突变数量（基于实际的 tier 分析）。
 
-    使用与下游完全一致的 analyze_backmutations 统计 T1+T2+T3 的数量，
-    避免与最终变体梯度的回复突变数脱节（旧实现只数 FR 差异，
-    未考虑 KEEP_DONOR 与 tier 分级）。
+    使用与下游完全一致的 analyze_backmutations 统计 **V2 变体（T1+T2）**
+    的回复突变数——即生产推荐变体的真实回复数。旧实现统计 T1+T2+T3，
+    而 T3 数量 ≈ 框架差异数，导致 min_backmutations 策略与 fr_best 趋同。
     """
     if gene.numbered is None:
         return 999
     try:
         from .backmut import analyze_backmutations
         bm = analyze_backmutations(query, gene, is_vhh=is_vhh)
-        return sum(1 for c in bm.candidates if c.tier in ("T1", "T2", "T3"))
+        return sum(1 for c in bm.candidates if c.tier in ("T1", "T2"))
     except Exception:
         return 999
 

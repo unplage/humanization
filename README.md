@@ -81,7 +81,7 @@ python3 tests/test_pipeline.py
 | **实验数据闭环** | `humanize learn`：KD 数据 → 逐位点 ΔΔG → 自动校准分级与评分 |
 | **可开发性检查** | N-糖基化 / 脱酰胺 / 异构化 / 氧化风险自动扫描 |
 | **专业报告** | Markdown + **Word（.docx）** + JSON + 逐位点 CSV + variants FASTA |
-| **验证基准** | 4D5→曲妥珠单抗、A4.6.1→贝伐珠单抗回测 + **25 例 HumAb25 规模化验证** |
+| **验证基准** | 4D5→曲妥珠单抗、A4.6.1→贝伐珠单抗、**cAb-Lys3→hCAb-Lys3（VHH）** 回测 + **25 例 HumAb25 规模化验证** |
 
 ---
 

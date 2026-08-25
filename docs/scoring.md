@@ -75,6 +75,19 @@ Bonus for reverting away from a donor residue that creates a risk motif in a
   T1/T2 with composite >= 60 are "high confidence"; 40-60 "moderate";
   < 40 "borderline" (typically T3).
 
+## 3.5 Gold-standard empirical demotion (金标准实测降级)
+
+内置"实测无效应位点"表（`config.py::EMPIRICAL_NO_EFFECT`），来自回测金标准：
+
+| 位点 | 证据 | 无结构时的处理 |
+|------|------|----------------|
+| VL L87 | 曲妥珠单抗保留 germline Y87 且 KD ~0.1 nM 完好（docs/backtest_report.md） | T1/T2 → **T3**（score 封顶 40） |
+
+- 仅当无结构证据时生效：若 AF3 判定该位点埋藏或接触 CDR（`buried=True` /
+  `cdr_contact=True`），降级被覆盖，维持原分级
+- 结构模式（AF3）开启时，该表自动失效（结构数据优先于历史先验）
+- 新增此类条目需附回测/实验证据
+
 ## 4. Known limitations
 
 - Without AF3, buriedness/contact hints are absent: tiering relies on the

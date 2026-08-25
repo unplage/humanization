@@ -172,7 +172,6 @@ def _chain_from_map(seq: str, pmap: dict, ctype: str) -> Optional[NumberedChain]
 def _region_of_pos(pos: str) -> str:
     """Infer region from a Kabat position label (approx; used for germlines
     where the exact region walk is not available)."""
-    from .numbering import NumberedResidue
     chain = pos[0]
     num = int("".join(c for c in pos if c.isdigit()))
     if chain == "H":
@@ -184,7 +183,9 @@ def _region_of_pos(pos: str) -> str:
             return "FR2"
         if num <= 65:
             return "CDR2"
-        if num <= 92:
+        # strict Kabat: H93/H94 are FR3 tail residues (CDR3 loop start);
+        # CDR3 starts at H95.
+        if num <= 94:
             return "FR3"
         if num <= 102:
             return "CDR3"

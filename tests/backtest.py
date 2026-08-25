@@ -47,6 +47,24 @@ CASE1 = {
     "cdr_expected": {"VH": True, "VL": True},
 }
 
+CASE_VHH = {
+    "name": "cAb-Lys3 -> hCAb-Lys3 (VHH humanization, Vincke 2009)",
+    "is_vhh": True,
+    "parent": {   # PDB 1MEL (camelid anti-lysozyme VHH)
+        "VH": "DVQLQASGGGSVQAGGSLRLSCAASGYTIGPYCMGWFRQAPGKEREGVAAINMGGGITYYADSVKGRFTISQDNAKNTVYLLMNSLEPEDTAIYYCAADSTIYASYYECGHGLSTGGYGYDSWGQGTQVTVSS",
+    },
+    # Reconstructed from the documented Vincke 2009 universal scaffold design:
+    #   IGHV3-23-consensus framework + camelid hallmark (37F/44E/45R/47G) + S49
+    #   + cAb-Lys3 CDRs grafted unchanged (incl. the disulfide CDR3).
+    # Sequence should be verified against the paper before production use.
+    "actual": {
+        "VH": "EVQLVESGGGLVQPGGSLRLSCAASGYTIGPYCMGWFRQAPGKEREGVSAINMGGGITYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAADSTIYASYYECGHGLSTGGYGYDSWGQGTQVTVSS",
+    },
+    "forced_germlines": {"VH": "IGHV3-23*01"},
+    "cdr_expected": {"VH": True},
+}
+
+
 CASE2 = {
     "name": "A4.6.1 -> humanized anti-VEGF (bevacizumab lineage)",
     "parent": {   # 1CZ8 chains D/C (mouse A4.6.1)
@@ -78,9 +96,12 @@ def number_pair(vh_seq, vl_seq):
 def analyze_case(case, db, force_germline=False):
     from humanize.backmut import StructureHints
     from humanize.minimal import cvi_homology
+    from humanize.numbering import is_vhh
 
+    is_vhh_case = case.get("is_vhh", False)
+    chains = ("VH",) if is_vhh_case else ("VH", "VL")
     results = {}
-    for ctype in ("VH", "VL"):
+    for ctype in chains:
         parent = number_heavy(case["parent"][ctype]) if ctype == "VH" \
             else number_light(case["parent"][ctype])
         actual = number_heavy(case["actual"][ctype]) if ctype == "VH" \
@@ -104,7 +125,7 @@ def analyze_case(case, db, force_germline=False):
             continue
 
         # pipeline recommendation on the parent (T1+T2 = V2 class)
-        bm = analyze_backmutations(parent, v_gene)
+        bm = analyze_backmutations(parent, v_gene, is_vhh=is_vhh_case)
         t12 = set(bm.revert_positions(("T1", "T2")))
 
         # what does the ACTUAL humanized sequence carry at each FR position?
@@ -119,6 +140,10 @@ def analyze_case(case, db, force_germline=False):
                 continue
             if parent.region_of(pos) not in ("FR1", "FR2", "FR3"):
                 continue
+            # H93/H94 carry the first two CDR3-loop residues; they are
+            # grafted from the donor (P0 fix) and never back-mutation targets.
+            if ctype == "VH" and num in (93, 94):
+                continue
             if dmap[pos] == gmap[pos] or pos not in amap:
                 continue
             actual_aa = amap[pos]
@@ -132,6 +157,14 @@ def analyze_case(case, db, force_germline=False):
                 is_bm = False
                 kind = "compromise"            # actual = neither (engineered)
             rec = pos in t12                   # pipeline recommends revert
+            # VHH hallmark positions are kept via KEEP_DONOR graft protection
+            # (not T1/T2 reversion); retaining the donor there is satisfied.
+            kd_pos = False
+            if is_vhh_case and ctype == "VH":
+                c_obj = next((c for c in bm.candidates if c.position == pos), None)
+                kd_pos = c_obj is not None and c_obj.tier == "KEEP_DONOR"
+            if is_bm and kd_pos:
+                rec = True
             if is_bm:
                 actual_bm.add(pos)
             elif kind == "compromise":
@@ -157,6 +190,7 @@ def analyze_case(case, db, force_germline=False):
 
         results[ctype] = {
             "germline": v_gene.gene_id,
+            "detail_bm_candidates": bm.candidates,
             "fr_identity_parent": round(scores.get("fr_identity", 0), 3),
             "cvi": cvi_homology(parent, v_gene),
             "actual_backmutations": sorted(actual_bm, key=lambda p: (p[0], int("".join(c for c in p if c.isdigit())))),
@@ -177,6 +211,15 @@ def print_case(case, db, force=False):
     label = "MODE B (forced historical germline)" if force else "MODE A (pipeline germline choice)"
     print(f"\n{'='*78}\n{case['name']}  [{label}]\n{'='*78}")
     res = analyze_case(case, db, force_germline=force)
+    if case.get("is_vhh"):
+        from humanize.numbering import is_vhh
+        parent = number_heavy(case["parent"]["VH"])
+        vhh, score, matched = is_vhh(parent)
+        print(f"\n  VHH hallmark detected: {vhh} ({score}/4: {matched})")
+        kd = [c.position for c in res["VH"]["detail_bm_candidates"]
+              if c.tier == "KEEP_DONOR"] if "detail_bm_candidates" in res["VH"] else None
+        if kd:
+            print(f"  hallmark positions kept KEEP_DONOR: {sorted(kd)}")
     for ctype, r in res.items():
         if "error" in r:
             print(f"  {ctype}: {r['error']}")
@@ -212,6 +255,8 @@ def main():
     print_case(CASE1, db, force=True)
     print_case(CASE2, db, force=False)
     print_case(CASE2, db, force=True)
+    print_case(CASE_VHH, db, force=False)
+    print_case(CASE_VHH, db, force=True)
     return 0
 
 

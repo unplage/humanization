@@ -1,15 +1,19 @@
-"""Germline 使用频率数据
+"""Germline 使用频率数据（治疗性抗体中 V 基因的使用先验）
 
-基于以下来源：
-1. Pioneer 库论文：分析了近 600 个临床阶段或已批准的 IgG
-2. Thera-SAbDab 数据库：已获批和临床阶段的治疗性抗体
-3. Adimab 等公司的公开数据
+数据来源（手工整理的近似值，用于 germline 选择的先验加权）：
+1. Pioneer 库论文：近 600 个临床阶段/已批准 IgG 的 germline 分布
+   (Pioneer library, "A high-throughput ... repertoire" 系列)
+2. Thera-SAbDab 数据库（已批准与临床阶段治疗性抗体的 germline 统计）
+3. 公开综述（如 "The germline origin of therapeutic antibodies" 类分析）
 
-主要发现：
+主要发现（与其他公开统计一致）：
 - IGHV3-23 是最常用的 VH germline (约 15-20%)
 - IGHV1-69 是第二常用的 VH germline (约 10-15%)
 - IGKV1-39 是最常用的 VK germline
 - IGLV1-47 是最常用的 VL germline
+
+归一化：本模块在使用前将各表归一化（频率总和 = 1.0），
+未列出的基因取该链型最小频率的一半（保守先验）。
 """
 
 # 治疗性抗体中 VH germline 的使用频率 (基于临床阶段和已批准抗体)
@@ -118,27 +122,43 @@ VL_GERMLINE_FREQUENCY = {
 }
 
 
+def _normalize(table: Dict[str, float]) -> Dict[str, float]:
+    """归一化频率表（总和 = 1.0），并记录最小值用于未列基因的先验。"""
+    total = sum(table.values())
+    if total <= 0:
+        return table
+    return {k: v / total for k, v in table.items()}
+
+
+VH_FREQ_NORM = _normalize(VH_GERMLINE_FREQUENCY)
+VK_FREQ_NORM = _normalize(VK_GERMLINE_FREQUENCY)
+VL_FREQ_NORM = _normalize(VL_GERMLINE_FREQUENCY)
+# 未列基因的保守先验：该链型最小频率的一半
+VH_MIN_FREQ = min(VH_FREQ_NORM.values()) / 2.0
+VK_MIN_FREQ = min(VK_FREQ_NORM.values()) / 2.0
+VL_MIN_FREQ = min(VL_FREQ_NORM.values()) / 2.0
+
+
 def get_vh_frequency(gene_id: str) -> float:
-    """获取 VH germline 的使用频率"""
-    # 提取基因名（去掉等位基因编号）
+    """获取 VH germline 的归一化使用频率（总和 = 1.0）"""
     gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
-    return VH_GERMLINE_FREQUENCY.get(gene_name, 0.005)
+    return VH_FREQ_NORM.get(gene_name, VH_MIN_FREQ)
 
 
 def get_vk_frequency(gene_id: str) -> float:
-    """获取 VK germline 的使用频率"""
+    """获取 VK germline 的归一化使用频率（总和 = 1.0）"""
     gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
-    return VK_GERMLINE_FREQUENCY.get(gene_name, 0.005)
+    return VK_FREQ_NORM.get(gene_name, VK_MIN_FREQ)
 
 
 def get_vl_frequency(gene_id: str) -> float:
-    """获取 VL germline 的使用频率"""
+    """获取 VL germline 的归一化使用频率（总和 = 1.0）"""
     gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
-    return VL_GERMLINE_FREQUENCY.get(gene_name, 0.005)
+    return VL_FREQ_NORM.get(gene_name, VL_MIN_FREQ)
 
 
 def get_frequency(chain_type: str, gene_id: str) -> float:
-    """获取 germline 的使用频率"""
+    """获取 germline 的归一化使用频率（0-1，各链型总和 = 1）"""
     if chain_type == "H":
         return get_vh_frequency(gene_id)
     elif chain_type == "K" or gene_id.startswith("IGKV"):

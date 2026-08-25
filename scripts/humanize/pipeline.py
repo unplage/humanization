@@ -266,7 +266,9 @@ def _process_chain(
             # map Kabat positions to model residue numbers (chain label H/L/A)
             label = "H" if ctype == "H" else "L"
             all_pos = {r.pos: r.index + 1 for r in donor.residues}
-            cdrs = {p: n for p, n in all_pos.items() if (donor.region_of(p) or "").startswith("CDR")}
+            from .graft import is_cdr_loop_position
+            cdrs = {p: n for p, n in all_pos.items()
+                    if is_cdr_loop_position(ctype, int("".join(c for c in p if c.isdigit())))}
             ag_chains = ["A"] if antigen else None
             hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains)
 

@@ -48,10 +48,18 @@ def scan_sequence(chain) -> List[DevelopabilityIssue]:
     """Scan one numbered chain for sequence-level developability risks.
 
     WARNING: 仅检测序列模式，未考虑结构暴露；埋藏位点风险可能被高估。
+
+    保守二硫键 Cys（VH 22/92、VL 23/88）是结构必需的配对 Cys，不计入
+    "unpaired Cys" / "oxidation (C)" 风险。
     """
     issues: List[DevelopabilityIssue] = []
     seq = chain.sequence.upper()
+    conserved_cys = {f"{chain.chain_type}{n}" for n in
+                     (22, 92) if chain.chain_type == "H"} | \
+                    {f"{chain.chain_type}{n}" for n in
+                     (23, 88) if chain.chain_type == "L"}
     for motif, pattern in RISK_MOTIFS.items():
+        cys_related = "unpaired Cys" in motif or motif.startswith("oxidation (C)")
         for m in re.finditer(pattern, seq):
             context = seq[max(0, m.start() - 3): m.end() + 3]
             pos = None
@@ -59,6 +67,8 @@ def scan_sequence(chain) -> List[DevelopabilityIssue]:
                 if r.index == m.start():
                     pos = r.pos
                     break
+            if cys_related and pos in conserved_cys:
+                continue   # 结构必需配对 Cys，非风险
             risk_level = _assess_risk_level(motif)
             issues.append(DevelopabilityIssue(
                 position=pos or f"seq{m.start() + 1}",
