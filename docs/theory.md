@@ -67,6 +67,8 @@ these are 42/49/50/52.)
 
 - **Buried** (relative SASA < 20%): core packing; reverting a buried
   mismatch is usually safe structurally but low immunogenic value.
+  Buriedness is computed by FreeSASA (accurate SASA calculation) when
+  available, with a contact-counting heuristic fallback.
 - **CDR contact** (heavy atom < 4.5 A to any CDR atom): directly stabilizes
   loop conformation → high reversion priority.
 - **Antigen contact** (heavy atom < 4.5 A to antigen, complex model):

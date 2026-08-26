@@ -344,7 +344,7 @@ def _process_chain(
             cdrs = {p: n for p, n in all_pos.items()
                     if is_cdr_loop_position(ctype, int("".join(c for c in p if c.isdigit())))}
             ag_chains = ["A"] if antigen else None
-            hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains)
+            hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains, pdb_path=structure_path)
 
     # ---- back-mutation analysis ----
     # Conservation reference: top-N homologous germlines (unbiased panel),
@@ -457,6 +457,6 @@ def _partner_sequence(chain: InputChain, _all_chains) -> Optional[str]:
     return None  # Fv-only partner chain prediction handled at pipeline level
 
 
-def _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains):
+def _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains, pdb_path=None):
     from .structure import compute_hints
-    return compute_hints(model, label, all_pos, cdrs, ag_chains)
+    return compute_hints(model, label, all_pos, cdrs, ag_chains, pdb_path=pdb_path)

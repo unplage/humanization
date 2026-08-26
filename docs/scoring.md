@@ -38,18 +38,38 @@ benefit = 0.3 + 0.5 * exposure * (1 - conservation)
   conservation) = more foreign = higher benefit of reverting. The panel is
   the top-N homologous germlines, not the per-strategy winners, so the
   estimate is unbiased across the human repertoire.
-- Positions with no structural feature are capped at 0.45 (surface
-  humanization is still worth something, but low priority).
+- Positions with no structural feature are capped at 0.50 (surface
+  humanization is still worth something, but low priority; capped to
+  preserve conservation-based ranking without flattening the gradient).
 
 ### 1.3 Chemical / developability (0-1)
 
 Bonus for reverting away from a donor residue that creates a risk motif in a
-3-residue window:
+3-residue window (anchored position, not full-window scan):
 
-- N-glycan (NxS/T): +0.8
-- deamidation (NG / NS): +0.5
-- isomerization (DG): +0.4
-- oxidation-prone (M/W): +0.3
+| Motif | Weight | Notes |
+|-------|--------|-------|
+| N-glycan (NxS/T) | 0.80 | N-X-S/T (X≠P); glycosylation site |
+| deamidation (NG) | 0.55 | Asn-Gly hotspot (Lu 2018) |
+| deamidation (NS) | 0.50 | Asn-Ser |
+| deamidation (NH) | 0.40 | Asn-His |
+| deamidation (ND) | 0.35 | Asn-Asp |
+| isomerization (DG) | 0.50 | Asp-Gly (FRIDA 2024) |
+| isomerization (DS) | 0.40 | Asp-Ser |
+| isomerization (DT) | 0.40 | Asp-Thr |
+| isomerization (DH) | 0.35 | Asp-His |
+| acid hydrolysis (D-X) | 0.45 | D + small residue (A/V/L/I/P) |
+| acid hydrolysis (DD) | 0.55 | Asp-Asp; dual risk (isomerization + hydrolysis) |
+| oxidation (M/W/C) | 0.30 | Met/Trp/Cys oxidation |
+| base hydrolysis (K-X) | 0.25 | Lys + D/E (rare; alkaline conditions) |
+| met-lyscleavage (MK) | 0.25 | Metalloprotease cleavage |
+| **introduces_nglycan** | **-0.80** | reversion would CREATE an N-glycan (penalty) |
+
+Chemical weights are from the literature: Lu et al. 2018 (deamidation), FRIDA
+2024 (isomerization), Boosted et al. 2022 (general stability), and expert
+consensus. Positions where the reversion would break an existing risk motif
+get the corresponding positive weight; positions where the reversion would
+INTRODUCE a glycan get a -0.80 penalty.
 
 ## 2. Tier assignment (final recommendation)
 
