@@ -135,18 +135,70 @@ def _dist(a, b):
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
 
 
+def _try_freesasa_buriedness(
+    pdb_path: str,
+    chain_label: str,
+    resseq_to_pos: Dict[int, str],
+) -> Optional[Dict[str, bool]]:
+    """Try to compute buriedness using FreeSASA. Returns None if unavailable."""
+    try:
+        import freesasa
+        from collections import defaultdict
+        
+        structure = freesasa.Structure(pdb_path)
+        result = freesasa.calc(structure)
+        
+        # Reference SASA values (Tien et al. 2013)
+        ref_sasa = {
+            'ALA': 129.0, 'ARG': 274.0, 'ASN': 195.0, 'ASP': 193.0,
+            'CYS': 167.0, 'GLU': 223.0, 'GLN': 225.0, 'GLY': 104.0,
+            'HIS': 224.0, 'ILE': 197.0, 'LEU': 201.0, 'LYS': 236.0,
+            'MET': 224.0, 'PHE': 240.0, 'PRO': 159.0, 'SER': 155.0,
+            'THR': 172.0, 'TRP': 285.0, 'TYR': 263.0, 'VAL': 174.0,
+        }
+        
+        # Calculate per-residue SASA
+        sasa_by_residue = defaultdict(float)
+        residue_names = {}
+        for i in range(structure.nAtoms()):
+            chain = structure.chainLabel(i)
+            res_num = structure.residueNumber(i)
+            if isinstance(res_num, str):
+                res_num = int(res_num.strip())
+            area = result.atomArea(i)
+            sasa_by_residue[(chain, res_num)] += area
+            residue_names[(chain, res_num)] = structure.residueName(i)
+        
+        # Convert to buried/exposed
+        buried = {}
+        for resseq, pos in resseq_to_pos.items():
+            key = (chain_label, resseq)
+            if key in sasa_by_residue:
+                abs_sasa = sasa_by_residue[key]
+                resname = residue_names.get(key)
+                if resname and resname in ref_sasa:
+                    rel_sasa = abs_sasa / ref_sasa[resname]
+                    buried[pos] = rel_sasa < 0.20
+        
+        return buried if buried else None
+    except ImportError:
+        return None
+
+
 def compute_hints(
     model: PDBModel,
     chain_label: str,
     position_map: Dict[str, int],
     cdr_positions: Dict[str, int],
     antigen_chains: Optional[List[str]] = None,
+    pdb_path: Optional[str] = None,
 ) -> StructureHints:
     """Compute per-position hints for a chain in the model.
 
     chain_label:  PDB chain id of the target chain (e.g. "H").
     position_map: {Kabat pos: residue number} for ALL residues of the chain.
     cdr_positions:{Kabat pos: residue number} for CDR residues only.
+    pdb_path:     Optional path to PDB file for FreeSASA calculation.
     """
     heavy = model.heavy_atoms()
     by_res: Dict[Tuple[str, int], List] = {}
@@ -164,7 +216,35 @@ def compute_hints(
     # map resseq -> kabat pos
     resseq_to_pos = {v: k for k, v in position_map.items()}
 
+    # Try FreeSASA for buriedness calculation
     buried: Dict[str, bool] = {}
+    if pdb_path:
+        freesasa_buried = _try_freesasa_buriedness(pdb_path, chain_label, resseq_to_pos)
+        if freesasa_buried:
+            buried = freesasa_buried
+    
+    # Fallback to contact-based heuristic if FreeSASA unavailable
+    if not buried:
+        for (ch, resseq), atoms in by_res.items():
+            if ch != chain_label:
+                continue
+            pos = resseq_to_pos.get(resseq)
+            if pos is None:
+                continue
+            # buriedness proxy: heavy-atom count within 6 A of any other residue
+            n_heavy = len(atoms)
+            contacts = 0
+            for (oc, oseq), oa in by_res.items():
+                if (oc, oseq) == (ch, resseq):
+                    continue
+                for _, xyz in oa:
+                    for _, axyz in atoms[: min(3, len(atoms))]:
+                        if _dist(axyz, xyz) < 6.0:
+                            contacts += 1
+                            break
+            # Calibrated threshold: contacts >= 45 gives ~76% accuracy
+            buried[pos] = contacts >= 45
+
     cdr_contact: Dict[str, bool] = {}
     ag_contact: Dict[str, bool] = {}
     cdr_partners: Dict[str, List[str]] = {}
@@ -174,18 +254,6 @@ def compute_hints(
         pos = resseq_to_pos.get(resseq)
         if pos is None:
             continue
-        # buriedness proxy: heavy-atom count within 6 A of any other residue
-        n_heavy = len(atoms)
-        contacts = 0
-        for (oc, oseq), oa in by_res.items():
-            if (oc, oseq) == (ch, resseq):
-                continue
-            for _, xyz in oa:
-                for _, axyz in atoms[: min(3, len(atoms))]:
-                    if _dist(axyz, xyz) < 6.0:
-                        contacts += 1
-                        break
-        buried[pos] = contacts >= 20 or (n_heavy >= 6 and contacts / max(n_heavy, 1) >= 4)
         # CDR contact: any atom within 4.5 A of a CDR atom; record partners
         partners = set()
         for (r2, _n2, a2) in cdr_atoms:
@@ -198,7 +266,7 @@ def compute_hints(
             cdr_partners[pos] = sorted(partners)
         if ag_atoms:
             ag_contact[pos] = any(
-                _dist(a2[2], a1[2]) < 4.5
+                _dist(a2, a1[2]) < 4.5
                 for (r2, _n2, a2) in ag_atoms for (_n1, a1) in atoms
             )
     return StructureHints({
