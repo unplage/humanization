@@ -37,6 +37,7 @@ from .variants import Variant, assemble_variants
 class PipelineConfig:
     germline_dir: str = ""
     germline_strategy: str = "auto"    # fr_best|cdr_best|composite|cvi_best|min_backmutations|current|auto
+    forced_germlines: Dict[str, str] = field(default_factory=dict)  # {"H": "IGHV1-3*01", "L": "IGKV1-39*01"}
     cdr_scheme: str = "kabat"          # kabat|chothia|abm|imgt (graft def)
     report_schemes: List[str] = field(default_factory=lambda: ["kabat", "chothia", "imgt"])
     format: str = "auto"               # auto|fab|vhh
@@ -210,21 +211,20 @@ def _process_chain(
     # ---- germline selection ----
     from .multi_strategy_germline import choose_germlines_multi_strategy
     
-    strategy = config.germline_strategy
-    if strategy == "auto":
-        # 自动策略：VH 使用 cvi_best，VL 使用 cdr_best
-        strategy = "cvi_best" if ctype == "H" else "cdr_best"
-    
-    multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
-    candidate = multi_result.get_best(strategy)
-    
-    if candidate is None:
-        # 回退到默认策略
-        choice = choose_germlines(donor, db)
-        v_gene, j_gene = choice.v_gene, choice.j_gene
-    else:
-        v_gene = candidate.gene
-        # 选择 J 基因
+    # Check for forced germline
+    forced_gene_id = config.forced_germlines.get(ctype)
+    if forced_gene_id:
+        # Use forced germline
+        v_genes = db.v_for(ctype)
+        v_gene = None
+        for g in v_genes:
+            if g.gene_id == forced_gene_id:
+                v_gene = g
+                break
+        if v_gene is None:
+            raise RuntimeError(f"[{chain.name}] forced germline {forced_gene_id} not found in database")
+        
+        # Select best J gene
         from .germline import score_j_match
         j_genes = db.j_for(ctype)
         j_scored = []
@@ -234,20 +234,61 @@ def _process_chain(
         j_scored.sort(key=lambda t: (-t[1], -t[2]))
         j_gene = j_scored[0][0] if j_scored else None
         
-        # 创建兼容的 choice 对象
+        # Calculate identity for the forced gene
+        from .germline import compare_to_germline
+        scores = compare_to_germline(donor, v_gene)
+        
+        # Create choice object
         from .germline import GermlineChoice
         choice = GermlineChoice(
             v_gene=v_gene,
             j_gene=j_gene,
-            scores={"fr_identity": candidate.fr_identity, "cdr_identity": candidate.cdr_identity},
-            alternatives=[(c.gene, {"fr_identity": c.fr_identity, "cdr_identity": c.cdr_identity}) 
-                         for c in multi_result.candidates.values()],
+            scores=scores,
+            alternatives=[],
         )
+        
+        # Also create multi_result for report compatibility
+        multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
+    else:
+        # Use strategy-based selection
+        strategy = config.germline_strategy
+        if strategy == "auto":
+            # 自动策略：VH 使用 cvi_best，VL 使用 cdr_best
+            strategy = "cvi_best" if ctype == "H" else "cdr_best"
+        
+        multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
+        candidate = multi_result.get_best(strategy)
+        
+        if candidate is None:
+            # 回退到默认策略
+            choice = choose_germlines(donor, db)
+            v_gene, j_gene = choice.v_gene, choice.j_gene
+        else:
+            v_gene = candidate.gene
+            # 选择 J 基因
+            from .germline import score_j_match
+            j_genes = db.j_for(ctype)
+            j_scored = []
+            for jg in j_genes:
+                idn, n = score_j_match(donor, jg)
+                j_scored.append((jg, idn, n))
+            j_scored.sort(key=lambda t: (-t[1], -t[2]))
+            j_gene = j_scored[0][0] if j_scored else None
+            
+            # 创建兼容的 choice 对象
+            from .germline import GermlineChoice
+            choice = GermlineChoice(
+                v_gene=v_gene,
+                j_gene=j_gene,
+                scores={"fr_identity": candidate.fr_identity, "cdr_identity": candidate.cdr_identity},
+                alternatives=[(c.gene, {"fr_identity": c.fr_identity, "cdr_identity": c.cdr_identity}) 
+                             for c in multi_result.candidates.values()],
+            )
     
     if v_gene is None or j_gene is None:
         raise RuntimeError(f"[{chain.name}] no viable human germline found")
 
-    # ---- structure hints (AF3) ----
+    # ---- structure hints (AF3 or donor structure) ----
     hints = StructureHints()
     af3_pdb = None
     if config.af3.mode != "off":
@@ -259,12 +300,45 @@ def _process_chain(
             antigen,
             f"{chain.name}_{ctype}",
         )
-    if af3_pdb and os.path.exists(af3_pdb):
+    
+    # Load structure from AF3 prediction or donor structure
+    structure_path = af3_pdb if af3_pdb and os.path.exists(af3_pdb) else config.donor_structure
+    if structure_path and os.path.exists(structure_path):
         from .structure import load_model
-        model = load_model(af3_pdb)
+        model = load_model(structure_path)
         if model:
-            # map Kabat positions to model residue numbers (chain label H/L/A)
-            label = "H" if ctype == "H" else "L"
+            # Determine chain label from PDB chains
+            # For Fab: typically chain A = VH, chain B = VL (but may vary)
+            # We need to match by sequence identity
+            pdb_chains = {}
+            for atom in model.atoms:
+                if atom.chain not in pdb_chains:
+                    pdb_chains[atom.chain] = []
+                pdb_chains[atom.chain].append(atom)
+            
+            # Find which PDB chain matches this input chain by comparing first few residues
+            label = None
+            for chain_id, atoms in pdb_chains.items():
+                # Get CA atoms and their residue names
+                ca_atoms = [(a.resseq, a.resname) for a in atoms if a.name == 'CA']
+                if not ca_atoms:
+                    continue
+                # Compare first residue with donor sequence
+                first_resname = ca_atoms[0][1]
+                donor_first = donor.sequence[0] if donor.sequence else ''
+                # Map 1-letter to 3-letter codes
+                aa1to3 = {'A': 'ALA', 'R': 'ARG', 'N': 'ASN', 'D': 'ASP', 'C': 'CYS',
+                          'E': 'GLU', 'Q': 'GLN', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+                          'L': 'LEU', 'K': 'LYS', 'M': 'MET', 'F': 'PHE', 'P': 'PRO',
+                          'S': 'SER', 'T': 'THR', 'W': 'TRP', 'Y': 'TYR', 'V': 'VAL'}
+                if aa1to3.get(donor_first) == first_resname:
+                    label = chain_id
+                    break
+            
+            if label is None:
+                # Fallback: use "H" for VH, "L" for VL
+                label = "H" if ctype == "H" else "L"
+            
             all_pos = {r.pos: r.index + 1 for r in donor.residues}
             from .graft import is_cdr_loop_position
             cdrs = {p: n for p, n in all_pos.items()
