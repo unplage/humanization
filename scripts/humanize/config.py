@@ -109,27 +109,13 @@ EMPIRICAL_NO_EFFECT_NOTE = {
 
 # ---------------------------------------------------------------------------
 # Tier rules (final recommendation)
+#
+# NOTE: tier assignment is implemented authoritatively in
+# scripts/humanize/backmut.py::_assign_tier (hard-coded from the literature
+# position sets above). The TIER_RULES table was a declarative duplicate that
+# drifted out of sync and is intentionally removed -- keep _assign_tier as the
+# single source of truth.
 # ---------------------------------------------------------------------------
-
-TIER_RULES = {
-    # (feature, requires_structure, requires_buried) -> tier
-    "T1_must": {
-        "interface_core": (True, False),
-        "disulfide_cys": (False, False),   # keep donor! handled separately
-    },
-    "T1_if_buried": {
-        "vernier": (True, True),
-        "canonical": (True, True),
-    },
-    "T2_recommended": {
-        "vernier": (False, False),
-        "canonical": (False, False),
-        "cdr_contact": (False, False),
-        "antigen_contact": (False, False),
-        "buried": (False, False),
-        "interface_extended": (False, False),
-    },
-}
 
 TIER_LABELS = {
     "T1": "must revert (structural pillar)",

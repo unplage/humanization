@@ -14,7 +14,6 @@ immunogenicity, then assign:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -112,10 +111,6 @@ class StructureHints:
         return 0.15 if b else 0.85
 
 
-def _motif_hit(seq: str, pattern: str) -> bool:
-    return bool(re.search(pattern, seq))
-
-
 def analyze_backmutations(
     donor: NumberedChain,
     v_gene: GermlineGene,
@@ -202,58 +197,83 @@ def analyze_backmutations(
         # rare donor residue among germlines -> more human-like to revert
         rare = 1.0 - conservation_val
         benefit = 0.3 + 0.5 * exposure * rare
+        # 无结构特征位点: 人源化收益低，但仍保留 conservation 相对梯度
+        # （仅设上限，不抹平排序信息）
         if not features:
-            benefit = min(benefit, 0.45)   # exposed non-structural: low value
+            benefit = min(benefit, 0.50)
 
         # ---- chemical score (developability) ----
         # WARNING: 仅基于序列模式检测，未考虑结构暴露状态；
         # 埋藏位点实际风险较低，表面暴露位点风险更高。
         # 已排除保守 Cys（VH 22/92, VL 23/88）和双计风险。
+        # 每个 motif 均锚定当前回复位点（避免窗口内无关 motif 误报）。
         wc = WEIGHTS["chemical"]
         chem = 0.0
-        # effect of reverting donor->human at this position: scan a window
         rpos = donor.residue(pos)
-        if rpos is None:
-            ridx = max(0, donor.sequence.find(donor_aa))
-        else:
-            ridx = rpos.index
-        win_d = donor.sequence[max(0, ridx - 2): ridx + 3]
+        ridx = rpos.index if rpos is not None else max(0, donor.sequence.find(donor_aa))
+        seq = donor.sequence
 
-        # N-glycan (NxS/T) - 优先检测，排除重叠
-        has_nglycan = _motif_hit(win_d, r"N[^P][ST]")
-        chem += wc["removes_nglycan"] if has_nglycan else 0
+        def _aa(off: int) -> str:
+            j = ridx + off
+            return seq[j] if 0 <= j < len(seq) else ""
 
-        # deamidation: NG > NS > NH > ND (排除 N-glycan 重叠)
-        # 如果是 N-glycan，跳过 NG/NS 避免双计
-        if not has_nglycan:
-            chem += wc["removes_deamidation_ng"] if _motif_hit(win_d, r"NG") else 0
-            chem += wc["removes_deamidation_ns"] if _motif_hit(win_d, r"NS") else 0
-        chem += wc["removes_deamidation_nh"] if _motif_hit(win_d, r"NH") else 0
-        chem += wc["removes_deamidation_nd"] if _motif_hit(win_d, r"ND") else 0
+        a0, a1, a2 = _aa(0), _aa(1), _aa(2)
 
-        # isomerization: DG > DS = DT > DH
-        chem += wc["removes_isomerization_dg"] if _motif_hit(win_d, r"DG") else 0
-        chem += wc["removes_isomerization_ds"] if _motif_hit(win_d, r"DS") else 0
-        chem += wc["removes_isomerization_dt"] if _motif_hit(win_d, r"DT") else 0
-        chem += wc["removes_isomerization_dh"] if _motif_hit(win_d, r"DH") else 0
+        # N-glycan (NxS/T): 当前位点是 N，N+1 非 P，N+2 是 S/T
+        ngly = a0 == "N" and a1 not in ("P", "") and a2 in ("S", "T")
+        if ngly:
+            chem += wc["removes_nglycan"]
 
-        # acid hydrolysis (D-X where X is small residue, 不含 G/S/T/H/D)
-        # DD 单独计分，避免双计
-        has_dd = _motif_hit(win_d, r"DD")
-        if not has_dd:
-            chem += wc["removes_acid_hydrolysis"] if _motif_hit(win_d, r"D[AVLIP]") else 0
-        chem += wc["removes_acid_hydrolysis_dd"] if has_dd else 0
+        # deamidation: 当前位点是 N（N-glycan 已计分时跳过 NS/NG 防双计）
+        if a0 == "N" and not ngly:
+            chem += wc["removes_deamidation_ng"] if a1 == "G" else 0
+            chem += wc["removes_deamidation_ns"] if a1 == "S" else 0
+            chem += wc["removes_deamidation_nh"] if a1 == "H" else 0
+            chem += wc["removes_deamidation_nd"] if a1 == "D" else 0
 
-        # oxidation (M / W) - C 仅在非保守位点计分
-        chem += wc["removes_oxidation"] if _motif_hit(win_d, r"[MW]") else 0
-        if donor_aa == "C" and num not in {22, 92} if chain_type == "H" else {23, 88}:
-            chem += wc["removes_oxidation"]  # 非保守 Cys
+        # isomerization / acid hydrolysis: 当前位点是 D
+        if a0 == "D":
+            chem += wc["removes_isomerization_dg"] if a1 == "G" else 0
+            chem += wc["removes_isomerization_ds"] if a1 == "S" else 0
+            chem += wc["removes_isomerization_dt"] if a1 == "T" else 0
+            chem += wc["removes_isomerization_dh"] if a1 == "H" else 0
+            # acid hydrolysis: D-X (X=A/V/L/I/P，不含 G/S/T/H/D 避免重叠)；DD 单独计分
+            if a1 == "D":
+                chem += wc["removes_acid_hydrolysis_dd"]
+            elif a1 in ("A", "V", "L", "I", "P"):
+                chem += wc["removes_acid_hydrolysis"]
 
-        # base hydrolysis (K-X where X is D/E)
-        chem += wc["removes_base_hydrolysis"] if _motif_hit(win_d, r"K[DE]") else 0
+        # oxidation: 当前位点是 M/W，或非保守 C
+        if a0 in ("M", "W"):
+            chem += wc["removes_oxidation"]
+        if a0 == "C" and num not in ({22, 92} if chain_type == "H" else {23, 88}):
+            chem += wc["removes_oxidation"]  # 非保守 Cys（排除保守二硫键 Cys）
 
-        # metalloprotease cleavage (MK)
-        chem += wc["removes_met_lyscleavage"] if _motif_hit(win_d, r"MK") else 0
+        # base hydrolysis: 当前位点是 K，K+1 是 D/E
+        if a0 == "K" and a1 in ("D", "E"):
+            chem += wc["removes_base_hydrolysis"]
+
+        # metalloprotease cleavage: 当前位点是 M，M+1 是 K
+        if a0 == "M" and a1 == "K":
+            chem += wc["removes_met_lyscleavage"]
+
+        # ---- introduced risk penalty (回复可能引入新风险) ----
+        # 回复将当前位点改为 human_aa 后，检查是否新形成 N-glycan (N-X-S/T)。
+        # 覆盖三种锚定方式（当前位点是 N / N+1 / N+2）。
+        # 注：回复要求 donor != human，故 donor 的 N-glycan 已被移除（见上方
+        # removes_nglycan），此处只惩罚"新引入"，不与移除奖励冲突。
+        h0 = human_aa
+        prev1 = seq[ridx - 1] if ridx - 1 >= 0 else ""
+        prev2 = seq[ridx - 2] if ridx - 2 >= 0 else ""
+        nxt1 = seq[ridx + 1] if ridx + 1 < len(seq) else ""
+        # 情况1: 当前位点是 N，N+1 非 P，N+2 是 S/T
+        case1 = h0 == "N" and a1 not in ("P", "") and a2 in ("S", "T")
+        # 情况2: 当前位点是 N-glycan 的 X（N-X-S/T），X 由 human_aa 提供且非 P
+        case2 = prev1 == "N" and h0 not in ("P", "") and nxt1 in ("S", "T")
+        # 情况3: 当前位点是 N-glycan 的 S/T（N-X-S/T），S/T 由 human_aa 提供
+        case3 = prev2 == "N" and prev1 not in ("P", "") and h0 in ("S", "T")
+        if case1 or case2 or case3:
+            chem += wc["introduces_nglycan"]  # -0.8 惩罚
 
         # ---- tier ----
         tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
@@ -387,6 +407,4 @@ def _rationale(features, tier, buried, cdr_contact, ag_contact,
         out.append("Surface-exposed: direct immunogenicity risk")
     if conservation <= 0.2:
         out.append(f"Donor {donor_aa} rare in human germlines (conservation {conservation:.0%})")
-    if not features and exposure < 0.5:
-        out.append("No structural role identified; buried")
     return out

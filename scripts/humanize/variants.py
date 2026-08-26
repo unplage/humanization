@@ -55,9 +55,13 @@ def assemble_variants(
     variants.append(build(
         f"{chain_type}_V2", "V0 + Tier-1/2 back-mutations", t2))
     # Tier 3: only exposed positions (immunogenicity drivers), capped
+    # 按 composite 降序（收益优先），而非位置顺序。
     t3_exposed = [
-        c.position for c in backmut.candidates
-        if c.tier == "T3" and (c.buried is False or c.buried is None)
+        c.position for c in sorted(
+            (c for c in backmut.candidates
+             if c.tier == "T3" and (c.buried is False or c.buried is None)),
+            key=lambda c: (-c.composite, c.position),
+        )
     ][:extra_t3_max]
     variants.append(build(
         f"{chain_type}_V3", "V0 + Tier-1/2 + selected exposed Tier-3", t2 + t3_exposed))
