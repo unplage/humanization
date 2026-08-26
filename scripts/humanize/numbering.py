@@ -376,7 +376,7 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
         warnings.append(f"[VL] FR2+CDR2+FR3 span {seg_len} vs 54 expected (diff {diff:+d})")
     fr2_len = 15
     if diff < 0:
-        fr2_len = 15 + diff
+        fr2_len = max(0, 15 + diff)  # floor at 0 for extremely truncated V regions
     rem = seg_len - fr2_len
     cdr2_len = min(7, rem)
     fr3_len = rem - cdr2_len
@@ -405,11 +405,17 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
         # V-region-only germline sequence (no J region): treat the tail as CDR3.
         f98_idx = n
     cdr3_seq = s[j_start:f98_idx]
+    # Kabat VL CDR3: base block L89-L97 (9 residues), insertions after L95,
+    # L96/L97 stay last. Mirrors the VH logic above (H95-H100 + H100A..).
+    ins = max(0, len(cdr3_seq) - 9)
     for j, aa in enumerate(cdr3_seq):
-        if j < 9:
-            res.append(NumberedResidue(f"L{89 + j}", aa, "CDR3", j_start + j))
+        if j < 7:
+            pos = f"L{89 + j}"
+        elif j < 7 + ins:
+            pos = f"L95{_letters(j - 6)[-1]}"
         else:
-            res.append(NumberedResidue(f"L95{_letters(j - 7)[-1]}", aa, "CDR3", j_start + j))
+            pos = f"L{89 + j - ins}"
+        res.append(NumberedResidue(pos, aa, "CDR3", j_start + j))
     fr4 = s[f98_idx : f98_idx + 10]
     if len(fr4) < 10:
         warnings.append(f"[VL] FR4 shorter than expected ({len(fr4)}/10) - truncated J region?")

@@ -63,6 +63,13 @@ def assemble_variants(
             key=lambda c: (-c.composite, c.position),
         )
     ][:extra_t3_max]
+    # 无结构数据时 buried 恒为 None，"exposed" 筛选退化为按 composite 排序；
+    # 描述中如实说明，避免误导。
+    has_structure = any(c.buried is not None for c in backmut.candidates)
+    v3_desc = ("V0 + Tier-1/2 + selected exposed Tier-3"
+               if has_structure else
+               "V0 + Tier-1/2 + top-composite Tier-3 (no structure data: "
+               "exposure unknown, ranked by composite)")
     variants.append(build(
-        f"{chain_type}_V3", "V0 + Tier-1/2 + selected exposed Tier-3", t2 + t3_exposed))
+        f"{chain_type}_V3", v3_desc, t2 + t3_exposed))
     return variants

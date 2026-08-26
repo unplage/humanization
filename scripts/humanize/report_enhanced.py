@@ -211,8 +211,9 @@ def generate_hotspot_summary(
         
         for c in rep.backmut.candidates:
             if c.tier in ["T1", "T2"]:
-                # 检查是否在 CDR 区域
-                if "cdr" in c.features:
+                # Check if position contacts a CDR loop (feature is
+                # "cdr_contact", not "cdr" — the old check was always False).
+                if "cdr_contact" in c.features or "antigen_contact" in c.features:
                     high_risk_count += 1
                     high_risk_sites.append(c.position)
         
@@ -228,8 +229,10 @@ def generate_hotspot_summary(
         
         # 计算人源度
         hl = rep.human_likeness
-        fv_hl = hl.get('kabat', 0) if hl else 0
-        fr_hl = hl.get('kabat', 0) if hl else 0  # 简化
+        # human_likeness_percent returns FR-only identity.  A true FV
+        # metric would include CDRs; report it as FR for now and label
+        # both columns the same to avoid misleading the user.
+        fr_hl = hl.get('kabat', 0) if hl else 0
         
         # 检查热点
         high_risk_count = 0
@@ -242,7 +245,7 @@ def generate_hotspot_summary(
         
         lines.append(
             f"{chain_type}\t{high_risk_count}\t{','.join(high_risk_sites)}\t"
-            f"{fv_hl:.1f}%\t{fr_hl:.1f}%"
+            f"{fr_hl:.1f}%\t{fr_hl:.1f}%"
         )
     
     return "\n".join(lines)

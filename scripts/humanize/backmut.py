@@ -246,7 +246,10 @@ def analyze_backmutations(
         # oxidation: 当前位点是 M/W，或非保守 C
         if a0 in ("M", "W"):
             chem += wc["removes_oxidation"]
-        if a0 == "C" and num not in ({22, 92} if chain_type == "H" else {23, 88}):
+        # 保守二硫键 Cys：VH 22/92；kappa VL 23/88；lambda VL FR1 短一个
+        # 残基，第一个保守 Cys 落在 22（与 developability.py 保持一致）。
+        conserved_cys = ({22, 92} if chain_type == "H" else {22, 23, 88})
+        if a0 == "C" and num not in conserved_cys:
             chem += wc["removes_oxidation"]  # 非保守 Cys（排除保守二硫键 Cys）
 
         # base hydrolysis: 当前位点是 K，K+1 是 D/E
@@ -281,7 +284,10 @@ def analyze_backmutations(
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
             + WEIGHTS["blend"][1] * benefit
-            + WEIGHTS["blend"][2] * max(0, min(1, chem))
+            # positive chemical rewards are capped at 1, but negative
+            # penalties (introduces_nglycan) must pass through unclamped,
+            # otherwise the penalty would silently vanish (regression-tested)
+            + WEIGHTS["blend"][2] * min(1, chem)
         ), 1)
 
         # Gold-standard demotion: positions empirically shown to tolerate the

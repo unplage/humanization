@@ -166,11 +166,6 @@ def choose_germlines_multi_strategy(
         n_backmut = _estimate_n_backmutations(query, g, is_vhh=is_vhh)
         composite = 0.7 * s['fr_identity'] + 0.3 * s['cdr_identity']
         
-        # 计算使用频率
-        frequency = get_frequency(ctype, g.gene_id)
-        # 复合评分: 0.5*CVI + 0.3*频率 + 0.2*FR
-        composite_3axis = 0.5 * cvi + 0.3 * frequency + 0.2 * s['fr_identity']
-        
         scored.append({
             'gene': g,
             'fr': s['fr_identity'],
@@ -178,8 +173,6 @@ def choose_germlines_multi_strategy(
             'composite': composite,
             'cvi': cvi,
             'n_backmut': n_backmut,
-            'frequency': frequency,
-            'composite_3axis': composite_3axis,
         })
     
     # FR 阈值：默认 60%（可移植性下限）。当没有候选达到该阈值时

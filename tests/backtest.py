@@ -67,9 +67,11 @@ CASE_VHH = {
 
 CASE2 = {
     "name": "A4.6.1 -> humanized anti-VEGF (bevacizumab lineage)",
-    "parent": {   # 1CZ8 chains D/C (mouse A4.6.1)
-        "VH": "EVQLVESGGGLVQPGGSLRLSCAASGYDFTHYGMNWVRQAPGKGLEWVGWINTYTGEPTYAADFKRRFTFSLDTSKSTAYLQMNSLRAEDTAVYYCAKYPYYYGTSHWYFDVWGQGTLVTVSSASTKGPSVFPLAPSSKSTSGGTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLYSLSSVVTVPSSSLGTQTYICNVNHKPSNTKVDKKVEPKSCDKTHL",
-        "VL": "DIQLTQSPSSLSASVGDRVTITCSASQDISNYLNWYQQKPGKAPKVLIYFTSSLHSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQYSTVPWTFGQGTKVEIKRTVAAPSVFIFPPSDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLTLSKADYEKHKVYACEVTHQGLSSPVTKSFNRGEC",
+    "parent": {   # genuine mouse A4.6.1 (HumAb25 benchmark; Presta 1997).
+        # NOTE: PDB 1CZ8 is a HUMANIZED intermediate, not the mouse parent —
+        # using it as "parent" made this case trivial (FR already ~96% human).
+        "VH": "EIQLVQSGPELKQPGETVRISCKASGYTFTNYGMNWVKQAPGKGLKWMGWINTYTGEPTYAADFKRRFTFSLETSASTAYLQISNLKNDDTATYFCAKYPHYYGSSHWYFDVWGAGTTVTVSS",
+        "VL": "DIQMTQTTSSLSASLGDRVIISCSASQDISNYLNWYQQKPDGTVKVLIYFTSSLHSGVPSRFSGSGSGTDYSLTISNLEPEDIATYYCQQYSTVPWTFGGGTKLEIK",
     },
     "actual": {   # 1BJ1 chains B/A (humanized anti-VEGF Fab)
         "VH": "EVQLVESGGGLVQPGGSLRLSCAASGYTFTNYGMNWVRQAPGKGLEWVGWINTYTGEPTYAADFKRRFTFSLDTSKSTAYLQMNSLRAEDTAVYYCAKYPHYYGSSHWYFDVWGQGTLVTVSSASTKGPSVFPLAPSSKSTSGGTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLYSLSSVVTVPSSSLGTQTYICNVNHKPSNTKVDKKVEPKSCDKTHT",
@@ -251,12 +253,44 @@ def print_case(case, db, force=False):
 
 def main():
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
-    print_case(CASE1, db, force=False)
-    print_case(CASE1, db, force=True)
-    print_case(CASE2, db, force=False)
-    print_case(CASE2, db, force=True)
-    print_case(CASE_VHH, db, force=False)
-    print_case(CASE_VHH, db, force=True)
+    failures = []
+    for case in (CASE1, CASE2, CASE_VHH):
+        is_vhh_case = case.get("is_vhh", False)
+        for force in (False, True):
+            print_case(case, db, force=force)
+            res = analyze_case(case, db, force_germline=force)
+            label = "B" if force else "A"
+            for ctype, r in res.items():
+                if "error" in r:
+                    failures.append(
+                        f"{case['name']}[mode{label}] {ctype}: {r['error']}")
+                    continue
+                tag = f"{case['name']}|mode{label}|{ctype}"
+                # 1. sane germline family assignment in every mode
+                want = ("IGHV" if ctype == "VH" else "IG")
+                if not r["germline"].startswith(want):
+                    failures.append(
+                        f"{tag}: wrong germline family {r['germline']}")
+                # 2. MODE B (historically chosen framework): the T1+T2 set
+                #    must recover at least half of the actually reverted
+                #    positions. (Precision is intentionally NOT asserted:
+                #    conservative over-reversion is a design property.)
+                if force and r["recall"] is not None and r["recall"] < 0.5:
+                    failures.append(
+                        f"{tag}: recall {r['recall']} < 0.5 "
+                        f"(T1+T2={r['our_T1T2']} vs actual={r['actual_backmutations']})")
+                # 3. VHH hallmark positions are never reversion candidates
+                if is_vhh_case and ctype == "VH":
+                    bad = {"H37", "H44", "H45", "H47"} & set(r["our_T1T2"])
+                    if bad:
+                        failures.append(
+                            f"{tag}: hallmark positions recommended: {sorted(bad)}")
+    if failures:
+        print(f"\nBACKTEST FAILURES ({len(failures)}):")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print("\nALL BACKTEST ASSERTIONS PASSED")
     return 0
 
 

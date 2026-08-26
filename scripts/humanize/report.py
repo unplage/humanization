@@ -241,8 +241,9 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
             fh.write(enhanced_content)
         paths["enhanced_markdown"] = enhanced_md
     except Exception as e:
-        paths["enhanced_error"] = f"enhanced report generation failed: {e}"
-    
+        paths["_errors"] = paths.get("_errors", [])
+        paths["_errors"].append(f"enhanced report: {e}")
+
     # Word report (python-docx; skipped when unavailable)
     try:
         from .report_docx import write_docx_report
@@ -250,7 +251,7 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
         if docx_path:
             paths["docx"] = docx_path
     except Exception as e:
-        paths["docx_error"] = f"docx generation failed: {e}"
+        paths.setdefault("_errors", []).append(f"docx: {e}")
 
     # FASTA of all variants
     fasta = os.path.join(outdir, "variants.fasta")

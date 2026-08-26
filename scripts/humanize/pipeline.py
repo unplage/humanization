@@ -122,6 +122,7 @@ def run_pipeline(
         rep = _process_chain(
             chain, fmt, db, config, outdir,
             antigen=config.antigen_seq,
+            all_chains=chains,
         )
         reports.append(rep)
 
@@ -201,6 +202,7 @@ def _process_chain(
     config: PipelineConfig,
     outdir: str,
     antigen: Optional[str],
+    all_chains: Optional[List[InputChain]] = None,
 ) -> ChainReport:
     donor = chain.numbered
     if donor is None:
@@ -296,7 +298,7 @@ def _process_chain(
         af3_pdb = predict_fv(
             config.af3,
             donor.sequence,
-            None if fmt == "vhh" else _partner_sequence(chain, None),
+            None if fmt == "vhh" else _partner_sequence(chain, all_chains),
             antigen,
             f"{chain.name}_{ctype}",
         )
@@ -304,39 +306,19 @@ def _process_chain(
     # Load structure from AF3 prediction or donor structure
     structure_path = af3_pdb if af3_pdb and os.path.exists(af3_pdb) else config.donor_structure
     if structure_path and os.path.exists(structure_path):
-        from .structure import load_model
+        from .structure import load_model, match_pdb_chain
         model = load_model(structure_path)
         if model:
-            # Determine chain label from PDB chains
-            # For Fab: typically chain A = VH, chain B = VL (but may vary)
-            # We need to match by sequence identity
+            # Assign the PDB chain by sequence identity (longest common
+            # residue run). First-residue matching is unreliable: unrelated
+            # VH/VL chains often share the same N-terminal residue.
             pdb_chains = {}
             for atom in model.atoms:
-                if atom.chain not in pdb_chains:
-                    pdb_chains[atom.chain] = []
-                pdb_chains[atom.chain].append(atom)
-            
-            # Find which PDB chain matches this input chain by comparing first few residues
-            label = None
-            for chain_id, atoms in pdb_chains.items():
-                # Get CA atoms and their residue names
-                ca_atoms = [(a.resseq, a.resname) for a in atoms if a.name == 'CA']
-                if not ca_atoms:
-                    continue
-                # Compare first residue with donor sequence
-                first_resname = ca_atoms[0][1]
-                donor_first = donor.sequence[0] if donor.sequence else ''
-                # Map 1-letter to 3-letter codes
-                aa1to3 = {'A': 'ALA', 'R': 'ARG', 'N': 'ASN', 'D': 'ASP', 'C': 'CYS',
-                          'E': 'GLU', 'Q': 'GLN', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
-                          'L': 'LEU', 'K': 'LYS', 'M': 'MET', 'F': 'PHE', 'P': 'PRO',
-                          'S': 'SER', 'T': 'THR', 'W': 'TRP', 'Y': 'TYR', 'V': 'VAL'}
-                if aa1to3.get(donor_first) == first_resname:
-                    label = chain_id
-                    break
-            
+                pdb_chains.setdefault(atom.chain, []).append(atom)
+
+            label = match_pdb_chain(pdb_chains, donor.sequence)
             if label is None:
-                # Fallback: use "H" for VH, "L" for VL
+                # Fallback: conventional Fab chain ids
                 label = "H" if ctype == "H" else "L"
             
             all_pos = {r.pos: r.index + 1 for r in donor.residues}
@@ -388,8 +370,11 @@ def _process_chain(
         try:
             grafts[scheme] = graft_chain(donor, v_gene, j_gene, scheme, is_vhh)
         except ValueError as e:
-            warnings = getattr(chain, "warnings", [])
-            warnings.append(f"[{chain.name}] graft({scheme}) failed: {e}")
+            # InputChain always carries a warnings list; run_pipeline extends
+            # RunResult.warnings from it, so the failure surfaces in the CLI
+            # output and reports. (Do not use getattr-with-default here: a
+            # fresh list would silently swallow the message.)
+            chain.warnings.append(f"[{chain.name}] graft({scheme}) failed: {e}")
 
     # ---- variant ladder (main scheme) ----
     variants = assemble_variants(
@@ -454,7 +439,16 @@ def _process_chain(
 
 
 def _partner_sequence(chain: InputChain, _all_chains) -> Optional[str]:
-    return None  # Fv-only partner chain prediction handled at pipeline level
+    """Find the partner chain (VL for VH, VH for VL) for AF3 complex prediction.
+    Previously returned None unconditionally, causing AF3 to predict a
+    monomer instead of an Fv complex for Fab chains."""
+    if not _all_chains:
+        return None
+    partner_type = "L" if chain.chain_type == "H" else "H"
+    for c in _all_chains:
+        if c.chain_type == partner_type and c.sequence:
+            return c.sequence
+    return None
 
 
 def _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains, pdb_path=None):

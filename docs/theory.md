@@ -24,6 +24,12 @@ and stabilize loop packing.
 | VH    | 2, 27-30, 47-49, 67, 69, 71, 73, 78, 93-94, 103 |
 | VL    | 2, 4, 35-38, 43-46, 48-49, 58, 62-63, 66-69, 71, 87-88, 98 |
 
+> **Note:** `scripts/humanize/config.py` currently lists VL vernier as
+> {2, 4, 35, 36, 38, 43, 44, 46, 48, 49, 58, 62, 63, 66, 67, 68, 69, 71, 87, 88, 98}
+> (omitting L37 and L45). The source of truth should be verified against
+> Foote & Winter JMB 224:487 (1992) Table 1; positions 37 and 45 are
+> candidates to add if the original publication includes them.
+
 ### 2.2 VH/VL interface — Chothia et al., JMB 186:651 (1985); Vargas-Madrazo & Paz-Garcia, JMB 330:783 (2003)
 
 Core packing residues between VH and VL (mostly buried, hydrophobic); they

@@ -323,8 +323,12 @@ def build_docx(result: RunResult, out_path: str) -> str:
         # variants risks
         for v in rep.variants:
             vi = scan_sequence(v.graft.numbered)
+            # Compare by (position, motif) — not motif alone — so a new
+            # deamidation at position 95 is not masked by an existing one
+            # at position 30.
+            parent_pairs = {(i.position, i.motif) for i in issues}
             new_risks = [i for i in vi
-                         if i.motif not in {x.motif for x in issues}]
+                         if (i.position, i.motif) not in parent_pairs]
             if new_risks:
                 para(f"{v.name} introduces: "
                      + ", ".join(f"{i.position} {i.motif}" for i in new_risks),

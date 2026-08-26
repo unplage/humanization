@@ -148,6 +148,15 @@ def graft_chain(
             if pos in jmap and jmap[pos]:
                 out[pos] = jmap[pos]
                 origin[pos] = "j"
+            elif pos in dmap and dmap[pos]:
+                # Position in donor but not covered by the J gene — keep
+                # the donor residue so the sequence stays complete (warn
+                # but do NOT drop: a missing J residue truncates FR4).
+                out[pos] = dmap[pos]
+                origin[pos] = "donor"
+                warnings.append(
+                    f"[{chain_type}] FR4 position {pos} absent from J "
+                    f"gene; keeping donor residue to avoid truncation")
             continue
         is_cdr = num in cdr_nums
         keep_donor = is_vhh and chain_type == "H" and num in VHH_HALLMARK

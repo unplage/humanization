@@ -279,7 +279,12 @@ CDR_REGIONS = ("CDR1", "CDR2")
 
 def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, float]:
     """Per-position comparison between query and a germline V gene.
-    Returns identity fractions over FR, CDR1-2, and all."""
+    Returns identity fractions over FR, CDR1-2, and all.
+
+    Note: CDR3 (H95-102 / L89-97) is excluded by construction — it is
+    grafted from the donor and has no germline correspondence, so including
+    it in the denominator would artificially lower all_identity scores.
+    """
     if gene.numbered is None:
         return {"fr_identity": 0.0, "cdr_identity": 0.0, "all_identity": 0.0, "n_fr": 0, "n_cdr": 0}
     q, g = query.posmap(), gene.numbered.posmap()
