@@ -208,6 +208,7 @@ def analyze_backmutations(
         # ---- chemical score (developability) ----
         # WARNING: 仅基于序列模式检测，未考虑结构暴露状态；
         # 埋藏位点实际风险较低，表面暴露位点风险更高。
+        # 已排除保守 Cys（VH 22/92, VL 23/88）和双计风险。
         wc = WEIGHTS["chemical"]
         chem = 0.0
         # effect of reverting donor->human at this position: scan a window
@@ -217,25 +218,40 @@ def analyze_backmutations(
         else:
             ridx = rpos.index
         win_d = donor.sequence[max(0, ridx - 2): ridx + 3]
-        # N-glycan (NxS/T)
-        chem += wc["removes_nglycan"] if _motif_hit(win_d, r"N[^P][ST]") else 0
-        # deamidation: NG > NS > NH > ND (不同权重)
-        chem += wc["removes_deamidation_ng"] if _motif_hit(win_d, r"NG") else 0
-        chem += wc["removes_deamidation_ns"] if _motif_hit(win_d, r"NS") else 0
+
+        # N-glycan (NxS/T) - 优先检测，排除重叠
+        has_nglycan = _motif_hit(win_d, r"N[^P][ST]")
+        chem += wc["removes_nglycan"] if has_nglycan else 0
+
+        # deamidation: NG > NS > NH > ND (排除 N-glycan 重叠)
+        # 如果是 N-glycan，跳过 NG/NS 避免双计
+        if not has_nglycan:
+            chem += wc["removes_deamidation_ng"] if _motif_hit(win_d, r"NG") else 0
+            chem += wc["removes_deamidation_ns"] if _motif_hit(win_d, r"NS") else 0
         chem += wc["removes_deamidation_nh"] if _motif_hit(win_d, r"NH") else 0
         chem += wc["removes_deamidation_nd"] if _motif_hit(win_d, r"ND") else 0
-        # isomerization: DG > DS = DT > DH (不同权重)
+
+        # isomerization: DG > DS = DT > DH
         chem += wc["removes_isomerization_dg"] if _motif_hit(win_d, r"DG") else 0
         chem += wc["removes_isomerization_ds"] if _motif_hit(win_d, r"DS") else 0
         chem += wc["removes_isomerization_dt"] if _motif_hit(win_d, r"DT") else 0
         chem += wc["removes_isomerization_dh"] if _motif_hit(win_d, r"DH") else 0
-        # acid hydrolysis (D-X where X is small residue) and DD (high risk)
-        chem += wc["removes_acid_hydrolysis"] if _motif_hit(win_d, r"D[AVLIP]") else 0
-        chem += wc["removes_acid_hydrolysis_dd"] if _motif_hit(win_d, r"DD") else 0
-        # oxidation (M / W / C)
+
+        # acid hydrolysis (D-X where X is small residue, 不含 G/S/T/H/D)
+        # DD 单独计分，避免双计
+        has_dd = _motif_hit(win_d, r"DD")
+        if not has_dd:
+            chem += wc["removes_acid_hydrolysis"] if _motif_hit(win_d, r"D[AVLIP]") else 0
+        chem += wc["removes_acid_hydrolysis_dd"] if has_dd else 0
+
+        # oxidation (M / W) - C 仅在非保守位点计分
         chem += wc["removes_oxidation"] if _motif_hit(win_d, r"[MW]") else 0
+        if donor_aa == "C" and num not in {22, 92} if chain_type == "H" else {23, 88}:
+            chem += wc["removes_oxidation"]  # 非保守 Cys
+
         # base hydrolysis (K-X where X is D/E)
         chem += wc["removes_base_hydrolysis"] if _motif_hit(win_d, r"K[DE]") else 0
+
         # metalloprotease cleavage (MK)
         chem += wc["removes_met_lyscleavage"] if _motif_hit(win_d, r"MK") else 0
 

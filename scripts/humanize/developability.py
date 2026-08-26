@@ -24,23 +24,35 @@ class DevelopabilityIssue:
 
 
 def _assess_risk_level(motif: str) -> str:
-    """根据风险类型评估风险等级（序列水平）。"""
+    """根据风险类型评估风险等级（序列水平）。
+
+    等级: high > medium > low
+    """
+    # 高风险
     if "N-glycan" in motif:
         return "high"
     if "deamidation" in motif and "NG" in motif:
         return "high"
     if "isomerization" in motif and "DG" in motif:
         return "high"
-    if "acid hydrolysis" in motif:
+    if "DD" in motif:  # DD 高风险：异构化 + 酸性水解
+        return "high"
+    # 中风险
+    if "deamidation" in motif:  # NS/NH/ND
+        return "medium"
+    if "isomerization" in motif:  # DS/DT/DH
+        return "medium"
+    if "acid hydrolysis" in motif:  # D-X (非DD)
         return "medium"
     if "oxidation" in motif:
         return "medium"
+    if "unpaired Cys" in motif:
+        return "medium"
+    # 低风险
     if "base hydrolysis" in motif:
         return "low"
     if "met-lyscleavage" in motif:
         return "low"
-    if "unpaired Cys" in motif:
-        return "medium"
     return "medium"
 
 

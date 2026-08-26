@@ -16,6 +16,9 @@
 未列出的基因取该链型最小频率的一半（保守先验）。
 """
 
+from __future__ import annotations
+from typing import Dict
+
 # 治疗性抗体中 VH germline 的使用频率 (基于临床阶段和已批准抗体)
 # 数据来源：Pioneer 库论文、Thera-SAbDab、文献综述
 VH_GERMLINE_FREQUENCY = {
