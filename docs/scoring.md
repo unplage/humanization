@@ -3,11 +3,19 @@
 ## 1. Score components
 
 Every framework candidate (donor != human germline) receives three components
-and one blended composite (0-100):
+and one blended composite:
 
 ```
 composite = 100 * (0.55 * structural + 0.30 * immunogenicity + 0.15 * chemical)
 ```
+
+The `chemical` term is capped at 1.0 on the positive side, but **negative
+penalties pass through unclamped** — in particular `introduces_nglycan`
+(-0.80) must lower the composite whenever a reversion would create a new
+N-glycan motif (regression-tested in tests/test_pipeline.py). Note the
+practical range of the composite is therefore ~9-92 rather than the full
+0-100: `structural` tops out at 1.0, `immunogenicity` (benefit) spans
+0.3-0.725, and `chemical` is bounded by ±0.80 with the current weights.
 
 ### 1.1 Structural score (0-1) — weights in config.py
 

@@ -56,7 +56,14 @@ def parse_fasta(path: str) -> List[Tuple[str, str]]:
 def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
     """Number every record and classify as VH/VHH or VL."""
     chains: List[InputChain] = []
+    seen_names: Dict[str, int] = {}
     for name, seq in records:
+        # Auto-rename duplicates to prevent downstream collisions
+        if name in seen_names:
+            seen_names[name] += 1
+            name = f"{name}_{seen_names[name]}"
+        else:
+            seen_names[name] = 0
         s = re.sub(r"[^A-Za-z]", "", seq).upper()
         if len(s) < 80:
             raise InputError(f"[{name}] sequence too short ({len(s)} aa) to be a V domain")

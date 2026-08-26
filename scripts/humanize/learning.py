@@ -163,21 +163,26 @@ def compute_position_effects(
                 if pd[pos] == vd[pos]:
                     continue
                 # only framework positions (structure of the CDR is constant)
-                num_chain = vh if vh is not None else vl
+                # resolve the region against the chain that OWNS this
+                # position ("H.." -> VH, "L.." -> VL); querying the other
+                # chain returns None and would silently drop every VL (or
+                # VHH) framework position from calibration.
+                num_chain = vh if pos.startswith("H") else vl
                 reg = num_chain.region_of(pos) or "" if num_chain else ""
                 if not reg.startswith("FR"):
                     continue
+                # parent carries the donor residue; a variant differing at
+                # pos therefore carries the humanized residue. (Back-mutated
+                # variants that re-match the parent are skipped above.)
                 donor_aa, human_aa = pd[pos], vd[pos]
-                if donor_aa == human_aa:
-                    continue
                 exp_state.setdefault(pos, {"donor": [], "human": []})
                 exp_info[pos] = (donor_aa, human_aa)
-                # is the variant carrying the donor residue at pos?
-                key = "donor" if donor_aa == vd[pos] else "human"
-                # note: for a humanized variant, vd[pos] is usually the human
-                # residue; a back-mutated variant carries the donor residue.
-                # The contrast below pools both directions within the parent.
-                exp_state[pos][key].append(ddg)
+                # The parent is the implicit donor baseline (ddG = 0 by
+                # construction); any variant that differs at pos carries the
+                # HUMANIZED residue there, so its ddG lands in the "human"
+                # bucket. Back-mutated variants re-matching the parent are
+                # skipped above and carry no information beyond the baseline.
+                exp_state[pos]["human"].append(ddg)
         state[exp.name] = exp_state
         pos_info[exp.name] = exp_info
 

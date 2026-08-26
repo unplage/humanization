@@ -65,8 +65,9 @@ def parse_pdb(path: str) -> Optional[PDBModel]:
     with open(path) as fh:
         for line in fh:
             if line.startswith("ATOM") or line.startswith("HETATM"):
-                if line[76:78].strip() == "H" and line[0] == "A":
-                    pass
+                # Hydrogen filtering is deferred to heavy_atoms() which uses
+                # the PDB element column (line[76:78]) for robustness; the
+                # atom name prefix check there handles most cases already.
                 try:
                     model.atoms.append(PDBAtom(
                         name=line[12:16].strip(),
@@ -94,8 +95,11 @@ def parse_cif_atom_site(path: str) -> Optional[PDBModel]:
                 in_loop = True
                 cols.append(s[len("_atom_site."):].strip())
                 continue
-            if in_loop and (s.startswith("#") or s == ""):
+            if in_loop and (s.startswith("#") or s == "" or s.startswith("loop_")):
+                # End of loop: a blank line, a comment, or a new loop_
+                # keyword all terminate the current _atom_site loop.
                 in_loop = False
+                cols = []
                 continue
             if in_loop and not s.startswith(("_", "#")):
                 parts = s.split()
@@ -125,6 +129,53 @@ def load_model(path: str) -> Optional[PDBModel]:
     if path.endswith(".cif"):
         return parse_cif_atom_site(path)
     return None
+
+
+# ---------------------------------------------------------------------------
+# chain assignment (PDB chain -> input chain)
+# ---------------------------------------------------------------------------
+
+_AA3TO1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLU": "E", "GLN": "Q", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
+
+
+def longest_common_run(a: str, b: str) -> int:
+    """Length of the longest contiguous residue run shared by two sequences
+    (classic DP; O(len_a * len_b), fine for ~120-aa V domains). Robust to
+    terminal tags, truncations and numbering offsets in structures."""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for ca in a:
+        cur = [0] * (len(b) + 1)
+        for j, cb in enumerate(b, 1):
+            if ca == cb:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def match_pdb_chain(pdb_chains: Dict[str, list], donor_seq: str,
+                    min_run: int = 20) -> Optional[str]:
+    """Pick the PDB chain whose residue sequence shares the longest exact
+    run with the donor sequence. First-residue matching is unreliable:
+    unrelated VH and VL chains frequently share the same N-terminal residue,
+    and two heavy domains even share the QVQL.. prefix."""
+    best_cid, best_run = None, 0
+    for cid, atoms in pdb_chains.items():
+        cas = sorted((a.resseq, a.resname) for a in atoms if a.name == "CA")
+        s = "".join(_AA3TO1.get(rn, "X") for _, rn in cas)
+        run = longest_common_run(donor_seq, s)
+        if run > best_run:
+            best_cid, best_run = cid, run
+    return best_cid if best_run >= min_run else None
 
 
 # ---------------------------------------------------------------------------
@@ -207,11 +258,13 @@ def compute_hints(
 
     # which residues are CDR residues
     cdr_resseqs = {v for v in cdr_positions.values() if isinstance(v, int)}
-    cdr_atoms = [a for a in heavy if (a[0][1] in cdr_resseqs)]
-    ag_resseqs = set()
-    if antigen_chains:
-        ag_resseqs = {r[1] for r, _, _ in heavy if r[0] in antigen_chains}
-    ag_atoms = [a for a in heavy if (a[0][1] in ag_resseqs)]
+    # chain-aware filtering is essential: AF3 numbers every chain from 1,
+    # so resseq-only filtering would mix the target chain's own atoms into
+    # the CDR/antigen pools and corrupt every contact hint.
+    cdr_atoms = [a for a in heavy
+                 if a[0][0] == chain_label and a[0][1] in cdr_resseqs]
+    ag_atoms = ([a for a in heavy if a[0][0] in antigen_chains]
+                if antigen_chains else [])
 
     # map resseq -> kabat pos
     resseq_to_pos = {v: k for k, v in position_map.items()}
@@ -266,7 +319,7 @@ def compute_hints(
             cdr_partners[pos] = sorted(partners)
         if ag_atoms:
             ag_contact[pos] = any(
-                _dist(a2, a1[2]) < 4.5
+                _dist(a2, a1) < 4.5
                 for (r2, _n2, a2) in ag_atoms for (_n1, a1) in atoms
             )
     return StructureHints({
@@ -364,13 +417,21 @@ def run_af3(cfg: AF3Config, input_json: str, outdir: str, tag: str = "") -> Opti
         return pdbs[0] if pdbs else None
     if cfg.mode == "api":
         import urllib.request
+        from urllib.error import URLError, HTTPError
+        with open(input_json, "rb") as fh:
+            payload = fh.read()
         req = urllib.request.Request(
-            cfg.api_url, data=open(input_json, "rb").read(),
+            cfg.api_url, data=payload,
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {cfg.api_token}"},
         )
-        with urllib.request.urlopen(req, timeout=600) as r:
-            out = json.loads(r.read())
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                out = json.loads(r.read())
+        except (URLError, HTTPError, json.JSONDecodeError, OSError) as e:
+            import warnings as _w
+            _w.warn(f"[AF3 API] request failed: {e}")
+            return None
         return out.get("pdb_path") or out.get("structure")
     return None
 

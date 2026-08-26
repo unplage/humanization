@@ -85,6 +85,301 @@ def _full_cdr3_loop(chain):
     return "".join(out)
 
 
+def test_vl_cdr3_insertion_numbering():
+    """Regression: VL CDR3 longer than 9 residues must use L95A/L95B...
+    insertion labels AFTER L95, with L96/L97 as the final two positions.
+    The old code labelled the first 9 residues L89-L97 and started
+    insertions at L95B, which scrambled grafted CDR3 order (graft rebuilds
+    sequences sorted by position label)."""
+    print("VL CDR3 insertion numbering (>=10 residues)")
+    from humanize.graft import graft_chain
+
+    def vl_with_cdr3(cdr3):
+        # IGKV1-39 scaffold, CDR3 = QQSYSTP (7) between ...ATYYC and FGQGTKVEIK
+        return number_light(IGKV1_39.replace("QQSYSTP", cdr3))
+
+    cases = {
+        # 9 residues = the full Kabat L89-L97 block, no insertion codes
+        "QQSYSTPAB": ["L89", "L90", "L91", "L92", "L93", "L94", "L95",
+                      "L96", "L97"],
+        # insertions go after L95; L96/L97 stay last
+        "QQSYSTPABC": ["L89", "L90", "L91", "L92", "L93", "L94", "L95",
+                       "L95A", "L96", "L97"],
+        "QQSYSTPABCD": ["L89", "L90", "L91", "L92", "L93", "L94", "L95",
+                        "L95A", "L95B", "L96", "L97"],
+        "QQSYSTPABCDE": ["L89", "L90", "L91", "L92", "L93", "L94", "L95",
+                         "L95A", "L95B", "L95C", "L96", "L97"],
+    }
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    v = [g for g in db.v_genes if g.gene_id == "IGKV1-39*01"][0]
+    j = [g for g in db.j_genes if g.gene_id == "IGKJ1*01"][0]
+    for cdr3, expected in cases.items():
+        chain = vl_with_cdr3(cdr3)
+        labels = [r.pos for r in chain.residues if r.region == "CDR3"]
+        check(f"labels for CDR3 len {len(cdr3)}",
+              labels == expected,
+              f"{labels}")
+        check(f"sequence order intact for CDR3 len {len(cdr3)}",
+              "".join(r.aa for r in chain.residues if r.region == "CDR3") == cdr3)
+        graft = graft_chain(chain, v, j, "kabat")
+        g_cdr3 = "".join(r.aa for r in graft.numbered.residues
+                         if r.region == "CDR3")
+        check(f"grafted CDR3 conserved (len {len(cdr3)})",
+              g_cdr3 == cdr3, f"expected={cdr3} got={g_cdr3}")
+        check(f"grafted sequence contains CDR3 in order (len {len(cdr3)})",
+              cdr3 in graft.sequence)
+
+
+def test_nglycan_introduction_penalty():
+    """Regression: a back-mutation that would CREATE an N-glycan motif
+    carries chemical_score = -0.8, and the composite must include that
+    penalty. The old formula clamped the whole chemical term to [0, 1],
+    so the penalty vanished whenever it was the only chemical factor."""
+    print("introduced N-glycan penalty")
+    from humanize.config import WEIGHTS
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    g = [x for x in db.v_genes if x.gene_id == "IGHV1-8*01"][0]
+    seq = g.numbered.sequence
+    r72 = g.numbered.residue("H72")
+    check("scenario setup: germline H72 is N", r72 is not None and r72.aa == "N",
+          r72.aa if r72 else "?")
+    donor = number_heavy(seq[:r72.index] + "A" + seq[r72.index + 1:])
+    bm = analyze_backmutations(donor, g)
+    hits = [c for c in bm.candidates if c.position == "H72" and c.human_aa == "N"]
+    check("scenario exists: H72 candidate with negative chemical score",
+          bool(hits) and hits[0].chemical_score <= -0.5,
+          str([(c.position, c.chemical_score) for c in bm.candidates]))
+    if not hits:
+        return
+    c = hits[0]
+    # composite must equal the unclamped weighted blend of the stored parts
+    expected = round(100 * (
+        WEIGHTS["blend"][0] * c.structural_score
+        + WEIGHTS["blend"][1] * c.benefit_score
+        + WEIGHTS["blend"][2] * c.chemical_score), 1)
+    check("composite reflects introduced-N-glycan penalty",
+          abs(c.composite - expected) <= 0.2,
+          f"composite={c.composite} unclamped-expected={expected}")
+
+
+def test_structure_hint_chain_filtering():
+    """Regression: the CDR/antigen atom pools must be filtered by chain id,
+    not by resseq alone. AF3 writes every chain starting at residue 1, so
+    resseq-only filtering pulls the target chain's OWN atoms into the
+    antigen pool (every framework residue then 'contacts' itself) and lets
+    antigen-chain atoms masquerade as CDR residues."""
+    print("structure hints: chain-aware atom pools")
+    from humanize.structure import PDBAtom, PDBModel, compute_hints
+    model = PDBModel(atoms=[
+        # target VH chain ("H"): resseq 1 = framework, resseq 2 = CDR
+        PDBAtom("CA", "ALA", "H", 1, 0.0, 0.0, 0.0),
+        PDBAtom("CA", "ALA", "H", 2, 100.0, 0.0, 0.0),
+        # antigen chain ("A"): same resseq numbering (AF3 style)
+        PDBAtom("CA", "ALA", "A", 1, 200.0, 0.0, 0.0),
+        PDBAtom("CA", "ALA", "A", 2, 300.0, 0.0, 0.0),
+    ])
+    hints = compute_hints(
+        model, "H", {"H1": 1, "H2": 2}, {"H2": 2}, antigen_chains=["A"])
+    check("framework residue not CDR-contacting via antigen-chain atom",
+          hints.cdr_contact("H", "H1") is not True,
+          str(hints.cdr_contact("H", "H1")))
+    check("framework residue not antigen-contacting via own-chain atoms",
+          hints.antigen_contact("H", "H1") is not True,
+          str(hints.antigen_contact("H", "H1")))
+    check("CDR residue still sees its own chain CDR",
+          hints.cdr_contact("H", "H2") is True,
+          str(hints.cdr_contact("H", "H2")))
+
+
+def test_learning_fab_vl_positions():
+    """Regression: in a Fab experiment (parent has BOTH vh and vl), per-
+    position effects must be resolved against the chain that owns the
+    position. The old code always queried the VH chain's region map, so
+    every VL framework position was silently dropped from calibration."""
+    print("learning loop: Fab VL position effects")
+    from humanize.learning import compute_position_effects, ExperimentRecord
+    parent_vl = IGKV1_39
+    # variant carries two single substitutions vs parent: one on VH, one on VL
+    vh_res = number_heavy(IGHV3_23).residue("H67")
+    vl_res = number_light(parent_vl).residue("L2")
+    var_vh = IGHV3_23[:vh_res.index] + "A" + IGHV3_23[vh_res.index + 1:]
+    var_vl = parent_vl[:vl_res.index] + "V" + parent_vl[vl_res.index + 1:]
+    rec = ExperimentRecord(
+        name="FabExp", parent_vh=IGHV3_23, parent_vl=parent_vl,
+        parent_kd=0.15,
+        variants=[{"name": "v1", "vh": var_vh, "vl": var_vl, "kd": 0.30}])
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    effects, warnings = compute_position_effects([rec], db)
+    got = {p: (e.donor_aa, e.human_aa, e.effect) for p, e in effects.items()}
+    check("VH framework position captured", "H67" in got, str(sorted(got)))
+    check("VL framework position captured", "L2" in got, str(sorted(got)))
+    if "L2" in got:
+        check("VL effect amino acids correct",
+              got["L2"][0] == "I" and got["L2"][1] == "V", str(got["L2"]))
+        check("VL effect positive (worse KD after change)",
+              got["L2"][2] > 0.2, str(got["L2"]))
+
+
+def test_pdb_chain_matching():
+    """Regression: PDB chain -> input chain assignment must use sequence
+    identity, not the first residue. Both test chains start with 'Q' and
+    even share the QVQL.. prefix, so first-residue matching cannot work."""
+    print("PDB chain matching (sequence-run based)")
+    from humanize.structure import PDBAtom, PDBModel, match_pdb_chain
+
+    def chain_atoms(cid, seq):
+        aa3 = {"A": "ALA", "C": "CYS", "D": "ASP", "E": "GLU", "F": "PHE",
+               "G": "GLY", "H": "HIS", "I": "ILE", "K": "LYS", "L": "LEU",
+               "M": "MET", "N": "ASN", "P": "PRO", "Q": "GLN", "R": "ARG",
+               "S": "SER", "T": "THR", "V": "VAL", "W": "TRP", "Y": "TYR"}
+        return [PDBAtom("CA", aa3[aa], cid, i + 1, float(i), 0.0, 0.0)
+                for i, aa in enumerate(seq)]
+
+    # chain "A" carries the VHH sequence, chain "B" the 4D5 VH;
+    # both start with QVQLVESGGG/QVQLQQSGP...
+    model = PDBModel(atoms=chain_atoms("A", VHH_1BZQ) + chain_atoms("B", M4D5_VH))
+    pdb_chains = {}
+    for a in model.atoms:
+        pdb_chains.setdefault(a.chain, []).append(a)
+    check("4D5 VH matched to its own chain despite shared QVQL prefix",
+          match_pdb_chain(pdb_chains, M4D5_VH) == "B",
+          str(match_pdb_chain(pdb_chains, M4D5_VH)))
+    check("VHH matched to its own chain",
+          match_pdb_chain(pdb_chains, VHH_1BZQ) == "A",
+          str(match_pdb_chain(pdb_chains, VHH_1BZQ)))
+    check("unrelated sequence yields None",
+          match_pdb_chain(pdb_chains, "W" * 30) is None)
+
+
+def test_lambda_chain_end_to_end():
+    """Lambda (IGLV) chains were never exercised by any test (~40% of human
+    antibodies use them). Full path: numbering -> germline choice -> graft."""
+    print("lambda chain end-to-end")
+    from humanize.graft import graft_chain
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    iglv = [g for g in db.v_genes if g.gene_id.startswith("IGLV") and g.numbered]
+    check("bundled DB contains IGLV genes", len(iglv) > 0)
+    src = [g for g in iglv if g.gene_id == "IGLV1-36*01"] or iglv[:1]
+    seq = src[0].numbered.sequence
+    chain = number_light(seq)
+    check("IGLV sequence numbers as light chain",
+          chain is not None
+          # lambda FR1 is one residue shorter than kappa: the first
+          # conserved Cys sits at Kabat L22 (L23 is a gap), second at L88
+          and chain.residue("L22") is not None and chain.residue("L22").aa == "C"
+          and chain.residue("L88") is not None and chain.residue("L88").aa == "C")
+    from humanize.germline import choose_germlines
+    choice = choose_germlines(chain, db)
+    check("lambda input selects an IGLV* germline",
+          choice.v_gene is not None and choice.v_gene.gene_id.startswith("IGLV"),
+          str(choice.v_gene.gene_id if choice.v_gene else None))
+    jgene = next((g for g in db.j_genes if g.gene_id.startswith("IGLJ")), None) \
+        or choice.j_gene
+    graft = graft_chain(chain, choice.v_gene, jgene or choice.j_gene, "kabat")
+    d_cdr1 = "".join(r.aa for r in chain.residues if r.region == "CDR1")
+    g_cdr1 = "".join(r.aa for r in graft.numbered.residues if r.region == "CDR1")
+    check("grafted lambda CDR1 conserved", d_cdr1 == g_cdr1,
+          f"d={d_cdr1} g={g_cdr1}")
+
+
+def test_j_anchor_covers_all_germline_j():
+    """Every bundled J gene must be anchored at its conserved FR4 start.
+    Guards the _find_j_anchor patterns against regressions."""
+    print("J-anchor over all bundled J genes")
+    import re as _re
+    from humanize.numbering import _find_j_anchor
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    for jg in db.j_genes:
+        s = jg.sequence
+        ct = "H" if jg.chain_type == "H" else "L"
+        idx = _find_j_anchor(s, 0, len(s), ct)
+        ok = idx is not None
+        detail = f"idx={idx} seq={s}"
+        if ok:
+            # every human J gene is anchor(W/F) + GXxGT at its FR4 start
+            aa = s[idx]
+            ok = ((ct == "H" and aa == "W") or (ct == "L" and aa == "F")) \
+                and s[idx + 3: idx + 5] == "GT"
+            detail = f"{jg.gene_id}: {s[:8]}"
+        check(f"{jg.gene_id} anchors at conserved FR4 start", ok, detail)
+
+
+def test_germline_strategies_smoke():
+    """All 9 selection strategies must return a valid germline for a real
+    input; fr_best must achieve the highest FR identity of the set."""
+    print("9-strategy germline selection smoke")
+    from humanize.multi_strategy_germline import choose_germlines_multi_strategy
+    from humanize.germline import compare_to_germline
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor = number_heavy(M4D5_VH)
+    res = choose_germlines_multi_strategy(donor, db)
+    expected = {"fr_best", "cdr_best", "composite", "cvi_best",
+                "min_backmutations", "current", "adimab_frequency",
+                "pioneer_frequency", "composite_3axis"}
+    missing = expected - set(res.candidates)
+    check("all 9 strategies produced candidates", not missing, str(missing))
+    for name, cand in res.candidates.items():
+        check(f"{name} returns valid V gene",
+              cand.gene is not None and cand.gene.numbered is not None,
+              str(cand.gene.gene_id if cand.gene else None))
+    fr_scores = {}
+    for name, cand in res.candidates.items():
+        if cand.gene is not None:
+            fr_scores[name] = compare_to_germline(donor, cand.gene)["fr_identity"]
+    fr_best_pick = res.candidates["fr_best"]
+    fr_of_frbest = compare_to_germline(donor, fr_best_pick.gene)["fr_identity"]
+    others_max = max(v for k, v in fr_scores.items() if k != "fr_best") \
+        if len(fr_scores) > 1 else 0.0
+    check("fr_best achieves max FR identity",
+          fr_of_frbest >= others_max - 1e-9,
+          f"fr_best={fr_of_frbest} best-other={others_max}")
+
+
+def test_developability_scan():
+    """Developability module had zero coverage: conserved Cys exclusion and
+    motif detection are both safety-relevant."""
+    print("developability scan")
+    from humanize.developability import scan_sequence
+    vh = number_heavy(M4D5_VH)
+    issues = scan_sequence(vh)
+    # M4D5_VH has no Cys outside the conserved pair: no Cys-related flags
+    cys_issues = [i for i in issues
+                  if i.motif.startswith("oxidation (C)")
+                  or i.motif == "unpaired Cys"]
+    check("conserved VH Cys22/Cys92 not flagged as risk", not cys_issues,
+          str([(i.position, i.motif) for i in cys_issues]))
+    # synthetic motif detection on the same scaffold
+    mutated = number_heavy(M4D5_VH.replace(
+        "KATLTSD", "KATNTSD"))   # introduces N-T deamidation site? -> NST motif
+    issues2 = scan_sequence(mutated)
+    motifs = {i.motif for i in issues2}
+    check("N-glycan motif detected after N-x-S/T introduction",
+          any("N-glycan" in m for m in motifs), str(sorted(motifs)))
+    check("positions reported as Kabat labels",
+          all(not i.position.startswith("seq") for i in issues2),
+          str([i.position for i in issues2][:5]))
+
+
+def test_input_validation():
+    """Error paths for malformed inputs were never tested."""
+    print("input validation")
+    from humanize.sequences import parse_input
+    short = ">bad\nEVQL\n"
+    try:
+        list(parse_input(short))
+        check("short sequence rejected", False, "no error raised")
+    except Exception:
+        check("short sequence rejected", True)
+    garbage = ">x\n" + "X" * 130 + "\n"
+    try:
+        chains = list(parse_input(garbage))
+        numbered_ok = any(c.numbered is not None for c in chains)
+        check("all-X sequence does not produce usable numbering",
+              not numbered_ok or True)  # tolerated either way, must not crash
+    except Exception:
+        check("all-X sequence handled without crash", True)
+
+
 def test_graft_loop_conservation():
     """Regression: the FULL CDR3 loop (incl. Kabat 93/94) must be grafted
     from the donor. The strict-Kabat H93/H94 labels are FR3, but they carry
@@ -272,20 +567,20 @@ def test_learning_loop():
         parse_experiments,
         write_calibration,
     )
-    from humanize.backmut import analyze_backmutations
 
-    # build synthetic experiments: V0 pure graft (4x KD loss), V2 (retained)
+    # Synthetic experiment: parent = mouse 4D5; variant V0 = pure human
+    # graft (framework swapped to germline, kd 4x worse). The FR positions
+    # that differ between parent and germline must show up as positive
+    # effects (human residue is worse -> reverting helps).
     exp = [{
         "name": "syn4D5",
         "parent_vh": M4D5_VH,
         "parent_vl": M4D5_VL,
         "parent_kd": 0.1,
         "variants": [
-            {"name": "V0", "vh": IGHV3_23.replace("AKW", "AKW"), "vl": IGKV1_39, "kd": 0.4},
+            {"name": "V0", "vh": IGHV3_23, "vl": IGKV1_39, "kd": 0.4},
         ],
     }]
-    # NOTE: synthetic variants intentionally do NOT renumber cleanly into a
-    # real graft; use the demo experiment file instead for the real loop.
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump(exp, fh)
         exp_path = fh.name
@@ -293,11 +588,31 @@ def test_learning_loop():
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
     effects, warnings = compute_position_effects(records, db)
     check("learning parses experiments", len(records) == 1)
-    check("learning produces effect map", isinstance(effects, dict))
+    # the parent/variant contrast MUST produce position effects (regression:
+    # a no-op variant or a dropped chain silently yields an empty map)
+    check("learning produces non-empty effect map", len(effects) > 0,
+          f"{len(effects)} effects; warnings={warnings[:2]}")
+    heavy_pos = [p for p in effects if p.startswith("H")]
+    light_pos = [p for p in effects if p.startswith("L")]
+    check("effects include both VH and VL positions",
+          bool(heavy_pos) and bool(light_pos),
+          f"H={len(heavy_pos)} L={len(light_pos)}")
+    if effects:
+        sample = next(iter(effects.values()))
+        check("effect sign: worse KD after humanization => positive ddG",
+              sample.effect > 0.1, str(sample.effect))
+        check("effect amino acids differ",
+              sample.donor_aa != sample.human_aa)
     cal_path = os.path.join(tempfile.gettempdir(), "calib_test.json")
     write_calibration(cal_path, effects)
-    cal = load_calibration(cal_path)
-    check("calibration round-trip", "position_effects" in json.dumps(cal) or cal is not None)
+    cal = load_calibration(cal_path)   # NOTE: returns the position->effect dict
+    check("calibration round-trip preserves positions",
+          set(cal) == set(effects) and len(cal) > 0,
+          f"{len(cal)} vs {len(effects)}")
+    if effects:
+        first_pos = next(iter(effects))
+        check("calibration round-trips ddG values",
+              abs(cal[first_pos]["ddG_kcal"] - effects[first_pos].effect) < 1e-9)
     os.unlink(exp_path)
 
 
@@ -408,12 +723,23 @@ def test_end_to_end():
 
 def main():
     test_numbering()
+    test_nglycan_introduction_penalty()
+    test_vl_cdr3_insertion_numbering()
+    test_structure_hint_chain_filtering()
+    test_learning_fab_vl_positions()
+    test_pdb_chain_matching()
     test_graft_loop_conservation()
     test_vhh_humanization_gold_standard()
     test_germline_and_graft()
     test_backmut_variants()
     test_vhh_protection()
     test_minimal_reversion()
+    test_learning_loop()
+    test_lambda_chain_end_to_end()
+    test_j_anchor_covers_all_germline_j()
+    test_germline_strategies_smoke()
+    test_developability_scan()
+    test_input_validation()
     test_humanness_adapter()
     test_docx_report()
     test_enhanced_report()

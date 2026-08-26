@@ -61,15 +61,19 @@ def scan_sequence(chain) -> List[DevelopabilityIssue]:
 
     WARNING: 仅检测序列模式，未考虑结构暴露；埋藏位点风险可能被高估。
 
-    保守二硫键 Cys（VH 22/92、VL 23/88）是结构必需的配对 Cys，不计入
-    "unpaired Cys" / "oxidation (C)" 风险。
+    保守二硫键 Cys（VH 22/92、kappa VL 23/88、lambda VL 22/88）是结构必需的
+    配对 Cys，不计入"unpaired Cys"/"oxidation (C)"风险。同一个 Cys 位置的
+    oxidation (C) 和 unpaired Cys 只报告一次，避免双重计数。
     """
     issues: List[DevelopabilityIssue] = []
     seq = chain.sequence.upper()
+    # Conserved intradomain disulfide Cys: VH 22/92; kappa VL 23/88;
+    # lambda VL has a one-residue-shorter FR1, so its first Cys sits at 22.
     conserved_cys = {f"{chain.chain_type}{n}" for n in
                      (22, 92) if chain.chain_type == "H"} | \
                     {f"{chain.chain_type}{n}" for n in
-                     (23, 88) if chain.chain_type == "L"}
+                     (22, 23, 88) if chain.chain_type == "L"}
+    cys_seen = set()   # positions already reported under a C-related motif
     for motif, pattern in RISK_MOTIFS.items():
         cys_related = "unpaired Cys" in motif or motif.startswith("oxidation (C)")
         for m in re.finditer(pattern, seq):
@@ -81,6 +85,10 @@ def scan_sequence(chain) -> List[DevelopabilityIssue]:
                     break
             if cys_related and pos in conserved_cys:
                 continue   # 结构必需配对 Cys，非风险
+            if cys_related and pos in cys_seen:
+                continue   # 同一 Cys 在另一个 C 类 motif 已报告过，去重
+            if cys_related and pos is not None:
+                cys_seen.add(pos)
             risk_level = _assess_risk_level(motif)
             issues.append(DevelopabilityIssue(
                 position=pos or f"seq{m.start() + 1}",
