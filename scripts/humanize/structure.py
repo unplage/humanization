@@ -189,7 +189,7 @@ def compute_hints(
         # CDR contact: any atom within 4.5 A of a CDR atom; record partners
         partners = set()
         for (r2, _n2, a2) in cdr_atoms:
-            if _dist(a2[2], atoms[0][1]) < 4.5:
+            if _dist(a2, atoms[0][1]) < 4.5:
                 ppos = resseq_to_pos.get(r2[1])
                 if ppos:
                     partners.add(ppos)

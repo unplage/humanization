@@ -28,9 +28,18 @@ from humanize.mpnn import MPNNConfig
 
 
 def cmd_run(args):
+    # Parse forced germlines
+    forced_germlines = {}
+    if args.force_germline:
+        for item in args.force_germline:
+            if "=" in item:
+                chain, gene = item.split("=", 1)
+                forced_germlines[chain.upper()] = gene
+    
     cfg = PipelineConfig(
         germline_dir=args.germline_dir or "",
         germline_strategy=args.germline_strategy or "auto",
+        forced_germlines=forced_germlines,
         cdr_scheme=args.scheme,
         report_schemes=["kabat", "chothia", "abm", "imgt"],
         format=args.format,
@@ -174,6 +183,8 @@ def main(argv=None):
                             "adimab_frequency=Adimab recommended + frequency, "
                             "pioneer_frequency=Pioneer library + frequency, "
                             "composite_3axis=0.5*CVI+0.3*freq+0.2*FR")
+    p_run.add_argument("--force-germline", nargs="+", metavar="CHAIN=GENE",
+                       help="force specific germline(s), e.g. --force-germline H=IGHV1-3*01 L=IGKV1-39*01")
     p_run.add_argument("--antigen", default=None, help="antigen sequence (AF3 complex)")
     p_run.add_argument("--calibration", default=None,
                        help="calibration.json from `humanize learn` (empirical scoring)")
