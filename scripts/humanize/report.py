@@ -105,6 +105,25 @@ def write_json(path: str, result: RunResult) -> None:
                 }
                 for v in rep.variants
             ],
+            "developability_optimization": (
+                {
+                    "risks": [
+                        {
+                            "seq_pos": r.seq_pos,
+                            "kabat_pos": r.kabat_pos,
+                            "motif": r.motif,
+                            "motif_name": r.motif_name,
+                            "risk": r.risk,
+                            "issue": r.issue,
+                            "context": r.context,
+                        }
+                        for r in (rep.developability_optimization.risks if hasattr(rep.developability_optimization, 'risks') else [])
+                    ],
+                    "optimized_designs": rep.developability_optimization.optimized_designs if hasattr(rep.developability_optimization, 'optimized_designs') else [],
+                    "warnings": rep.developability_optimization.warnings if hasattr(rep.developability_optimization, 'warnings') else [],
+                    "summary": rep.developability_optimization.summary if hasattr(rep.developability_optimization, 'summary') else "",
+                } if rep.developability_optimization else None
+            ),
         }
         payload["chains"].append(chain_payload)
     with open(path, "w") as fh:
@@ -206,6 +225,38 @@ def write_markdown(path: str, result: RunResult) -> None:
             diff = [p for p in v.graft.origin if v.graft.origin[p] != v0_map.get(p)]
             L.append(f"| {v.name} | {', '.join(diff) or '-'} |")
         L.append("")
+        
+        # ---- Developability optimization report ----
+        if rep.developability_optimization and rep.developability_optimization.risks:
+            dev_opt = rep.developability_optimization
+            L.append("### Developability optimization (Step 4)")
+            L.append("")
+            L.append(f"**Summary:** {dev_opt.summary}")
+            L.append("")
+            L.append("**High-risk positions detected:**")
+            L.append("")
+            L.append("| Position | Motif | Risk | Issue | Context |")
+            L.append("|----------|-------|------|-------|---------|")
+            for r in dev_opt.risks:
+                L.append(f"| {r.seq_pos} | {r.motif} | {r.risk} | {r.issue} | {r.context} |")
+            L.append("")
+            
+            if dev_opt.optimized_designs:
+                L.append("**Optimized designs (risk-free):**")
+                L.append("")
+                L.append("ProteinMPNN has generated alternative sequences that eliminate the high-risk motifs while preserving the framework structure.")
+                L.append("")
+            else:
+                L.append("**Note:** No risk-free designs generated. Consider:")
+                L.append("- Running ProteinMPNN with `--mpnn-mode local` for actual optimization")
+                L.append("- Manually reviewing the high-risk positions for experimental validation")
+                L.append("")
+            
+            if dev_opt.warnings:
+                L.append("**Warnings:**")
+                for w in dev_opt.warnings:
+                    L.append(f"- {w}")
+                L.append("")
     L.append("## Notes")
     L.append("")
     L.append("- Position numbering: Kabat (portable engine); ANARCI (exact) "
