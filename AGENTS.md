@@ -42,6 +42,17 @@ python3 tests/backtest_scale.py     # HumAb25: 25 approved mouse antibodies
    9 个底层策略: `fr_best` | `cdr_best` | `composite` (0.7*FR+0.3*CDR) | `cvi_best` (canonical+vernier+interface) | `min_backmutations` | `current` (top-30% FR with max CDR) | `adimab_frequency` | `pioneer_frequency` | `composite_3axis` (0.5*CVI+0.3*freq+0.2*FR)。
    `auto` 是默认路由策略（VH=cvi_best, VL=cdr_best），不需要单独跑。
 
+   **每个策略必须返回 5 个候选**（按评分排序，分数相同时按使用频率排序），格式示例：
+   ```
+   策略: fr_best
+   #   V基因              FR     CDR    Composite  CVI    Freq   3axis   回突变
+   1   IGHV3-72*01       0.867  0.440  0.739      0.833  0.003  0.591   1
+   2   IGHV3-73*01       0.853  0.600  0.777      0.833  0.003  0.588   2
+   3   IGHV3-73*02       0.853  0.600  0.777      0.833  0.003  0.588   2
+   4   IGHV3-15*01       0.840  0.480  0.732      0.792  0.003  0.565   1
+   5   IGHV3-15*02       0.840  0.480  0.732      0.792  0.003  0.565   1
+   ```
+
 2. **Step 2 — 按选定 germline 正式运行**: rerun once with `--germline-strategy <chosen> --outdir outputs` (or lock exact genes with `--force-germline H=IGHV1-3*01 L=IGKV1-39*01`) and deliver the full report set (markdown/docx/json/csv/fasta).
 
 3. **Step 3 — 结构优化 (optional)**: if the user has an AF3 donor structure (PDB/CIF) or can run AF3, rerun with `--donor-structure <pdb>` (and/or `--af3-mode local --af3-binary <run_alphafold.py> --antigen <seq>`) so buriedness/contact/CDR-RMSD refine back-mutation scores; then diff before/after reports (tier changes, exposed-vs-buried reclassification) and summarize what the structure changed.
