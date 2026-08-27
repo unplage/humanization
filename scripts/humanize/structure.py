@@ -41,6 +41,7 @@ class PDBAtom:
     x: float
     y: float
     z: float
+    plddt: float = 0.0  # AF3 confidence score (B-factor column)
 
 
 @dataclass
@@ -69,6 +70,8 @@ def parse_pdb(path: str) -> Optional[PDBModel]:
                 # the PDB element column (line[76:78]) for robustness; the
                 # atom name prefix check there handles most cases already.
                 try:
+                    # AF3 stores pLDDT in the B-factor column (60:66)
+                    plddt = float(line[60:66]) if len(line) > 66 else 0.0
                     model.atoms.append(PDBAtom(
                         name=line[12:16].strip(),
                         resname=line[17:20].strip(),
@@ -77,6 +80,7 @@ def parse_pdb(path: str) -> Optional[PDBModel]:
                         x=float(line[30:38]),
                         y=float(line[38:46]),
                         z=float(line[46:54]),
+                        plddt=plddt,
                     ))
                 except (ValueError, IndexError):
                     continue
@@ -190,8 +194,11 @@ def _try_freesasa_buriedness(
     pdb_path: str,
     chain_label: str,
     resseq_to_pos: Dict[int, str],
-) -> Optional[Dict[str, bool]]:
-    """Try to compute buriedness using FreeSASA. Returns None if unavailable."""
+) -> Optional[Dict[str, Tuple[bool, float]]]:
+    """Try to compute buriedness using FreeSASA. Returns None if unavailable.
+    
+    Returns: {pos: (is_buried, rel_sasa)} - includes relSASA for confidence interval.
+    """
     try:
         import freesasa
         from collections import defaultdict
@@ -220,7 +227,7 @@ def _try_freesasa_buriedness(
             sasa_by_residue[(chain, res_num)] += area
             residue_names[(chain, res_num)] = structure.residueName(i)
         
-        # Convert to buried/exposed
+        # Convert to buried/exposed with relSASA
         buried = {}
         for resseq, pos in resseq_to_pos.items():
             key = (chain_label, resseq)
@@ -229,7 +236,7 @@ def _try_freesasa_buriedness(
                 resname = residue_names.get(key)
                 if resname and resname in ref_sasa:
                     rel_sasa = abs_sasa / ref_sasa[resname]
-                    buried[pos] = rel_sasa < 0.20
+                    buried[pos] = (rel_sasa < 0.20, rel_sasa)
         
         return buried if buried else None
     except ImportError:
@@ -243,6 +250,7 @@ def compute_hints(
     cdr_positions: Dict[str, int],
     antigen_chains: Optional[List[str]] = None,
     pdb_path: Optional[str] = None,
+    literature_positions: Optional[set] = None,
 ) -> StructureHints:
     """Compute per-position hints for a chain in the model.
 
@@ -250,6 +258,9 @@ def compute_hints(
     position_map: {Kabat pos: residue number} for ALL residues of the chain.
     cdr_positions:{Kabat pos: residue number} for CDR residues only.
     pdb_path:     Optional path to PDB file for FreeSASA calculation.
+    literature_positions: Optional set of positions with literature evidence
+                         (vernier/canonical/interface). If provided, structural
+                         evidence is only applied to these positions.
     """
     heavy = model.heavy_atoms()
     by_res: Dict[Tuple[str, int], List] = {}
@@ -269,23 +280,39 @@ def compute_hints(
     # map resseq -> kabat pos
     resseq_to_pos = {v: k for k, v in position_map.items()}
 
+    # Extract pLDDT from model (AF3 B-factor column)
+    plddt_by_pos: Dict[str, float] = {}
+    for a in model.atoms:
+        if a.chain == chain_label and a.plddt > 0:
+            pos = resseq_to_pos.get(a.resseq)
+            if pos and pos not in plddt_by_pos:
+                plddt_by_pos[pos] = a.plddt
+
     # Try FreeSASA for buriedness calculation
-    buried: Dict[str, bool] = {}
+    # Returns: {pos: (is_buried, rel_sasa)} or None
+    freesasa_data = None
     if pdb_path:
-        freesasa_buried = _try_freesasa_buriedness(pdb_path, chain_label, resseq_to_pos)
-        if freesasa_buried:
-            buried = freesasa_buried
+        freesasa_data = _try_freesasa_buriedness(pdb_path, chain_label, resseq_to_pos)
     
-    # Fallback to contact-based heuristic if FreeSASA unavailable
-    if not buried:
+    # Build buried dict with confidence interval logic
+    buried: Dict[str, Optional[bool]] = {}
+    rel_sasa: Dict[str, float] = {}
+    if freesasa_data:
+        for pos, (is_buried, sasa_val) in freesasa_data.items():
+            rel_sasa[pos] = sasa_val
+            # 方案3: relSASA 置信区间 0.15-0.25 → 标记为 uncertain (None)
+            if 0.15 <= sasa_val <= 0.25:
+                buried[pos] = None  # uncertain, treated as exposed
+            else:
+                buried[pos] = is_buried
+    else:
+        # Fallback to contact-based heuristic
         for (ch, resseq), atoms in by_res.items():
             if ch != chain_label:
                 continue
             pos = resseq_to_pos.get(resseq)
             if pos is None:
                 continue
-            # buriedness proxy: heavy-atom count within 6 A of any other residue
-            n_heavy = len(atoms)
             contacts = 0
             for (oc, oseq), oa in by_res.items():
                 if (oc, oseq) == (ch, resseq):
@@ -295,7 +322,6 @@ def compute_hints(
                         if _dist(axyz, xyz) < 6.0:
                             contacts += 1
                             break
-            # Calibrated threshold: contacts >= 45 gives ~76% accuracy
             buried[pos] = contacts >= 45
 
     cdr_contact: Dict[str, bool] = {}
@@ -322,11 +348,135 @@ def compute_hints(
                 _dist(a2, a1) < 4.5
                 for (r2, _n2, a2) in ag_atoms for (_n1, a1) in atoms
             )
+
+    # 方案5: 文献交叉验证 - 仅限文献位置集合
+    # 如果提供了文献位置集合，仅在这些位置应用结构证据
+    if literature_positions is not None:
+        for pos in list(buried.keys()):
+            if pos not in literature_positions:
+                del buried[pos]
+        for pos in list(cdr_contact.keys()):
+            if pos not in literature_positions:
+                del cdr_contact[pos]
+        for pos in list(ag_contact.keys()):
+            if pos not in literature_positions:
+                del ag_contact[pos]
+
     return StructureHints({
         "buried": buried,
         "cdr_contact": cdr_contact,
         "antigen_contact": ag_contact,
         "cdr_partners": cdr_partners,
+        "plddt": plddt_by_pos,
+        "rel_sasa": rel_sasa,
+    })
+
+
+def compute_multi_model_consensus(
+    pdb_paths: List[str],
+    chain_label: str,
+    position_map: Dict[str, int],
+    cdr_positions: Dict[str, int],
+    antigen_chains: Optional[List[str]] = None,
+    min_consensus: int = 3,
+) -> StructureHints:
+    """Compute structure hints from multiple models (e.g., AF3 rank_1-5).
+    
+    Only marks a position as buried/CDR-contact if at least min_consensus
+    models agree, reducing false positives from model uncertainty.
+    
+    Args:
+        pdb_paths: List of PDB file paths (rank_1 through rank_N)
+        chain_label: PDB chain id of the target chain
+        position_map: {Kabat pos: residue number}
+        cdr_positions: {Kabat pos: residue number} for CDR residues
+        antigen_chains: Optional antigen chain ids
+        min_consensus: Minimum number of models that must agree (default: 3)
+    
+    Returns:
+        StructureHints with consensus-based buried/CDR-contact calls
+    """
+    from collections import Counter
+    
+    if not pdb_paths:
+        return StructureHints()
+    
+    # Collect buried/CDR-contact from each model
+    all_buried = []  # List[Dict[str, bool]]
+    all_cdr = []     # List[Dict[str, bool]]
+    all_plddt = []   # List[Dict[str, float]]
+    
+    for pdb_path in pdb_paths:
+        if not os.path.exists(pdb_path):
+            continue
+        model = load_model(pdb_path)
+        if not model:
+            continue
+        hints = compute_hints(
+            model, chain_label, position_map, cdr_positions,
+            antigen_chains, pdb_path=pdb_path,
+        )
+        buried = hints.data.get("buried", {})
+        cdr = hints.data.get("cdr_contact", {})
+        plddt = hints.data.get("plddt", {})
+        
+        # Filter out None values (uncertain) for consensus counting
+        all_buried.append({k: v for k, v in buried.items() if v is not None})
+        all_cdr.append({k: v for k, v in cdr.items() if v is not None})
+        all_plddt.append(plddt)
+    
+    if not all_buried:
+        return StructureHints()
+    
+    # Compute consensus for buried
+    consensus_buried = {}
+    all_positions = set()
+    for b in all_buried:
+        all_positions.update(b.keys())
+    
+    for pos in all_positions:
+        buried_votes = [b.get(pos) for b in all_buried if pos in b]
+        if len(buried_votes) >= min_consensus:
+            # Consensus: majority must agree
+            true_count = sum(1 for v in buried_votes if v is True)
+            false_count = sum(1 for v in buried_votes if v is False)
+            if true_count >= min_consensus:
+                consensus_buried[pos] = True
+            elif false_count >= min_consensus:
+                consensus_buried[pos] = False
+            else:
+                consensus_buried[pos] = None  # uncertain
+    
+    # Compute consensus for CDR contact
+    consensus_cdr = {}
+    all_cdr_positions = set()
+    for c in all_cdr:
+        all_cdr_positions.update(c.keys())
+    
+    for pos in all_cdr_positions:
+        cdr_votes = [c.get(pos) for c in all_cdr if pos in c]
+        if len(cdr_votes) >= min_consensus:
+            true_count = sum(1 for v in cdr_votes if v is True)
+            consensus_cdr[pos] = true_count >= min_consensus
+    
+    # Average pLDDT across models
+    avg_plddt = {}
+    all_plddt_positions = set()
+    for p in all_plddt:
+        all_plddt_positions.update(p.keys())
+    
+    for pos in all_plddt_positions:
+        values = [p[pos] for p in all_plddt if pos in p]
+        if values:
+            avg_plddt[pos] = sum(values) / len(values)
+    
+    return StructureHints({
+        "buried": consensus_buried,
+        "cdr_contact": consensus_cdr,
+        "antigen_contact": {},  # antigen contact not computed in consensus
+        "cdr_partners": {},
+        "plddt": avg_plddt,
+        "rel_sasa": {},
     })
 
 

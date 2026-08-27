@@ -77,11 +77,13 @@ class StructureHints:
     """Structural annotations from AF3 (optional). None = unknown.
 
     data keys:
-      buried          {pos: bool}
+      buried          {pos: Optional[bool]}  None = uncertain (relSASA 0.15-0.25)
       cdr_contact     {pos: bool}      framework residue contacts any CDR
       antigen_contact {pos: bool}      framework/CDR residue contacts antigen
       cdr_partners    {fr_pos: [cdr_pos, ...]}  which CDR residues a
                        framework residue contacts (heavy atom < 4.5 A)
+      plddt           {pos: float}     AF3 confidence score (B-factor)
+      rel_sasa        {pos: float}     relative SASA (0-1)
     """
 
     def __init__(self, data: Optional[dict] = None):
@@ -103,6 +105,16 @@ class StructureHints:
         d = self.data.get("cdr_partners") or {}
         v = d.get(pos) or []
         return set(v)
+
+    def plddt(self, pos: str) -> Optional[float]:
+        """AF3 confidence score for this position (0-100)."""
+        d = self.data.get("plddt")
+        return d.get(pos) if d else None
+
+    def rel_sasa(self, pos: str) -> Optional[float]:
+        """Relative SASA for this position (0-1)."""
+        d = self.data.get("rel_sasa")
+        return d.get(pos) if d else None
 
     def exposure(self, pos: str) -> float:
         b = self.buried("", pos)
@@ -190,6 +202,15 @@ def analyze_backmutations(
             structural = max(structural, 0.7)
         if features and buried is False:
             structural = max(structural * 0.85, 0.0)
+
+        # 方案1: pLDDT 加权 - 低置信度区域降低结构证据权重
+        plddt_val = structure.plddt(pos)
+        if plddt_val is not None and plddt_val < 50:
+            # pLDDT < 50: 结构证据不可靠，大幅降权
+            structural *= 0.3
+        elif plddt_val is not None and plddt_val < 70:
+            # pLDDT 50-70: 结构证据中等置信度，适度降权
+            structural *= 0.7
 
         # ---- immunogenicity benefit ----
         exposure = structure.exposure(pos)

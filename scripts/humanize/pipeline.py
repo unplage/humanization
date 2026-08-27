@@ -279,12 +279,19 @@ def _process_chain(
             
             # 创建兼容的 choice 对象
             from .germline import GermlineChoice
+            # Extract first candidate from each strategy's list
+            all_alts = []
+            for cand_list in multi_result.candidates.values():
+                if isinstance(cand_list, list):
+                    for c in cand_list[:3]:  # top 3 from each strategy
+                        all_alts.append((c.gene, {"fr_identity": c.fr_identity, "cdr_identity": c.cdr_identity}))
+                else:
+                    all_alts.append((cand_list.gene, {"fr_identity": cand_list.fr_identity, "cdr_identity": cand_list.cdr_identity}))
             choice = GermlineChoice(
                 v_gene=v_gene,
                 j_gene=j_gene,
                 scores={"fr_identity": candidate.fr_identity, "cdr_identity": candidate.cdr_identity},
-                alternatives=[(c.gene, {"fr_identity": c.fr_identity, "cdr_identity": c.cdr_identity}) 
-                             for c in multi_result.candidates.values()],
+                alternatives=all_alts,
             )
     
     if v_gene is None or j_gene is None:
@@ -306,7 +313,7 @@ def _process_chain(
     # Load structure from AF3 prediction or donor structure
     structure_path = af3_pdb if af3_pdb and os.path.exists(af3_pdb) else config.donor_structure
     if structure_path and os.path.exists(structure_path):
-        from .structure import load_model, match_pdb_chain
+        from .structure import load_model, match_pdb_chain, compute_multi_model_consensus
         model = load_model(structure_path)
         if model:
             # Assign the PDB chain by sequence identity (longest common
@@ -326,7 +333,23 @@ def _process_chain(
             cdrs = {p: n for p, n in all_pos.items()
                     if is_cdr_loop_position(ctype, int("".join(c for c in p if c.isdigit())))}
             ag_chains = ["A"] if antigen else None
-            hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains, pdb_path=structure_path)
+            
+            # 方案2: 多模型共识 - 查找 rank_1-5 PDB 文件
+            import glob
+            pdb_dir = os.path.dirname(structure_path)
+            pdb_base = os.path.basename(structure_path)
+            # Match rank_*.pdb pattern
+            all_pdbs = sorted(glob.glob(os.path.join(pdb_dir, "rank_*.pdb")))
+            
+            if len(all_pdbs) >= 3:
+                # Use multi-model consensus (3+ models)
+                hints = compute_multi_model_consensus(
+                    all_pdbs, label, all_pos, cdrs, ag_chains,
+                    min_consensus=3,
+                )
+            else:
+                # Single model
+                hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains, pdb_path=structure_path)
 
     # ---- back-mutation analysis ----
     # Conservation reference: top-N homologous germlines (unbiased panel),

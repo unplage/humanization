@@ -122,7 +122,11 @@ def compute_position_effects(
         except ValueError as e:
             warnings.append(f"[{exp.name}] parent numbering failed: {e}")
             continue
-        pd = (parent.posmap() if parent else {}) | (pl.posmap() if pl else {})
+        pd = {}
+        if parent:
+            pd.update(parent.posmap())
+        if pl:
+            pd.update(pl.posmap())
         pidx = {}
         if parent:
             pidx.update({r.pos: r.index for r in parent.residues})
@@ -154,7 +158,11 @@ def compute_position_effects(
             if vh is None and vl is None:
                 warnings.append(f"[{exp.name}] variant {v['name']} not numberable")
                 continue
-            vd = (vh.posmap() if vh else {}) | (vl.posmap() if vl else {})
+            vd = {}
+            if vh:
+                vd.update(vh.posmap())
+            if vl:
+                vd.update(vl.posmap())
             ddg = _ddg(float(v["kd"]), exp.parent_kd)
             for pos in set(pd) & set(vd):
                 num = int("".join(c for c in pos if c.isdigit()))

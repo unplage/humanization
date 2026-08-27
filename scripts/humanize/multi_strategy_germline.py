@@ -47,25 +47,31 @@ class GermlineCandidate:
 class MultiStrategyResult:
     """多策略选择结果"""
     query_chain: str
-    candidates: Dict[str, GermlineCandidate] = field(default_factory=dict)
+    candidates: Dict[str, List[GermlineCandidate]] = field(default_factory=dict)
     
     def get_best(self, strategy: str) -> Optional[GermlineCandidate]:
         """获取特定策略的最佳候选"""
-        return self.candidates.get(strategy)
+        lst = self.candidates.get(strategy, [])
+        return lst[0] if lst else None
+    
+    def get_top(self, strategy: str, n: int = 5) -> List[GermlineCandidate]:
+        """获取特定策略的前N个候选"""
+        return self.candidates.get(strategy, [])[:n]
     
     def summary(self) -> str:
         """生成摘要"""
         lines = [f"Germline 选择结果 ({self.query_chain}):"]
         lines.append("-" * 70)
         
-        for strategy, candidate in self.candidates.items():
+        for strategy, candidate_list in self.candidates.items():
             lines.append(f"\n策略: {strategy}")
-            lines.append(f"  基因: {candidate.gene.gene_id}")
-            lines.append(f"  FR 同源性: {candidate.fr_identity:.4f}")
-            lines.append(f"  CDR 同源性: {candidate.cdr_identity:.4f}")
-            lines.append(f"  综合评分: {candidate.composite_score:.4f}")
-            lines.append(f"  CVI 同源性: {candidate.cvi_score:.4f}")
-            lines.append(f"  估计回复突变数: {candidate.n_backmutations_est}")
+            for i, c in enumerate(candidate_list[:3], 1):
+                lines.append(f"  #{i} 基因: {c.gene.gene_id}")
+                lines.append(f"      FR 同源性: {c.fr_identity:.4f}")
+                lines.append(f"      CDR 同源性: {c.cdr_identity:.4f}")
+                lines.append(f"      综合评分: {c.composite_score:.4f}")
+                lines.append(f"      CVI 同源性: {c.cvi_score:.4f}")
+                lines.append(f"      估计回复突变数: {c.n_backmutations_est}")
         
         return "\n".join(lines)
 
@@ -206,91 +212,59 @@ def choose_germlines_multi_strategy(
         item['frequency'] = frequency
         item['composite_3axis'] = 0.5 * item['cvi'] + 0.3 * frequency + 0.2 * item['fr']
     
-    # 策略1: FR 同源性最高
-    best_fr = max(scored, key=lambda x: x['fr'])
-    result.candidates['fr_best'] = GermlineCandidate(
-        gene=best_fr['gene'],
-        fr_identity=best_fr['fr'],
-        cdr_identity=best_fr['cdr'],
-        composite_score=best_fr['composite'],
-        cvi_score=best_fr['cvi'],
-        n_backmutations_est=best_fr['n_backmut'],
-        strategy='fr_best',
-        frequency_score=best_fr['frequency'],
-        composite_3axis=best_fr['composite_3axis'],
-    )
+    def _make_candidate(item, strategy):
+        return GermlineCandidate(
+            gene=item['gene'],
+            fr_identity=item['fr'],
+            cdr_identity=item['cdr'],
+            composite_score=item['composite'],
+            cvi_score=item['cvi'],
+            n_backmutations_est=item['n_backmut'],
+            strategy=strategy,
+            frequency_score=item['frequency'],
+            composite_3axis=item['composite_3axis'],
+        )
     
-    # 策略2: CDR 同源性最高
-    best_cdr = max(scored, key=lambda x: x['cdr'])
-    result.candidates['cdr_best'] = GermlineCandidate(
-        gene=best_cdr['gene'],
-        fr_identity=best_cdr['fr'],
-        cdr_identity=best_cdr['cdr'],
-        composite_score=best_cdr['composite'],
-        cvi_score=best_cdr['cvi'],
-        n_backmutations_est=best_cdr['n_backmut'],
-        strategy='cdr_best',
-        frequency_score=best_cdr['frequency'],
-        composite_3axis=best_cdr['composite_3axis'],
-    )
+    def _top_n(items, n=5):
+        return [_make_candidate(x, '') for x in items[:n]]
     
-    # 策略3: 综合评分最高
-    best_composite = max(scored, key=lambda x: x['composite'])
-    result.candidates['composite'] = GermlineCandidate(
-        gene=best_composite['gene'],
-        fr_identity=best_composite['fr'],
-        cdr_identity=best_composite['cdr'],
-        composite_score=best_composite['composite'],
-        cvi_score=best_composite['cvi'],
-        n_backmutations_est=best_composite['n_backmut'],
-        strategy='composite',
-        frequency_score=best_composite['frequency'],
-        composite_3axis=best_composite['composite_3axis'],
-    )
+    # 策略1: FR 同源性最高（FR 相同时用使用频率作为 tiebreaker）
+    sorted_fr = sorted(scored, key=lambda x: (-x['fr'], -x['frequency']))
+    result.candidates['fr_best'] = _top_n(sorted_fr)
+    for c in result.candidates['fr_best']:
+        c.strategy = 'fr_best'
     
-    # 策略4: CVI 同源性最高
-    best_cvi = max(scored, key=lambda x: x['cvi'])
-    result.candidates['cvi_best'] = GermlineCandidate(
-        gene=best_cvi['gene'],
-        fr_identity=best_cvi['fr'],
-        cdr_identity=best_cvi['cdr'],
-        composite_score=best_cvi['composite'],
-        cvi_score=best_cvi['cvi'],
-        n_backmutations_est=best_cvi['n_backmut'],
-        strategy='cvi_best',
-        frequency_score=best_cvi['frequency'],
-        composite_3axis=best_cvi['composite_3axis'],
-    )
+    # 策略2: CDR 同源性最高（CDR 相同时用使用频率作为 tiebreaker）
+    sorted_cdr = sorted(scored, key=lambda x: (-x['cdr'], -x['frequency']))
+    result.candidates['cdr_best'] = _top_n(sorted_cdr)
+    for c in result.candidates['cdr_best']:
+        c.strategy = 'cdr_best'
     
-    # 策略5: 估计回复突变最少
-    best_min_backmut = min(scored, key=lambda x: x['n_backmut'])
-    result.candidates['min_backmutations'] = GermlineCandidate(
-        gene=best_min_backmut['gene'],
-        fr_identity=best_min_backmut['fr'],
-        cdr_identity=best_min_backmut['cdr'],
-        composite_score=best_min_backmut['composite'],
-        cvi_score=best_min_backmut['cvi'],
-        n_backmutations_est=best_min_backmut['n_backmut'],
-        strategy='min_backmutations',
-        frequency_score=best_min_backmut['frequency'],
-        composite_3axis=best_min_backmut['composite_3axis'],
-    )
+    # 策略3: 综合评分最高（composite 相同时用使用频率作为 tiebreaker）
+    sorted_composite = sorted(scored, key=lambda x: (-x['composite'], -x['frequency']))
+    result.candidates['composite'] = _top_n(sorted_composite)
+    for c in result.candidates['composite']:
+        c.strategy = 'composite'
+    
+    # 策略4: CVI 同源性最高（CVI 相同时用使用频率作为 tiebreaker）
+    sorted_cvi = sorted(scored, key=lambda x: (-x['cvi'], -x['frequency']))
+    result.candidates['cvi_best'] = _top_n(sorted_cvi)
+    for c in result.candidates['cvi_best']:
+        c.strategy = 'cvi_best'
+    
+    # 策略5: 估计回复突变最少（回突变相同时用使用频率作为 tiebreaker）
+    sorted_min = sorted(scored, key=lambda x: (x['n_backmut'], -x['frequency']))
+    result.candidates['min_backmutations'] = _top_n(sorted_min)
+    for c in result.candidates['min_backmutations']:
+        c.strategy = 'min_backmutations'
     
     # 策略6: 当前系统策略 (top 30% FR 中 CDR 最高)
     sorted_by_fr = sorted(scored, key=lambda x: -x['fr'])
     top_30 = sorted_by_fr[:max(1, int(len(sorted_by_fr) * 0.3))]
-    best_current = max(top_30, key=lambda x: x['cdr'])
-    result.candidates['current'] = GermlineCandidate(
-        gene=best_current['gene'],
-        fr_identity=best_current['fr'],
-        cdr_identity=best_current['cdr'],
-        composite_score=best_current['composite'],
-        cvi_score=best_current['cvi'],
-        n_backmutations_est=best_current['n_backmut'],
-        strategy='current',
-        frequency_score=best_current['frequency'],
-        composite_3axis=best_current['composite_3axis'],
-    )
+    sorted_current = sorted(top_30, key=lambda x: (-x['cdr'], -x['frequency']))
+    result.candidates['current'] = _top_n(sorted_current)
+    for c in result.candidates['current']:
+        c.strategy = 'current'
     
     # 策略7: Adimab 频率优先 (基于使用频率加权)
     for item in scored:
@@ -299,46 +273,22 @@ def choose_germlines_multi_strategy(
         item['adimab_score'] = item['frequency'] * (1.2 if is_adimab_rec else 1.0)
         item['pioneer_score'] = item['frequency'] * (1.2 if is_pioneer_rec else 1.0)
     
-    best_adimab = max(scored, key=lambda x: x['adimab_score'])
-    result.candidates['adimab_frequency'] = GermlineCandidate(
-        gene=best_adimab['gene'],
-        fr_identity=best_adimab['fr'],
-        cdr_identity=best_adimab['cdr'],
-        composite_score=best_adimab['composite'],
-        cvi_score=best_adimab['cvi'],
-        n_backmutations_est=best_adimab['n_backmut'],
-        strategy='adimab_frequency',
-        frequency_score=best_adimab['frequency'],
-        composite_3axis=best_adimab['composite_3axis'],
-    )
+    sorted_adimab = sorted(scored, key=lambda x: -x['adimab_score'])
+    result.candidates['adimab_frequency'] = _top_n(sorted_adimab)
+    for c in result.candidates['adimab_frequency']:
+        c.strategy = 'adimab_frequency'
     
     # 策略8: Pioneer 频率优先
-    best_pioneer = max(scored, key=lambda x: x['pioneer_score'])
-    result.candidates['pioneer_frequency'] = GermlineCandidate(
-        gene=best_pioneer['gene'],
-        fr_identity=best_pioneer['fr'],
-        cdr_identity=best_pioneer['cdr'],
-        composite_score=best_pioneer['composite'],
-        cvi_score=best_pioneer['cvi'],
-        n_backmutations_est=best_pioneer['n_backmut'],
-        strategy='pioneer_frequency',
-        frequency_score=best_pioneer['frequency'],
-        composite_3axis=best_pioneer['composite_3axis'],
-    )
+    sorted_pioneer = sorted(scored, key=lambda x: -x['pioneer_score'])
+    result.candidates['pioneer_frequency'] = _top_n(sorted_pioneer)
+    for c in result.candidates['pioneer_frequency']:
+        c.strategy = 'pioneer_frequency'
     
     # 策略9: 3 轴综合评分 (CVI + 频率 + FR)
-    best_3axis = max(scored, key=lambda x: x['composite_3axis'])
-    result.candidates['composite_3axis'] = GermlineCandidate(
-        gene=best_3axis['gene'],
-        fr_identity=best_3axis['fr'],
-        cdr_identity=best_3axis['cdr'],
-        composite_score=best_3axis['composite'],
-        cvi_score=best_3axis['cvi'],
-        n_backmutations_est=best_3axis['n_backmut'],
-        strategy='composite_3axis',
-        frequency_score=best_3axis['frequency'],
-        composite_3axis=best_3axis['composite_3axis'],
-    )
+    sorted_3axis = sorted(scored, key=lambda x: -x['composite_3axis'])
+    result.candidates['composite_3axis'] = _top_n(sorted_3axis)
+    for c in result.candidates['composite_3axis']:
+        c.strategy = 'composite_3axis'
     
     return result
 
@@ -351,17 +301,18 @@ def format_multi_strategy_report(result: MultiStrategyResult) -> str:
     lines.append("=" * 70)
     
     # 表头
-    lines.append(f"\n{'策略':<20} {'Germline':<18} {'FR':<10} {'CDR':<10} {'综合':<10} {'CVI':<10} {'频率':<10} {'3轴':<10} {'回复突变'}")
-    lines.append("-" * 100)
+    lines.append(f"\n{'策略':<20} {'排名':<4} {'Germline':<18} {'FR':<10} {'CDR':<10} {'综合':<10} {'CVI':<10} {'频率':<10} {'3轴':<10} {'回复突变'}")
+    lines.append("-" * 110)
     
-    for strategy, candidate in result.candidates.items():
-        lines.append(
-            f"{strategy:<20} {candidate.gene.gene_id:<18} "
-            f"{candidate.fr_identity:<10.4f} {candidate.cdr_identity:<10.4f} "
-            f"{candidate.composite_score:<10.4f} {candidate.cvi_score:<10.4f} "
-            f"{candidate.frequency_score:<10.4f} {candidate.composite_3axis:<10.4f} "
-            f"{candidate.n_backmutations_est}"
-        )
+    for strategy, candidate_list in result.candidates.items():
+        for i, c in enumerate(candidate_list[:5], 1):
+            lines.append(
+                f"{strategy:<20} {i:<4} {c.gene.gene_id:<18} "
+                f"{c.fr_identity:<10.4f} {c.cdr_identity:<10.4f} "
+                f"{c.composite_score:<10.4f} {c.cvi_score:<10.4f} "
+                f"{c.frequency_score:<10.4f} {c.composite_3axis:<10.4f} "
+                f"{c.n_backmutations_est}"
+            )
     
     lines.append("\n" + "=" * 70)
     lines.append("策略说明:")

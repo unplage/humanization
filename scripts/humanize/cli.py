@@ -34,7 +34,9 @@ def cmd_run(args):
         for item in args.force_germline:
             if "=" in item:
                 chain, gene = item.split("=", 1)
-                forced_germlines[chain.upper()] = gene
+                # Normalize chain key: VH->H, VL->L, H->H, L->L
+                chain_key = chain.upper().replace("VH", "H").replace("VL", "L")
+                forced_germlines[chain_key] = gene
     
     cfg = PipelineConfig(
         germline_dir=args.germline_dir or "",
@@ -184,7 +186,7 @@ def main(argv=None):
                             "pioneer_frequency=Pioneer library + frequency, "
                             "composite_3axis=0.5*CVI+0.3*freq+0.2*FR")
     p_run.add_argument("--force-germline", nargs="+", metavar="CHAIN=GENE",
-                       help="force specific germline(s), e.g. --force-germline H=IGHV1-3*01 L=IGKV1-39*01")
+                       help="force specific germline(s), e.g. --force-germline VH=IGHV1-3*01 VL=IGKV1-39*01")
     p_run.add_argument("--antigen", default=None, help="antigen sequence (AF3 complex)")
     p_run.add_argument("--calibration", default=None,
                        help="calibration.json from `humanize learn` (empirical scoring)")

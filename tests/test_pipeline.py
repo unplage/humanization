@@ -318,15 +318,18 @@ def test_germline_strategies_smoke():
                 "pioneer_frequency", "composite_3axis"}
     missing = expected - set(res.candidates)
     check("all 9 strategies produced candidates", not missing, str(missing))
-    for name, cand in res.candidates.items():
+    for name, cand_list in res.candidates.items():
+        cand = cand_list[0] if isinstance(cand_list, list) else cand_list
         check(f"{name} returns valid V gene",
               cand.gene is not None and cand.gene.numbered is not None,
               str(cand.gene.gene_id if cand.gene else None))
     fr_scores = {}
-    for name, cand in res.candidates.items():
+    for name, cand_list in res.candidates.items():
+        cand = cand_list[0] if isinstance(cand_list, list) else cand_list
         if cand.gene is not None:
             fr_scores[name] = compare_to_germline(donor, cand.gene)["fr_identity"]
-    fr_best_pick = res.candidates["fr_best"]
+    fr_best_list = res.candidates["fr_best"]
+    fr_best_pick = fr_best_list[0] if isinstance(fr_best_list, list) else fr_best_list
     fr_of_frbest = compare_to_germline(donor, fr_best_pick.gene)["fr_identity"]
     others_max = max(v for k, v in fr_scores.items() if k != "fr_best") \
         if len(fr_scores) > 1 else 0.0
