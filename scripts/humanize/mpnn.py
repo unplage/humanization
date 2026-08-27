@@ -125,3 +125,176 @@ def _consensus_design(chain: NumberedChain,
         if cnt:
             consensus[pos] = max(cnt.items(), key=lambda kv: kv[1])[0]
     return MPNNResult(designs=[consensus], human_likeness=[1.0])
+
+
+@dataclass
+class DevelopabilityRisk:
+    """A single developability risk found in a sequence."""
+    seq_pos: int
+    kabat_pos: str
+    motif: str
+    motif_name: str
+    risk: str  # high/medium
+    issue: str  # deamidation/isomerization/etc
+    context: str
+    donor_aa: str = ""
+    human_aa: str = ""
+
+
+@dataclass
+class DevelopabilityOptimizationResult:
+    """Results from developability optimization."""
+    risks: List[DevelopabilityRisk] = field(default_factory=list)
+    optimized_designs: List[Dict[str, str]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    summary: str = ""
+
+
+def detect_developability_risks(sequence: str, chain_type: str = "H") -> List[DevelopabilityRisk]:
+    """Detect high-risk developability positions in a sequence.
+    
+    Returns list of DevelopabilityRisk objects.
+    """
+    import re
+    from .config import HIGH_RISK_MOTIFS
+    
+    risks = []
+    for name, info in HIGH_RISK_MOTIFS.items():
+        pattern = info["pattern"]
+        for match in re.finditer(pattern, sequence):
+            start = match.start()
+            context = sequence[max(0, start-2):min(len(sequence), start+len(match.group())+2)]
+            risks.append(DevelopabilityRisk(
+                seq_pos=start,
+                kabat_pos="",  # Will be filled by numbering
+                motif=match.group(),
+                motif_name=name,
+                risk=info["risk"],
+                issue=info["issue"],
+                context=context,
+            ))
+    return risks
+
+
+def run_developability_optimization(
+    cfg: MPNNConfig,
+    pdb_path: str,
+    chain: NumberedChain,
+    risks: List[DevelopabilityRisk],
+    is_vhh: bool = False,
+    top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
+) -> DevelopabilityOptimizationResult:
+    """Optimize high-risk developability positions using ProteinMPNN.
+    
+    This function:
+    1. Identifies which positions have high-risk motifs (DD, NG, DG, etc.)
+    2. Excludes these positions from MPNN's fixed set (allows optimization)
+    3. Runs MPNN to generate alternative sequences
+    4. Filters designs that eliminate the risk motifs
+    5. Returns optimized designs with human-likeness scores
+    
+    Args:
+        cfg: MPNN configuration
+        pdb_path: Path to PDB structure
+        chain: Numbered chain object
+        risks: List of detected developability risks
+        is_vhh: Whether this is a VHH antibody
+        top_germlines: Top germline candidates for human-likeness scoring
+    
+    Returns:
+        DevelopabilityOptimizationResult with optimized designs
+    """
+    import re
+    result = DevelopabilityOptimizationResult(risks=risks)
+    
+    if not risks:
+        result.summary = "No high-risk developability positions detected."
+        return result
+    
+    if cfg.mode == "off" or not pdb_path:
+        # Use consensus design as fallback
+        mpnn_result = _consensus_design(chain, top_germlines)
+        result.optimized_designs = mpnn_result.designs
+        result.warnings.append("ProteinMPNN not available, using germline consensus")
+    else:
+        # Build fixed positions, excluding high-risk positions
+        fixed = set()
+        for r in chain.residues:
+            if r.region in ("CDR1", "CDR2", "CDR3"):
+                fixed.add(r.index + 1)
+        from .config import INTERFACE_CORE, INTERFACE_EXTENDED, VERNIER_ZONE, VHH_HALLMARK
+        ctype = chain.chain_type
+        for r in chain.residues:
+            num = int("".join(c for c in r.pos if c.isdigit()))
+            if num in INTERFACE_CORE[ctype] or num in INTERFACE_EXTENDED[ctype]:
+                fixed.add(r.index + 1)
+            if num in VERNIER_ZONE[ctype]:
+                fixed.add(r.index + 1)
+            if is_vhh and ctype == "H" and num in VHH_HALLMARK:
+                fixed.add(r.index + 1)
+        
+        # Remove high-risk positions from fixed set (allow MPNN to optimize)
+        risk_seq_positions = {r.seq_pos + 1 for r in risks}  # Convert to 1-based
+        fixed = fixed - risk_seq_positions
+        
+        fixed_str = ",".join(str(i) for i in sorted(fixed))
+        
+        # Run MPNN
+        os.makedirs(cfg.outdir, exist_ok=True)
+        cmd = [
+            "python", cfg.script,
+            "--pdb_path", pdb_path,
+            "--out_folder", cfg.outdir,
+            "--num_seq_per_target", str(cfg.num_seqs),
+            "--batch_size", str(cfg.batch_size),
+            "--chains_to_design", cfg.chains_to_design,
+            "--fixed_residues", fixed_str,
+            "--seed", "0",
+            "--suppress_print", "1",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            result.warnings.append(f"ProteinMPNN failed: {proc.stderr[-500:]}")
+            return result
+        
+        # Parse MPNN output
+        import glob
+        fa_files = sorted(glob.glob(os.path.join(cfg.outdir, "*fa")))
+        designs = []
+        for f in fa_files:
+            with open(f) as fh:
+                content = fh.read()
+            for block in content.split(">"):
+                if not block.strip():
+                    continue
+                lines = block.splitlines()
+                seq = "".join(l.strip() for l in lines[1:] if l.strip())
+                if len(seq) == len(chain.sequence):
+                    designs.append(seq)
+        
+        # Filter designs that eliminate risk motifs
+        from .config import HIGH_RISK_MOTIFS
+        optimized = []
+        for seq in designs:
+            has_risk = False
+            for name, info in HIGH_RISK_MOTIFS.items():
+                if re.search(info["pattern"], seq):
+                    has_risk = True
+                    break
+            if not has_risk:
+                optimized.append({r.pos: aa for r, aa in zip(chain.residues, seq)})
+        
+        result.optimized_designs = optimized[:10]  # Keep top 10
+    
+    # Generate summary
+    risk_summary = {}
+    for r in risks:
+        key = f"{r.risk}_{r.issue}"
+        risk_summary[key] = risk_summary.get(key, 0) + 1
+    
+    result.summary = f"Found {len(risks)} high-risk positions: "
+    result.summary += ", ".join(f"{v}x {k}" for k, v in risk_summary.items())
+    if result.optimized_designs:
+        result.summary += f". Generated {len(result.optimized_designs)} optimized designs."
+    
+    return result

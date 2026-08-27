@@ -169,3 +169,43 @@ RISK_MOTIFS = {
     # === Met-Lys 裂解（新增）===
     "met-lyscleavage (MK)": r"MK",               # 金属蛋白酶裂解位点
 }
+
+
+# ---------------------------------------------------------------------------
+# High-risk developability positions (for MPNN optimization)
+# ---------------------------------------------------------------------------
+
+# Risk levels: high-risk positions should be optimized if possible
+HIGH_RISK_MOTIFS = {
+    "N-glycan": {"pattern": r"N[^P][ST]", "risk": "high", "issue": "glycosylation"},
+    "deamidation_NG": {"pattern": r"NG", "risk": "high", "issue": "deamidation"},
+    "deamidation_NS": {"pattern": r"NS", "risk": "medium", "issue": "deamidation"},
+    "isomerization_DG": {"pattern": r"DG", "risk": "high", "issue": "isomerization"},
+    "acid_hydrolysis_DD": {"pattern": r"DD", "risk": "high", "issue": "acid hydrolysis"},
+    "oxidation_MW": {"pattern": r"[MW]", "risk": "medium", "issue": "oxidation"},
+}
+
+
+def detect_high_risk_positions(sequence: str, chain_type: str = "H") -> list:
+    """Detect high-risk developability positions in a sequence.
+    
+    Returns list of dicts: [{"pos": int, "motif": str, "risk": str, "issue": str, "context": str}]
+    """
+    import re
+    results = []
+    for name, info in HIGH_RISK_MOTIFS.items():
+        pattern = info["pattern"]
+        for match in re.finditer(pattern, sequence):
+            start = match.start()
+            # Map sequence position to Kabat position (approximate)
+            # This is simplified - in practice use numbering module
+            context = sequence[max(0, start-2):min(len(sequence), start+len(match.group())+2)]
+            results.append({
+                "seq_pos": start,
+                "motif": match.group(),
+                "motif_name": name,
+                "risk": info["risk"],
+                "issue": info["issue"],
+                "context": context,
+            })
+    return results
