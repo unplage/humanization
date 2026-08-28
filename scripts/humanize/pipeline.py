@@ -447,7 +447,7 @@ def _process_chain(
                 humanness.setdefault(k, {})["oasis_identity"] = r.oasis_identity
 
     # ---- Step 4: Developability optimization (if high-risk motifs found AND mpnn enabled) ----
-    from .mpnn import detect_developability_risks, run_developability_optimization, DevelopabilityOptimizationResult
+    from .mpnn import detect_developability_risks, enrich_risks_with_structure, run_developability_optimization, DevelopabilityOptimizationResult
     dev_opt_result = DevelopabilityOptimizationResult()
     
     # Check V2 variant (standard production candidate) for high-risk motifs
@@ -462,6 +462,9 @@ def _process_chain(
         risks = detect_developability_risks(v2_sequence, ctype)
         
         if risks:
+            # Enrich risks with Kabat positions and relSASA from structure
+            risks = enrich_risks_with_structure(risks, donor, hints)
+            
             if config.mpnn.mode != "off":
                 # MPNN enabled - run optimization with structural classification
                 dev_opt_result = run_developability_optimization(
