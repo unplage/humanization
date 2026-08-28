@@ -450,39 +450,32 @@ def _process_chain(
     from .mpnn import detect_developability_risks, run_developability_optimization, DevelopabilityOptimizationResult
     dev_opt_result = DevelopabilityOptimizationResult()
     
-    # Only run if MPNN mode is enabled (not "off")
-    if config.mpnn.mode != "off":
-        # Check V2 variant (standard production candidate) for high-risk motifs
-        v2_variant = None
-        for v in variants:
-            if v.name.endswith("_V2"):
-                v2_variant = v
-                break
+    # Check V2 variant (standard production candidate) for high-risk motifs
+    v2_variant = None
+    for v in variants:
+        if v.name.endswith("_V2"):
+            v2_variant = v
+            break
+    
+    if v2_variant and v2_variant.graft and v2_variant.graft.numbered:
+        v2_sequence = v2_variant.graft.numbered.sequence
+        risks = detect_developability_risks(v2_sequence, ctype)
         
-        if v2_variant and v2_variant.graft and v2_variant.graft.numbered:
-            v2_sequence = v2_variant.graft.numbered.sequence
-            risks = detect_developability_risks(v2_sequence, ctype)
-            
-            if risks:
-                # High-risk motifs found - run developability optimization
+        if risks:
+            if config.mpnn.mode != "off":
+                # MPNN enabled - run optimization with structural classification
                 dev_opt_result = run_developability_optimization(
                     config.mpnn, structure_path or "", donor, risks,
+                    structure_hints=hints,  # Pass Step 3 structure data
                     is_vhh=is_vhh, top_germlines=top,
                 )
-    else:
-        # MPNN mode off - still detect risks for reporting
-        v2_variant = None
-        for v in variants:
-            if v.name.endswith("_V2"):
-                v2_variant = v
-                break
-        
-        if v2_variant and v2_variant.graft and v2_variant.graft.numbered:
-            v2_sequence = v2_variant.graft.numbered.sequence
-            risks = detect_developability_risks(v2_sequence, ctype)
-            if risks:
-                dev_opt_result.risks = risks
-                dev_opt_result.summary = f"Found {len(risks)} high-risk positions (MPNN mode off, optimization skipped)"
+            else:
+                # MPNN mode off - still classify positions for reporting
+                dev_opt_result = run_developability_optimization(
+                    MPNNConfig(mode="off"), "", donor, risks,
+                    structure_hints=hints,  # Pass Step 3 structure data
+                    is_vhh=is_vhh, top_germlines=top,
+                )
 
     return ChainReport(
         input_chain=chain,

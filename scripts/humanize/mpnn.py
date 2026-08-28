@@ -139,12 +139,15 @@ class DevelopabilityRisk:
     context: str
     donor_aa: str = ""
     human_aa: str = ""
+    skip_reason: Optional[str] = None  # Why this position was skipped for optimization
+    rel_sasa: Optional[float] = None  # Relative SASA if available
 
 
 @dataclass
 class DevelopabilityOptimizationResult:
     """Results from developability optimization."""
     risks: List[DevelopabilityRisk] = field(default_factory=list)
+    skipped_risks: List[DevelopabilityRisk] = field(default_factory=list)  # Risks skipped due to structural constraints
     optimized_designs: List[Dict[str, str]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     summary: str = ""
@@ -181,6 +184,7 @@ def run_developability_optimization(
     pdb_path: str,
     chain: NumberedChain,
     risks: List[DevelopabilityRisk],
+    structure_hints: Optional["StructureHints"] = None,  # From Step 3
     is_vhh: bool = False,
     top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
 ) -> DevelopabilityOptimizationResult:
@@ -188,16 +192,18 @@ def run_developability_optimization(
     
     This function:
     1. Identifies which positions have high-risk motifs (DD, NG, DG, etc.)
-    2. Excludes these positions from MPNN's fixed set (allows optimization)
-    3. Runs MPNN to generate alternative sequences
-    4. Filters designs that eliminate the risk motifs
-    5. Returns optimized designs with human-likeness scores
+    2. Classifies positions based on structural data (buried/CDR-contact/exposed)
+    3. Only optimizes surface-exposed positions (conservative strategy)
+    4. Runs MPNN to generate alternative sequences
+    5. Filters designs that eliminate the risk motifs
+    6. Returns optimized designs with human-likeness scores
     
     Args:
         cfg: MPNN configuration
         pdb_path: Path to PDB structure
         chain: Numbered chain object
         risks: List of detected developability risks
+        structure_hints: StructureHints from Step 3 (optional, for structural classification)
         is_vhh: Whether this is a VHH antibody
         top_germlines: Top germline candidates for human-likeness scoring
     
@@ -205,10 +211,71 @@ def run_developability_optimization(
         DevelopabilityOptimizationResult with optimized designs
     """
     import re
-    result = DevelopabilityOptimizationResult(risks=risks)
+    result = DevelopabilityOptimizationResult()
     
     if not risks:
         result.summary = "No high-risk developability positions detected."
+        return result
+    
+    # Classify risks based on structural data
+    optimizable = []  # Surface-exposed, safe to optimize
+    skipped = []      # Structural constraints, skip optimization
+    
+    chain_type = chain.chain_type
+    
+    for risk in risks:
+        # Map sequence position to Kabat position
+        # Find the residue at this sequence position
+        kabat_pos = ""
+        for r in chain.residues:
+            if r.index == risk.seq_pos:  # 0-based index match
+                kabat_pos = r.pos
+                risk.kabat_pos = r.pos
+                break
+        
+        if not kabat_pos:
+            # Cannot map to Kabat, skip with warning
+            risk.skip_reason = "cannot map to Kabat position"
+            skipped.append(risk)
+            continue
+        
+        # Check structural constraints if available
+        if structure_hints:
+            # Check CDR/antigen contact - skip (affinity risk)
+            if structure_hints.cdr_contact(chain_type, kabat_pos):
+                risk.skip_reason = "CDR contact (affinity risk)"
+                skipped.append(risk)
+                continue
+            
+            if structure_hints.antigen_contact(chain_type, kabat_pos):
+                risk.skip_reason = "antigen contact (binding risk)"
+                skipped.append(risk)
+                continue
+            
+            # Check buried - skip (stability risk)
+            buried = structure_hints.buried(chain_type, kabat_pos)
+            if buried is True:
+                risk.skip_reason = "buried (stability risk)"
+                skipped.append(risk)
+                continue
+            
+            # Check relSASA - skip if too low
+            rel_sasa = structure_hints.rel_sasa(kabat_pos)
+            risk.rel_sasa = rel_sasa
+            if rel_sasa is not None and rel_sasa < 0.20:
+                risk.skip_reason = f"low SASA ({rel_sasa:.2f})"
+                skipped.append(risk)
+                continue
+        
+        # Surface-exposed or no structure data - safe to optimize
+        risk.skip_reason = None
+        optimizable.append(risk)
+    
+    result.risks = optimizable
+    result.skipped_risks = skipped
+    
+    if not optimizable:
+        result.summary = f"Found {len(risks)} high-risk positions, but all are structurally constrained (buried/CDR-contact). No optimization performed."
         return result
     
     if cfg.mode == "off" or not pdb_path:
@@ -217,7 +284,7 @@ def run_developability_optimization(
         result.optimized_designs = mpnn_result.designs
         result.warnings.append("ProteinMPNN not available, using germline consensus")
     else:
-        # Build fixed positions, excluding high-risk positions
+        # Build fixed positions, excluding ONLY optimizable high-risk positions
         fixed = set()
         for r in chain.residues:
             if r.region in ("CDR1", "CDR2", "CDR3"):
@@ -233,9 +300,9 @@ def run_developability_optimization(
             if is_vhh and ctype == "H" and num in VHH_HALLMARK:
                 fixed.add(r.index + 1)
         
-        # Remove high-risk positions from fixed set (allow MPNN to optimize)
-        risk_seq_positions = {r.seq_pos + 1 for r in risks}  # Convert to 1-based
-        fixed = fixed - risk_seq_positions
+        # Remove ONLY optimizable positions from fixed set (not skipped ones)
+        optimizable_seq_positions = {r.seq_pos + 1 for r in optimizable}  # Convert to 1-based
+        fixed = fixed - optimizable_seq_positions
         
         fixed_str = ",".join(str(i) for i in sorted(fixed))
         
@@ -294,7 +361,8 @@ def run_developability_optimization(
     
     result.summary = f"Found {len(risks)} high-risk positions: "
     result.summary += ", ".join(f"{v}x {k}" for k, v in risk_summary.items())
+    result.summary += f". {len(optimizable)} optimizable, {len(skipped)} skipped (structural constraints)."
     if result.optimized_designs:
-        result.summary += f". Generated {len(result.optimized_designs)} optimized designs."
+        result.summary += f" Generated {len(result.optimized_designs)} optimized designs."
     
     return result
