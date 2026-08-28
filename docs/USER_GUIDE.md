@@ -50,7 +50,7 @@ python3 tests/test_pipeline.py          # 自检
 
 按需追加：
 - **AlphaFold3**（结构评分）：`--af3-mode local --af3-binary ...`
-- **ProteinMPNN**（框架再设计）：`--mpnn-mode local --mpnn-script ...`
+- **ProteinMPNN**（框架再设计 + 可开发性优化）：`--mpnn-mode local --mpnn-script ...`
 - **BioPhi**（人源度交叉验证）：
   ```bash
   conda create -n biophi python=3.9 && conda install -n biophi biophi -c bioconda -c conda-forge
@@ -78,7 +78,13 @@ DIQMTQTTSSLSASLGDRVTISCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISNVQA
 ### 3.2 命令行完整参考
 
 ```bash
-# 主命令
+# 比较 germline 候选（Step 1，轻量级）
+python3 scripts/humanize/cli.py compare \
+  --input <fasta> \                    # 必需：输入序列
+  --format auto|fab|vhh \              # 格式强制（默认自动检测）
+  --germline-dir <dir> \               # NCBI germline FASTA 目录（可选）
+
+# 主命令（Step 2-4）
 python3 scripts/humanize/cli.py run \
   --input <fasta> \                    # 必需：输入序列
   --outdir outputs \                   # 输出目录（默认 outputs）
@@ -86,6 +92,7 @@ python3 scripts/humanize/cli.py run \
   --scheme kabat|chothia|abm|imgt \    # 变体梯度的 CDR 定义（默认 kabat）
   --germline-dir <dir> \               # NCBI germline FASTA 目录（可选）
   --germline-strategy <strategy> \     # germline 选择策略（见下表）
+  --force-germline VH=<gene> VL=<gene> \ # 强制特定 germline（可选）
   --antigen <seq> \                    # 抗原序列（AF3 复合物 + V_SDR）
   --calibration calibration.json \     # 实验数据校准文件
   --biophi-env biophi \                # BioPhi conda 环境（人源度交叉验证）
@@ -198,6 +205,28 @@ python3 scripts/humanize/cli.py run --input seq.fasta \
 
 锁定 CDR+界面+vernier+hallmark 后重新设计框架；按人源同源性过滤输出。
 无 MPNN 时自动回退为 top-germline 共识框架。
+
+### 5.3 可开发性优化（Step 4）
+
+当 V2 变体存在高风险可开发性位点（DD/NG/NS/DG/MW）时，Step 4 自动运行：
+
+```bash
+# 启用 MPNN 优化
+python3 scripts/humanize.cli.py run --input seq.fasta \
+  --mpnn-mode local --mpnn-script /path/protein_mpnn.py \
+  --donor-structure path/to/structure.pdb  # 推荐：基于结构分类
+```
+
+**保守策略**（基于 Step 3 结构数据）：
+- ✅ 仅优化**表面暴露**的高风险位点（安全）
+- ❌ 跳过**埋藏**位点（稳定性风险）
+- ❌ 跳过**CDR 接触**位点（亲和力风险）
+- ❌ 跳过**抗原接触**位点（结合风险）
+
+报告输出：
+- 可优化位点表（位置、motif、风险级别、relSASA）
+- 跳过位点表（位置、motif、跳过原因）
+- 优化设计（如 MPNN 可用）
 
 ### 5.3 实验数据闭环（推荐生产使用）
 

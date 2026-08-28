@@ -15,23 +15,35 @@
 ## 快速开始
 
 ```bash
-# 1. 人源化（Fab：VH+VL 同一 FASTA；VHH：单链）
+# 1. 评估 germline 候选（轻量级，仅比较，不生成完整报告）
+python3 scripts/humanize/cli.py compare --input data/examples/mouse_4d5_fab.fasta
+
+# 2. 人源化（Fab：VH+VL 同一 FASTA；VHH：单链）
 python3 scripts/humanize/cli.py run \
   --input data/examples/mouse_4d5_fab.fasta --outdir outputs
 
-# 2. 使用多策略 Germline 选择（推荐）
+# 3. 指定 germline 策略或强制特定基因
 python3 scripts/humanize/cli.py run \
   --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
   --germline-strategy auto  # 默认：VH=cvi_best, VL=cdr_best
+  # 或强制特定 germline：
+  # --force-germline VH=IGHV1-3*01 VL=IGKV1-39*01
 
-# 3. 查看所有策略的选择结果
-python3 scripts/custom_humanize.py
+# 4. 结构优化（可选，需要 AF3 结构）
+python3 scripts/humanize/cli.py run \
+  --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
+  --donor-structure path/to/structure.pdb
 
-# 4. 查看报告（Markdown / Word / JSON）
+# 5. 可开发性优化（可选，需要 ProteinMPNN）
+python3 scripts/humanize/cli.py run \
+  --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
+  --mpnn-mode local --mpnn-script /path/to/protein_mpnn.py
+
+# 6. 查看报告（Markdown / Word / JSON）
 open outputs/humanization_report.md
 open outputs/humanization_report.docx        # 需 pip install python-docx
 
-# 5. 自检与测试
+# 7. 自检与测试
 python3 scripts/humanize/cli.py setup-check
 python3 tests/test_pipeline.py
 ```
@@ -80,6 +92,7 @@ python3 tests/test_pipeline.py
 | **框架矩阵** | 备选 germline 面板 + CVI 同源性指标（Boehringer Ingelheim JBC 2024 实证） |
 | **实验数据闭环** | `humanize learn`：KD 数据 → 逐位点 ΔΔG → 自动校准分级与评分 |
 | **可开发性检查** | N-糖基化 / 脱酰胺 / 异构化 / 氧化风险自动扫描 |
+| **可开发性优化（Step 4）** | 高风险位点检测 → 结构约束分类（埋藏/CDR接触/表面暴露）→ MPNN 优化表面暴露位点 |
 | **专业报告** | Markdown + **Word（.docx）** + JSON + 逐位点 CSV + variants FASTA |
 | **验证基准** | 4D5→曲妥珠单抗、A4.6.1→贝伐珠单抗、**cAb-Lys3→hCAb-Lys3（VHH）** 回测 + **25 例 HumAb25 规模化验证** |
 
