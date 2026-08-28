@@ -242,8 +242,9 @@ def write_markdown(path: str, result: RunResult) -> None:
             L.append(f"| {v.name} | {', '.join(diff) or '-'} |")
         L.append("")
         
-        # ---- Developability optimization report ----
-        if rep.developability_optimization and (rep.developability_optimization.risks or rep.developability_optimization.skipped_risks):
+        # ---- Developability optimization report (only show if structure data exists) ----
+        has_structure = rep.structure_hints and rep.structure_hints.data.get("buried")
+        if has_structure and rep.developability_optimization and (rep.developability_optimization.risks or rep.developability_optimization.skipped_risks):
             dev_opt = rep.developability_optimization
             L.append("### Developability optimization (Step 4)")
             L.append("")

@@ -179,6 +179,39 @@ def detect_developability_risks(sequence: str, chain_type: str = "H") -> List[De
     return risks
 
 
+def enrich_risks_with_structure(
+    risks: List[DevelopabilityRisk],
+    chain: NumberedChain,
+    structure_hints: Optional["StructureHints"] = None,
+) -> List[DevelopabilityRisk]:
+    """Enrich developability risks with Kabat positions and relSASA from structure.
+    
+    Args:
+        risks: List of detected risks
+        chain: Numbered chain object for position mapping
+        structure_hints: StructureHints from Step 3 (optional)
+    
+    Returns:
+        List of enriched risks with kabat_pos and rel_sasa populated
+    """
+    if not structure_hints:
+        return risks
+    
+    chain_type = chain.chain_type
+    
+    for risk in risks:
+        # Map sequence position to Kabat position
+        for r in chain.residues:
+            if r.index == risk.seq_pos:  # 0-based index match
+                risk.kabat_pos = r.pos
+                # Get relSASA from structure hints
+                rel_sasa = structure_hints.rel_sasa(r.pos)
+                risk.rel_sasa = rel_sasa
+                break
+    
+    return risks
+
+
 def run_developability_optimization(
     cfg: MPNNConfig,
     pdb_path: str,
