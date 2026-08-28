@@ -63,9 +63,25 @@ def cmd_run(args):
             outdir=os.path.join(args.outdir, "mpnn"),
         ),
     )
-    os.makedirs(args.outdir, exist_ok=True)
-    result = run_pipeline(args.input, cfg, outdir=args.outdir)
-    paths = write_all(args.outdir, result)
+    
+    # Determine which step is being run and create appropriate subdirectory
+    has_structure = args.donor_structure is not None and args.donor_structure != ""
+    has_mpnn = args.mpnn_mode != "off"
+    
+    if has_structure and has_mpnn:
+        step_dir = os.path.join(args.outdir, "step4")
+    elif has_structure:
+        step_dir = os.path.join(args.outdir, "step3")
+    else:
+        step_dir = os.path.join(args.outdir, "step2")
+    
+    os.makedirs(step_dir, exist_ok=True)
+    
+    # Update MPNN outdir to use step subdirectory
+    cfg.mpnn.outdir = os.path.join(step_dir, "mpnn")
+    
+    result = run_pipeline(args.input, cfg, outdir=step_dir)
+    paths = write_all(step_dir, result)
     print(f"\n[humanize] format: {result.format.upper()}")
     print(f"[humanize] germline strategy: {args.germline_strategy}")
     for rep in result.chains:
