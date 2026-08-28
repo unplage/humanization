@@ -67,6 +67,9 @@ def _calculate_fv_identity(query: Optional[NumberedChain], gene: Optional[Germli
     return matches / len(common)
 
 
+_FR_REGIONS = {"FR1", "FR2", "FR3"}
+
+
 def _calculate_fr_identity(query: Optional[NumberedChain], gene: Optional[GermlineGene]) -> float:
     """计算 FR 同源性 (仅 FR 区域, 不包括 CDR)"""
     if query is None or gene is None or gene.numbered is None:
@@ -75,29 +78,8 @@ def _calculate_fr_identity(query: Optional[NumberedChain], gene: Optional[Germli
     q = query.posmap()
     g = gene.numbered.posmap()
     
-    # Kabat FR/CDR 定义 (H chain)
-    fr_regions_h = [
-        (1, 26), (39, 49), (66, 94), (103, 113)
-    ]
-    cdr_regions_h = [(27, 38), (50, 65), (95, 102)]
-    
-    # Kabat FR/CDR 定义 (L chain)
-    fr_regions_l = [
-        (1, 23), (35, 49), (57, 88), (98, 107)
-    ]
-    cdr_regions_l = [(24, 34), (50, 56), (89, 97)]
-    
-    # 确定 chain type
-    chain_type = 'H' if any(p.startswith('H') for p in q.keys()) else 'L'
-    fr_regions = fr_regions_h if chain_type == 'H' else fr_regions_l
-    
-    # 获取所有 FR 位置
-    fr_positions = set()
-    for start, end in fr_regions:
-        for pos in range(start, end + 1):
-            pos_str = f"{chain_type}{pos}"
-            if pos_str in g:
-                fr_positions.add(pos_str)
+    # 通过 region 标签获取 FR 位置 (与 generate_template_score_table 一致)
+    fr_positions = {p for p in q if query.region_of(p) in _FR_REGIONS}
     
     # 仅比较 FR 位置
     common = [p for p in q if p in g and p in fr_positions]
@@ -127,16 +109,36 @@ def _get_germline_frequency_detail(
     return f"{freq:.0%}"
 
 
-def _count_high_risk_sites(rep: ChainReport) -> Tuple[int, List[str]]:
-    """计算高风险位点数量和位置 (使用 PTM 扫描)"""
+def _scan_high_risk(numbered, cdr_only: bool = False) -> Tuple[int, List[str]]:
+    """对一个 NumberedChain 扫描高风险位点
+    
+    Args:
+        numbered: NumberedChain 对象
+        cdr_only: 若 True，仅返回 CDR 区域的高风险位点
+    """
     from .developability import scan_sequence
-    if not rep.input_chain.numbered:
+    if not numbered:
         return 0, []
-    issues = scan_sequence(rep.input_chain.numbered)
+    issues = scan_sequence(numbered)
     high_risk_issues = [issue for issue in issues if issue.risk_level == 'high']
+    if cdr_only and numbered.cdrs:
+        cdr_positions = set()
+        for name, (start, end) in numbered.cdrs.items():
+            start_res = numbered.residue(start)
+            end_res = numbered.residue(end)
+            if start_res and end_res:
+                for r in numbered.residues:
+                    if start_res.index <= r.index <= end_res.index:
+                        cdr_positions.add(r.pos)
+        high_risk_issues = [issue for issue in high_risk_issues if issue.position in cdr_positions]
     high_risk_count = len(high_risk_issues)
     high_risk_sites = [f"{issue.position} ({issue.motif})" for issue in high_risk_issues]
     return high_risk_count, high_risk_sites
+
+
+def _count_high_risk_sites(rep: ChainReport, cdr_only: bool = False) -> Tuple[int, List[str]]:
+    """计算高风险位点数量和位置 (使用供体序列)"""
+    return _scan_high_risk(rep.input_chain.numbered, cdr_only)
 
 
 def _get_cdr_sequences(rep: ChainReport) -> str:
@@ -438,15 +440,15 @@ def generate_hotspot_summary(
         chain_type = rep.input_chain.chain_type
         v_gene = rep.germline.v_gene.gene_id if rep.germline.v_gene else "None"
         cdr_seq = _get_cdr_sequences(rep)
-        high_risk_count, high_risk_sites = _count_high_risk_sites(rep)
         
-        # 为每个变体生成一行
-        lines.append(f"{chain_type}\t{cdr_seq}\t{high_risk_count}\t{', '.join(high_risk_sites)}")
+        # V0: 扫描供体序列的 CDR 区域风险
+        v0_count, v0_sites = _count_high_risk_sites(rep, cdr_only=True)
+        lines.append(f"{chain_type}\t{cdr_seq}\t{v0_count}\t{', '.join(v0_sites)}")
         
-        # V1-V3 变体
-        for i in range(1, 4):
-            if i < len(rep.variants):
-                lines.append(f"{chain_type}{i}\t{cdr_seq}\t{high_risk_count}\t{','.join(high_risk_sites)}")
+        # V1-V3 变体: 每个变体单独扫描其移植后序列的 CDR 区域风险
+        for i, v in enumerate(rep.variants[1:4], start=1):
+            v_count, v_sites = _scan_high_risk(v.graft.numbered, cdr_only=True)
+            lines.append(f"{chain_type}{i}\t{cdr_seq}\t{v_count}\t{', '.join(v_sites)}")
     
     lines.append("")
     
@@ -458,10 +460,13 @@ def generate_hotspot_summary(
     for rep in chain_reports:
         chain_type = rep.input_chain.chain_type
         
-        high_risk_count, high_risk_sites = _count_high_risk_sites(rep)
-        
-        # V0: 纯移植 (graft)
+        # V0: 扫描纯移植序列
         graft = rep.grafts.get("kabat")
+        if graft is not None:
+            v0_count, v0_sites = _scan_high_risk(graft.numbered)
+        else:
+            v0_count, v0_sites = _count_high_risk_sites(rep)
+        
         if graft is not None and rep.germline.v_gene:
             fv_identity = _calculate_fv_identity(graft.numbered, rep.germline.v_gene)
             fv_hl = fv_identity * 100
@@ -471,12 +476,13 @@ def generate_hotspot_summary(
             fr_hl = 0
         
         lines.append(
-            f"{chain_type}\t{high_risk_count}\t{', '.join(high_risk_sites)}\t"
+            f"{chain_type}\t{v0_count}\t{', '.join(v0_sites)}\t"
             f"{fv_hl:.1f}%\t{fr_hl:.1f}%"
         )
         
-        # V1-V3 变体: 每个变体单独计算 Humanness
+        # V1-V3 变体: 每个变体单独扫描其序列
         for i, v in enumerate(rep.variants[1:], start=1):
+            v_count, v_sites = _scan_high_risk(v.graft.numbered) if v.graft else (0, [])
             if v.graft is not None and rep.germline.v_gene:
                 fv_identity = _calculate_fv_identity(v.graft.numbered, rep.germline.v_gene)
                 fv_hl = fv_identity * 100
@@ -486,7 +492,7 @@ def generate_hotspot_summary(
                 fr_hl = 0
             
             lines.append(
-                f"{chain_type}{i}\t{high_risk_count}\t{', '.join(high_risk_sites)}\t"
+                f"{chain_type}{i}\t{v_count}\t{', '.join(v_sites)}\t"
                 f"{fv_hl:.1f}%\t{fr_hl:.1f}%"
             )
     
@@ -886,39 +892,17 @@ def _generate_template_score_table_data(
     # 计算每个 germline 的分数
     results = []
     for gene in genes:
-        # 计算 FR 同源性
+        # 计算 FR 同源性 (使用 region 标签，与 generate_template_score_table 一致)
         q_posmap = query.posmap()
         g_posmap = gene.numbered.posmap() if gene.numbered else {}
         
-        # Kabat FR/CDR 定义
-        fr_regions_h = [(1, 26), (39, 49), (66, 94), (103, 113)]
-        cdr_regions_h = [(27, 38), (50, 65), (95, 102)]
-        fr_regions_l = [(1, 23), (35, 49), (57, 88), (98, 107)]
-        cdr_regions_l = [(24, 34), (50, 56), (89, 97)]
-        
-        fr_regions = fr_regions_h if chain_type == "H" else fr_regions_l
-        cdr_regions = cdr_regions_h if chain_type == "H" else cdr_regions_l
-        
-        # 计算 FR 同源性
-        fr_positions = set()
-        for start, end in fr_regions:
-            for pos in range(start, end + 1):
-                pos_str = f"{chain_type}{pos}"
-                if pos_str in g_posmap:
-                    fr_positions.add(pos_str)
-        
-        fr_matches = sum(1 for p in fr_positions if p in q_posmap and q_posmap[p] == g_posmap.get(p))
+        fr_positions = {p for p in q_posmap if query.region_of(p) in _FR_REGIONS}
+        fr_matches = sum(1 for p in fr_positions if p in g_posmap and q_posmap[p] == g_posmap[p])
         fr_identity = fr_matches / len(fr_positions) if fr_positions else 0
         
-        # 计算 CDR 同源性
-        cdr_positions = set()
-        for start, end in cdr_regions:
-            for pos in range(start, end + 1):
-                pos_str = f"{chain_type}{pos}"
-                if pos_str in g_posmap:
-                    cdr_positions.add(pos_str)
-        
-        cdr_matches = sum(1 for p in cdr_positions if p in q_posmap and q_posmap[p] == g_posmap.get(p))
+        # 计算 CDR 同源性 (使用 region 标签)
+        cdr_positions = {p for p in q_posmap if query.region_of(p) in ("CDR1", "CDR2", "CDR3")}
+        cdr_matches = sum(1 for p in cdr_positions if p in g_posmap and q_posmap[p] == g_posmap[p])
         cdr_identity = cdr_matches / len(cdr_positions) if cdr_positions else 0
         
         # Composite 分数 (0.7*FR + 0.3*CDR)
@@ -933,52 +917,20 @@ def _generate_template_score_table_data(
         # 3-axis 分数
         three_axis = composite
         
-        # 计算各 FR 区域同源性
-        fr1_identity = 0
-        fr2_identity = 0
-        fr3_identity = 0
-        fr4_identity = 0
+        # 计算各 FR/CDR 区域同源性 (使用 region 标签)
+        def _region_pct(region_name):
+            ps = [p for p in q_posmap if query.region_of(p) == region_name and p in g_posmap]
+            if not ps:
+                return 0.0
+            return sum(1 for p in ps if q_posmap[p] == g_posmap[p]) / len(ps)
         
-        for start, end in fr_regions:
-            positions = set()
-            for pos in range(start, end + 1):
-                pos_str = f"{chain_type}{pos}"
-                if pos_str in g_posmap:
-                    positions.add(pos_str)
-            
-            matches = sum(1 for p in positions if p in q_posmap and q_posmap[p] == g_posmap.get(p))
-            identity = matches / len(positions) if positions else 0
-            
-            if start == 1:
-                fr1_identity = identity
-            elif start > 26 and start < 49:
-                fr2_identity = identity
-            elif start > 49 and start < 95:
-                fr3_identity = identity
-            else:
-                fr4_identity = identity
-        
-        # CDR 同源性
-        cdr1_identity = 0
-        cdr2_identity = 0
-        cdr3_identity = 0
-        
-        for start, end in cdr_regions:
-            positions = set()
-            for pos in range(start, end + 1):
-                pos_str = f"{chain_type}{pos}"
-                if pos_str in g_posmap:
-                    positions.add(pos_str)
-            
-            matches = sum(1 for p in positions if p in q_posmap and q_posmap[p] == g_posmap.get(p))
-            identity = matches / len(positions) if positions else 0
-            
-            if start == 27 or start == 24:
-                cdr1_identity = identity
-            elif start == 50:
-                cdr2_identity = identity
-            else:
-                cdr3_identity = identity
+        fr1_identity = _region_pct("FR1")
+        fr2_identity = _region_pct("FR2")
+        fr3_identity = _region_pct("FR3")
+        fr4_identity = _region_pct("FR4")
+        cdr1_identity = _region_pct("CDR1")
+        cdr2_identity = _region_pct("CDR2")
+        cdr3_identity = _region_pct("CDR3")
         
         results.append({
             'gene': gene.gene_id,
@@ -1106,34 +1058,37 @@ def _generate_cdr_summary_table_data(rep: ChainReport) -> List[List[str]]:
     rows = []
     rows.append(["ID", "Sequence-CDR", "High risk #", "High risk sites"])
     
-    # 获取 CDR 序列
+    # 获取 CDR 序列 (使用 numbered.cdrs，与模块级 _get_cdr_sequences 一致)
     def _get_cdr_sequences(rep: ChainReport) -> str:
         """获取 CDR 序列"""
-        chain_type = rep.input_chain.chain_type
-        if not rep.input_chain.numbered:
+        if not rep.input_chain.numbered or not rep.input_chain.numbered.cdrs:
             return ""
-        posmap = rep.input_chain.numbered.posmap()
-        if chain_type == "H":
-            cdr1 = "".join(posmap.get(f"H{i}", "") for i in range(31, 36))
-            cdr2 = "".join(posmap.get(f"H{i}", "") for i in range(50, 56))
-            cdr3 = "".join(posmap.get(f"H{i}", "") for i in range(95, 103))
-            return f"{cdr1}/{cdr2}/{cdr3}"
-        else:
-            cdr1 = "".join(posmap.get(f"L{i}", "") for i in range(24, 35))
-            cdr2 = "".join(posmap.get(f"L{i}", "") for i in range(50, 56))
-            cdr3 = "".join(posmap.get(f"L{i}", "") for i in range(89, 98))
-            return f"{cdr1}/{cdr2}/{cdr3}"
+        parts = []
+        for name, (start, end) in rep.input_chain.numbered.cdrs.items():
+            seq = rep.input_chain.numbered.seq_range(start, end)
+            if seq:
+                parts.append(seq)
+        return "/".join(parts) if parts else ""
     
-    # 获取高风险位点
+    # 获取高风险位点 (仅 CDR 区域)
     def _count_high_risk_sites(rep: ChainReport) -> tuple:
-        """计算高风险位点数量和位置"""
+        """计算 CDR 区域高风险位点数量和位置"""
         from .developability import scan_sequence
         if not rep.input_chain.numbered:
             return 0, []
         issues = scan_sequence(rep.input_chain.numbered)
         high_risk_issues = [issue for issue in issues if issue.risk_level == 'high']
+        # 仅保留 CDR 区域的位点
+        cdr_positions = set()
+        for name, (start, end) in rep.input_chain.numbered.cdrs.items():
+            start_idx = rep.input_chain.numbered.residue(start)
+            end_idx = rep.input_chain.numbered.residue(end)
+            if start_idx and end_idx:
+                for r in rep.input_chain.numbered.residues:
+                    if start_idx.index <= r.index <= end_idx.index:
+                        cdr_positions.add(r.pos)
+        high_risk_issues = [issue for issue in high_risk_issues if issue.position in cdr_positions]
         high_risk_count = len(high_risk_issues)
-        # 格式: "H30 (deamidation NG), L46 (N-glycan)"
         high_risk_sites = [f"{issue.position} ({issue.motif})" for issue in high_risk_issues]
         return high_risk_count, high_risk_sites
     
@@ -1162,29 +1117,19 @@ def _generate_cdr_summary_table_data(rep: ChainReport) -> List[List[str]]:
 
 
 def _generate_full_length_summary_table_data(rep: ChainReport) -> List[List[str]]:
-    """生成 Full-length Summary 表格数据"""
+    """生成 Full-length Summary 表格数据 (每个变体单独扫描)"""
     chain_type = rep.input_chain.chain_type
     
     rows = []
     rows.append(["ID", "High risk #", "High risk sites", "Humanness (FV)", "Humanness (FR)"])
     
-    # 获取高风险位点
-    def _count_high_risk_sites(rep: ChainReport) -> tuple:
-        """计算高风险位点数量和位置"""
-        from .developability import scan_sequence
-        if not rep.input_chain.numbered:
-            return 0, []
-        issues = scan_sequence(rep.input_chain.numbered)
-        high_risk_issues = [issue for issue in issues if issue.risk_level == 'high']
-        high_risk_count = len(high_risk_issues)
-        # 格式: "H30 (deamidation NG), L46 (N-glycan)"
-        high_risk_sites = [f"{issue.position} ({issue.motif})" for issue in high_risk_issues]
-        return high_risk_count, high_risk_sites
-    
-    high_risk_count, high_risk_sites = _count_high_risk_sites(rep)
-    
-    # V0: 纯移植
+    # V0: 扫描纯移植序列
     graft = rep.grafts.get("kabat")
+    if graft is not None:
+        v0_count, v0_sites = _scan_high_risk(graft.numbered)
+    else:
+        v0_count, v0_sites = 0, []
+    
     if graft is not None and rep.germline.v_gene:
         fv_identity = _calculate_fv_identity(graft.numbered, rep.germline.v_gene)
         fv_hl = fv_identity * 100
@@ -1195,14 +1140,15 @@ def _generate_full_length_summary_table_data(rep: ChainReport) -> List[List[str]
     
     rows.append([
         chain_type,
-        str(high_risk_count),
-        ", ".join(high_risk_sites) if high_risk_sites else "-",
+        str(v0_count),
+        ", ".join(v0_sites) if v0_sites else "-",
         f"{fv_hl:.1f}%",
         f"{fr_hl:.1f}%"
     ])
     
-    # V1-V3 变体
+    # V1-V3 变体: 每个变体单独扫描其序列
     for i, v in enumerate(rep.variants[1:], start=1):
+        v_count, v_sites = _scan_high_risk(v.graft.numbered) if v.graft else (0, [])
         if v.graft is not None and rep.germline.v_gene:
             fv_identity = _calculate_fv_identity(v.graft.numbered, rep.germline.v_gene)
             fv_hl = fv_identity * 100
@@ -1213,8 +1159,8 @@ def _generate_full_length_summary_table_data(rep: ChainReport) -> List[List[str]
         
         rows.append([
             f"{chain_type}{i}",
-            str(high_risk_count),
-            ", ".join(high_risk_sites) if high_risk_sites else "-",
+            str(v_count),
+            ", ".join(v_sites) if v_sites else "-",
             f"{fv_hl:.1f}%",
             f"{fr_hl:.1f}%"
         ])

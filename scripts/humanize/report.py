@@ -316,17 +316,12 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
     
     # 增强版报告 (借鉴 WeMol 格式)
     try:
-        from .report_enhanced import generate_enhanced_report, write_enhanced_docx
+        from .report_enhanced import generate_enhanced_report
         enhanced_md = os.path.join(outdir, "enhanced_report.md")
         enhanced_content = generate_enhanced_report(result, outdir)
         with open(enhanced_md, "w") as fh:
             fh.write(enhanced_content)
         paths["enhanced_markdown"] = enhanced_md
-        
-        # 生成 Word 格式增强报告
-        enhanced_docx = write_enhanced_docx(result, outdir)
-        if enhanced_docx:
-            paths["enhanced_docx"] = enhanced_docx
     except Exception as e:
         paths["_errors"] = paths.get("_errors", [])
         paths["_errors"].append(f"enhanced report: {e}")
