@@ -29,15 +29,15 @@ python3 tests/backtest.py           # 4D5→trastuzumab, A4.6.1→bevacizumab, V
 python3 tests/backtest_scale.py     # HumAb25: 25 approved mouse antibodies
 ```
 
-## Standard workflow (三步走) — always follow for humanization requests
+## Standard workflow (四步走) — always follow for humanization requests
 
-1. **Step 1 — germline 策略对比**: run the pipeline once per strategy with distinct outdirs (same-name outputs are overwritten otherwise), then show the user a comparison table (chosen germline, FR/CDR identity, back-mutation counts) and ask which strategy to use:
+1. **Step 1 — germline 策略对比**: use the `compare` command to evaluate all 9 strategies in a single pass (lightweight, no full pipeline run):
 
    ```bash
-   for s in fr_best cdr_best composite cvi_best min_backmutations current adimab_frequency pioneer_frequency composite_3axis; do
-     python3 scripts/humanize/cli.py run --input <seq.fasta> --germline-strategy "$s" --outdir "outputs/strategy_$s" >/dev/null
-   done
+   python3 scripts/humanize/cli.py compare --input <seq.fasta>
    ```
+
+   This displays a comparison table showing the top 5 candidates for each of the 9 strategies, with columns: strategy, rank, V gene, FR identity, CDR identity, composite, CVI, frequency, 3-axis, and back-mutation count.
 
    9 个底层策略: `fr_best` | `cdr_best` | `composite` (0.7*FR+0.3*CDR) | `cvi_best` (canonical+vernier+interface) | `min_backmutations` | `current` (top-30% FR with max CDR) | `adimab_frequency` | `pioneer_frequency` | `composite_3axis` (0.5*CVI+0.3*freq+0.2*FR)。
    `auto` 是默认路由策略（VH=cvi_best, VL=cdr_best），不需要单独跑。
@@ -53,9 +53,11 @@ python3 tests/backtest_scale.py     # HumAb25: 25 approved mouse antibodies
    5   IGHV3-15*02       0.840  0.480  0.732      0.792  0.003  0.565   1
    ```
 
-2. **Step 2 — 按选定 germline 正式运行**: rerun once with `--germline-strategy <chosen> --outdir outputs` (or lock exact genes with `--force-germline H=IGHV1-3*01 L=IGKV1-39*01`) and deliver the full report set (markdown/docx/json/csv/fasta).
+2. **Step 2 — 按选定 germline 正式运行**: run once with `--germline-strategy <chosen> --outdir outputs` (or lock exact genes with `--force-germline VH=IGHV1-3*01 VL=IGKV1-39*01`) and deliver the full report set (markdown/docx/json/csv/fasta).
 
 3. **Step 3 — 结构优化 (optional)**: if the user has an AF3 donor structure (PDB/CIF) or can run AF3, rerun with `--donor-structure <pdb>` (and/or `--af3-mode local --af3-binary <run_alphafold.py> --antigen <seq>`) so buriedness/contact/CDR-RMSD refine back-mutation scores; then diff before/after reports (tier changes, exposed-vs-buried reclassification) and summarize what the structure changed.
+
+4. **Step 4 — 可开发性优化 (optional)**: if high-risk developability motifs (DD/NG/NS/DG/MW) are detected in the V2 variant, the pipeline automatically reports them. To run MPNN optimization, enable with `--mpnn-mode local --mpnn-script <path>`.
 
 ## Architecture
 

@@ -160,6 +160,58 @@ def cmd_setup_check(args):
     return 0
 
 
+def cmd_compare(args):
+    """Lightweight germline comparison across 9 strategies (Step 1).
+    
+    This command only evaluates germline candidates without running the full
+    humanization pipeline. It displays a comparison table showing the top 5
+    candidates for each of the 9 strategies.
+    """
+    import os, sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    
+    from .sequences import parse_input
+    from .numbering import number_heavy, number_light
+    from .germline import load_germline_db
+    from .multi_strategy_germline import choose_germlines_multi_strategy, format_multi_strategy_report
+    
+    # Load germline database
+    germline_dir = args.germline_dir or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "data", "germline"
+    )
+    db = load_germline_db(germline_dir)
+    
+    # Parse input sequences
+    fmt, chains = parse_input(args.input, args.format)
+    
+    print(f"\n{'='*100}")
+    print(f"Germline Comparison Report (Step 1)")
+    print(f"{'='*100}\n")
+    
+    for chain in chains:
+        ctype = chain.chain_type
+        if ctype == 'H':
+            numbered = number_heavy(chain.sequence)
+        else:
+            numbered = number_light(chain.sequence)
+        
+        # Run multi-strategy germline selection (single pass, all 9 strategies)
+        result = choose_germlines_multi_strategy(numbered, db, is_vhh=chain.is_vhh)
+        
+        # Display comparison table
+        print(format_multi_strategy_report(result))
+    
+    print(f"\n{'='*100}")
+    print("Next step: Run full pipeline with chosen germline strategy:")
+    print("  python -m scripts.humanize.cli run --input <fasta> --germline-strategy <strategy>")
+    print("  or force specific germline:")
+    print("  python -m scripts.humanize.cli run --input <fasta> --force-germline VH=<gene> VL=<gene>")
+    print(f"{'='*100}\n")
+    
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="humanize", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -201,6 +253,13 @@ def main(argv=None):
     p_run.add_argument("--mpnn-mode", default="off", choices=["off", "local"])
     p_run.add_argument("--mpnn-script", default="", help="path to protein_mpnn.py")
     p_run.set_defaults(func=cmd_run)
+
+    # ---- compare: lightweight germline evaluation (Step 1) ----
+    p_compare = sub.add_parser("compare", help="compare germline candidates across 9 strategies (Step 1)")
+    p_compare.add_argument("--input", required=True, help="input FASTA (VH+VL or VHH)")
+    p_compare.add_argument("--format", default="auto", choices=["auto", "fab", "vhh"])
+    p_compare.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
+    p_compare.set_defaults(func=cmd_compare)
 
     p_g = sub.add_parser("setup-germline", help="download NCBI IgBLAST germline")
     p_g.add_argument("--dir", default="")
