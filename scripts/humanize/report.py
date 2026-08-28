@@ -116,8 +116,24 @@ def write_json(path: str, result: RunResult) -> None:
                             "risk": r.risk,
                             "issue": r.issue,
                             "context": r.context,
+                            "skip_reason": r.skip_reason,
+                            "rel_sasa": r.rel_sasa,
                         }
                         for r in (rep.developability_optimization.risks if hasattr(rep.developability_optimization, 'risks') else [])
+                    ],
+                    "skipped_risks": [
+                        {
+                            "seq_pos": r.seq_pos,
+                            "kabat_pos": r.kabat_pos,
+                            "motif": r.motif,
+                            "motif_name": r.motif_name,
+                            "risk": r.risk,
+                            "issue": r.issue,
+                            "context": r.context,
+                            "skip_reason": r.skip_reason,
+                            "rel_sasa": r.rel_sasa,
+                        }
+                        for r in (rep.developability_optimization.skipped_risks if hasattr(rep.developability_optimization, 'skipped_risks') else [])
                     ],
                     "optimized_designs": rep.developability_optimization.optimized_designs if hasattr(rep.developability_optimization, 'optimized_designs') else [],
                     "warnings": rep.developability_optimization.warnings if hasattr(rep.developability_optimization, 'warnings') else [],
@@ -227,19 +243,33 @@ def write_markdown(path: str, result: RunResult) -> None:
         L.append("")
         
         # ---- Developability optimization report ----
-        if rep.developability_optimization and rep.developability_optimization.risks:
+        if rep.developability_optimization and (rep.developability_optimization.risks or rep.developability_optimization.skipped_risks):
             dev_opt = rep.developability_optimization
             L.append("### Developability optimization (Step 4)")
             L.append("")
             L.append(f"**Summary:** {dev_opt.summary}")
             L.append("")
-            L.append("**High-risk positions detected:**")
-            L.append("")
-            L.append("| Position | Motif | Risk | Issue | Context |")
-            L.append("|----------|-------|------|-------|---------|")
-            for r in dev_opt.risks:
-                L.append(f"| {r.seq_pos} | {r.motif} | {r.risk} | {r.issue} | {r.context} |")
-            L.append("")
+            
+            # Optimizable positions (surface-exposed)
+            if dev_opt.risks:
+                L.append("**Optimizable positions (surface-exposed):**")
+                L.append("")
+                L.append("| Position | Motif | Risk | Issue | relSASA | Context |")
+                L.append("|----------|-------|------|-------|---------|---------|")
+                for r in dev_opt.risks:
+                    sasa = f"{r.rel_sasa:.2f}" if r.rel_sasa is not None else "unknown"
+                    L.append(f"| {r.kabat_pos or r.seq_pos} | {r.motif} | {r.risk} | {r.issue} | {sasa} | {r.context} |")
+                L.append("")
+            
+            # Skipped positions (structural constraints)
+            if dev_opt.skipped_risks:
+                L.append("**Skipped positions (structural constraints):**")
+                L.append("")
+                L.append("| Position | Motif | Risk | Issue | Reason |")
+                L.append("|----------|-------|------|-------|--------|")
+                for r in dev_opt.skipped_risks:
+                    L.append(f"| {r.kabat_pos or r.seq_pos} | {r.motif} | {r.risk} | {r.issue} | {r.skip_reason} |")
+                L.append("")
             
             if dev_opt.optimized_designs:
                 L.append("**Optimized designs (risk-free):**")
