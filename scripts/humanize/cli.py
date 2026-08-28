@@ -183,13 +183,10 @@ def cmd_compare(args):
     humanization pipeline. It displays a comparison table showing the top 5
     candidates for each of the 9 strategies.
     """
-    import os, sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    
-    from .sequences import parse_input
-    from .numbering import number_heavy, number_light
-    from .germline import load_germline_db
-    from .multi_strategy_germline import choose_germlines_multi_strategy, format_multi_strategy_report
+    from humanize.sequences import parse_input
+    from humanize.numbering import number_heavy, number_light
+    from humanize.germline import load_germline_db
+    from humanize.multi_strategy_germline import choose_germlines_multi_strategy, format_multi_strategy_report
     
     # Load germline database
     germline_dir = args.germline_dir or os.path.join(
