@@ -369,13 +369,16 @@ def choose_germlines(
         if alt:
             runner_up = alt[0][0]
 
-    # J gene: identity first (canonical J for the chosen V), else by length
+    # J gene: identity first, then frequency as tiebreaker
+    from .germline_frequency import get_j_frequency
     j_genes = db.j_for(ctype)
     j_scored = []
     for jg in j_genes:
         idn, n = score_j_match(query, jg)
-        j_scored.append((jg, idn, n))
-    j_scored.sort(key=lambda t: (-t[1], -t[2]))
+        freq = get_j_frequency(jg.gene_id)
+        j_scored.append((jg, idn, n, freq))
+    # Sort by: identity desc, then frequency desc (tiebreaker for similar identity)
+    j_scored.sort(key=lambda t: (-t[1], -t[3], -t[2]))
     j_best = j_scored[0][0] if j_scored else None
 
     return GermlineChoice(

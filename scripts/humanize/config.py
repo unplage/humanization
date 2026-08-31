@@ -20,7 +20,7 @@ CDR residues are grafted from the donor and FR4 comes from the human J gene.
 
 VERNIER_ZONE = {
     "H": {2, 27, 28, 29, 30, 47, 48, 49, 67, 69, 71, 73, 78, 93, 94, 103},
-    "L": {2, 4, 35, 36, 38, 43, 44, 46, 48, 49, 58, 62, 63, 66, 67, 68, 69,
+    "L": {2, 4, 35, 36, 37, 38, 43, 44, 45, 46, 48, 49, 58, 62, 63, 66, 67, 68, 69,
           71, 87, 88, 98},
 }
 
@@ -28,7 +28,7 @@ VERNIER_ZONE = {
 # with moderate interface contribution (Vargas-Madrazo 2003).
 INTERFACE_CORE = {
     "H": {37, 39, 45, 47, 91, 93, 95, 103},
-    "L": {34, 36, 38, 44, 46, 87, 89, 91, 96, 98},
+    "L": {34, 36, 37, 38, 44, 45, 46, 87, 89, 91, 96, 98},
 }
 INTERFACE_EXTENDED = {
     "H": {32, 34, 50, 58, 104},
@@ -38,7 +38,7 @@ INTERFACE_EXTENDED = {
 # Canonical-structure framework support residues (Chothia & Lesk 1987).
 CANONICAL = {
     "H": {24, 26, 27, 29, 33, 34, 47, 48, 49, 57, 58, 71, 78, 94},
-    "L": {2, 25, 33, 34, 36, 46, 48, 49, 58, 64, 71, 90, 94, 97, 98},
+    "L": {2, 25, 33, 34, 36, 37, 45, 46, 48, 49, 58, 64, 71, 90, 94, 97, 98},
 }
 
 # Camelid VHH hallmark (Kabat): positions that must stay donor to keep the

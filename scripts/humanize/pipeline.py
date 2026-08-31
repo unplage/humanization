@@ -256,8 +256,8 @@ def _process_chain(
         # Use strategy-based selection
         strategy = config.germline_strategy
         if strategy == "auto":
-            # 自动策略：VH 使用 cvi_best，VL 使用 cdr_best
-            strategy = "cvi_best" if ctype == "H" else "cdr_best"
+            # 自动策略：VH 使用 adimab_frequency（回测最优），VL 使用 current（VL 最优）
+            strategy = "adimab_frequency" if ctype == "H" else "current"
         
         multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
         candidate = multi_result.get_best(strategy)

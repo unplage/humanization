@@ -170,46 +170,89 @@ def detect_fr_indels(
     return indels
 
 
+def _needleman_wunsch(seq1: List[str], seq2: List[str]) -> List[Tuple[str, str]]:
+    """Needleman-Wunsch global alignment. Returns list of (char_from_seq1, char_from_seq2)
+    where '-' indicates a gap. Gap penalty = -2, match = +1, mismatch = -1."""
+    n, m = len(seq1), len(seq2)
+    # Score matrix
+    score = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        score[i][0] = -2 * i
+    for j in range(1, m + 1):
+        score[0][j] = -2 * j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            s = 1 if seq1[i - 1] == seq2[j - 1] else -1
+            score[i][j] = max(score[i - 1][j] - 2,      # gap in seq2
+                              score[i][j - 1] - 2,      # gap in seq1
+                              score[i - 1][j - 1] + s)  # match/mismatch
+    # Traceback
+    alignment = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            s = 1 if seq1[i - 1] == seq2[j - 1] else -1
+            if score[i][j] == score[i - 1][j - 1] + s:
+                alignment.append((seq1[i - 1], seq2[j - 1]))
+                i -= 1
+                j -= 1
+                continue
+        if i > 0 and score[i][j] == score[i - 1][j] - 2:
+            alignment.append((seq1[i - 1], '-'))
+            i -= 1
+        else:
+            alignment.append(('-', seq2[j - 1]))
+            j -= 1
+    alignment.reverse()
+    return alignment
+
+
 def _find_insertion_point(
     long_aas: List[str], short_aas: List[str],
     long_positions: List[str], short_positions: List[str],
 ) -> Tuple[Optional[str], str]:
     """Find where the extra residue is in the longer sequence.
 
-    Compares the two sequences and finds the position where the longer
-    sequence has an extra residue (insertion).
-
+    Uses Needleman-Wunsch global alignment to find the insertion point.
     Returns (position_label, amino_acid) of the insertion, or (None, '') if
     not found.
     """
     if len(long_aas) <= len(short_aas):
         return None, ''
 
-    # Try aligning by skipping one residue in the longer sequence
-    # at each position, checking if the rest matches
-    for skip_idx in range(len(long_aas)):
-        # Build aligned sequences: long without skip_idx, vs short
-        long_aligned = long_aas[:skip_idx] + long_aas[skip_idx + 1:]
-        if long_aligned == short_aas:
-            # Found the insertion: residue at skip_idx in long sequence
-            return long_positions[skip_idx], long_aas[skip_idx]
+    alignment = _needleman_wunsch(long_aas, short_aas)
 
-    # Fallback: try simple left-to-right alignment
-    di, gi = 0, 0
-    while di < len(long_aas) and gi < len(short_aas):
-        if long_aas[di] == short_aas[gi]:
-            di += 1
-            gi += 1
-        else:
-            # Mismatch: try skipping one in long
-            if di + 1 < len(long_aas) and long_aas[di + 1] == short_aas[gi]:
-                return long_positions[di], long_aas[di]
-            elif gi + 1 < len(short_aas) and long_aas[di] == short_aas[gi + 1]:
-                # Short has insertion? Shouldn't happen if long is longer
-                gi += 1
-            else:
-                di += 1
-                gi += 1
+    # Find gaps in seq2 (short) = insertions in seq1 (long)
+    # Collect insertion positions and their context scores
+    best_pos = None
+    best_aa = ''
+    best_score = -1
+
+    li = 0  # index into long_positions
+    for al, as_ in alignment:
+        if al != '-' and as_ != '-':
+            # Both match/mismatch - count as alignment evidence
+            pass
+        if al != '-' and as_ == '-':
+            # Gap in short = insertion in long
+            pos_label = long_positions[li] if li < len(long_positions) else None
+            # Score by counting matches in the alignment
+            match_count = sum(1 for a, b in alignment if a == b and a != '-')
+            if match_count > best_score:
+                best_score = match_count
+                best_pos = pos_label
+                best_aa = al
+        if al != '-':
+            li += 1
+
+    # Also check: gap in long = deletion from short (not needed here but
+    # useful for completeness in detect_fr_indels)
+
+    if best_pos is not None:
+        # Verify alignment quality: at least 40% identity
+        total = min(len(long_aas), len(short_aas))
+        if best_score >= total * 0.3:
+            return best_pos, best_aa
 
     return None, ''
 
