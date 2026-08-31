@@ -48,7 +48,8 @@ def test_numbering():
     h = number_heavy(IGHV3_23)
     check("VH3-23 FR1 = 30 residues", h.residue("H30") is not None and h.residue("H31") is not None)
     check("VH3-23 CDR1 = SYAMS", h.seq_range("H31", "H35") == "SYAMS", h.seq_range("H31", "H35"))
-    check("VH3-23 CDR2 correct", h.seq_range("H50", "H65") == "SAISGSGGSTYYADSVKG")
+    # AbRSA uses standard Kabat CDR2 boundary: H50-H65 (16 residues)
+    check("VH3-23 CDR2 correct", h.seq_range("H50", "H65") == "AISGSGGSTYYADSVKG")
     check("VH3-23 FR3 correct", h.seq_range("H66", "H92") == "RFTISRDNSKNTLYLQMNSLRAEDTAVYYC")
     check("VH3-23 FR4 correct", h.seq_range("H103", "H113") == "WGQGTLVTVSS")
     check("VH3-23 Cys22", h.residue("H22").aa == "C")
@@ -60,7 +61,8 @@ def test_numbering():
     check("IGKV1-39 FR4", l.seq_range("L98", "L107") == "FGQGTKVEIK")
 
     m4 = number_heavy(M4D5_VH)
-    check("4D5 VH CDR2 = donor loop", m4.seq_range("H50", "H52A") + m4.seq_range("H53", "H65") == "YINPYNGVTKYNQKFKG")
+    # AbRSA uses standard Kabat CDR2: H50-H65 without H52A insertion
+    check("4D5 VH CDR2 = donor loop", m4.seq_range("H50", "H65") == "YINPYNGVTKYNQKFKG")
     # Standard Kabat: H93/H94 are FR3 (e.g. "S" "R" in ...VYYC S R WGGD...);
     # CDR3 starts at H95.
     check("4D5 VH FR3 H93/H94", m4.seq_range("H93", "H94") == "SR", m4.seq_range("H93", "H94"))
@@ -705,6 +707,64 @@ def test_enhanced_report():
         check("enhanced report variant headers", any(">H V" in l or ">H" in l for l in seqs))
 
 
+def test_fr_indel_detection():
+    """FR indel detection: donor with insertion vs germline."""
+    from humanize.fr_indel import detect_fr_indels
+    from humanize.numbering import number_heavy, number_light
+    from humanize.germline import load_germline_db
+    from humanize.graft import graft_chain
+    from humanize.backmut import analyze_backmutations
+    from humanize.variants import assemble_variants
+
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+
+    # AMG110 VH has H6A insertion (donor FR1 = 31 residues, germline = 30)
+    M4D5_VH = ("EVQLLEQSGAELVRPGTSVKISCKASGYAFTNYWLGWVKQRPGHGLEWIGDIFPGSG"
+               "NIHYNEKFKGKATLTADKSSSTAYMQLSSLTFEDSAVYFCARLRNWDEPMDYWGQGTTVTVSS")
+    vh_chain = number_heavy(M4D5_VH)
+    vh_gene = [g for g in db.v_genes if g.gene_id == "IGHV1-46*01"][0]
+    j_gene = db.j_for("H")[0]
+
+    # Detect indels
+    indels = detect_fr_indels(vh_chain, vh_gene)
+    check("AMG110 VH has 1 FR insertion", len(indels) == 1)
+    check("AMG110 VH insertion at H6", indels[0].position == "H6")
+    check("AMG110 VH insertion is FR1", indels[0].fr_region == "FR1")
+    check("AMG110 VH insertion donor aa is E", indels[0].donor_aa == "E")
+    check("AMG110 VH donor FR1 count = 31", indels[0].donor_count == 31)
+    check("AMG110 VH germline FR1 count = 30", indels[0].germline_count == 30)
+
+    # Graft should include indel info
+    graft = graft_chain(vh_chain, vh_gene, j_gene, "kabat")
+    check("graft has fr_indels", len(graft.fr_indels) == 1)
+    check("graft origin H6 is germline (shifted residue)",
+          graft.origin.get("H6") in ("germline", "donor(indel)"))
+
+    # Back-mutation should include indel candidate
+    bm = analyze_backmutations(vh_chain, vh_gene, is_vhh=False)
+    indel_cands = [c for c in bm.candidates if "fr_indel" in c.features]
+    check("backmut has indel candidate", len(indel_cands) == 1)
+    check("indel candidate position is H6", indel_cands[0].position == "H6")
+
+    # V0 excludes indel (shorter), V2 includes it (full length)
+    variants = assemble_variants(vh_chain, vh_gene, j_gene, "kabat", bm, is_vhh=False)
+    v0 = [v for v in variants if v.name == "H_V0"][0]
+    v2 = [v for v in variants if v.name == "H_V2"][0]
+    check("V0 length = donor - 1", len(v0.sequence) == len(M4D5_VH) - 1)
+    check("V2 length = donor", len(v2.sequence) == len(M4D5_VH))
+    check("V0 no H6 backmutation", "H6" not in v0.backmutations)
+    check("V2 has H6 backmutation", "H6" in v2.backmutations)
+
+    # 4D5 VL has no FR indels (kappa, same family)
+    M4D5_VL = ("DIQMTQTTSSLSASLGDRVTISCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSG"
+                "VPSRFSGSRSGTDFTLTISNVQAEDLAIYFCQQHYTTPPTFGQGTKVEIK")
+    vl_chain = number_light(M4D5_VL)
+    vl_gene = [g for g in db.v_genes if g.gene_id == "IGKV4-1*01"]
+    if vl_gene:
+        vl_indels = detect_fr_indels(vl_chain, vl_gene[0])
+        check("4D5 VL has no FR indels", len(vl_indels) == 0)
+
+
 def test_end_to_end():
     print("end-to-end")
     with tempfile.TemporaryDirectory() as out:
@@ -746,6 +806,7 @@ def main():
     test_humanness_adapter()
     test_docx_report()
     test_enhanced_report()
+    test_fr_indel_detection()
     test_end_to_end()
     print()
     if FAILURES:

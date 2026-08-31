@@ -18,6 +18,9 @@ total number of residues spanned, so exotic loop lengths and species quirks
 (e.g. mouse FR3 ending 'YFC', VHH long CDR3) are handled robustly. The engine
 is scheme-accurate for standard V domains; ANARCI mode (exact) is used on the
 server for cross-validation.
+
+When AbRSA is available (data/AbRSA/AbRSA), it is used as the primary numbering
+engine for more accurate CDR delimitation with proper insertion handling.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+
+from .abrsa import is_abrsa_available, number_with_abrsa
 
 REGIONS = ("FR1", "CDR1", "FR2", "CDR2", "FR3", "CDR3", "FR4")
 
@@ -111,6 +116,19 @@ def _find_fr2_trp(s: str, start: int, end: int, chain_type: str) -> Optional[int
 
 
 def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
+    """Number a heavy chain sequence using Kabat numbering.
+    
+    Tries AbRSA first for accurate CDR delimitation, falls back to built-in
+    anchor-based engine if AbRSA is unavailable.
+    """
+    # Try AbRSA first for more accurate numbering
+    if is_abrsa_available():
+        result = number_with_abrsa(seq, "H", "kabat")
+        if result is not None:
+            result.species_hint = species_hint
+            return result
+    
+    # Fallback to built-in anchor-based engine
     s = seq.upper().strip()
     n = len(s)
     warnings: List[str] = []
@@ -326,6 +344,19 @@ def _find_j_anchor(s: str, start: int, end: int, chain_type: str) -> Optional[in
 # ---------------------------------------------------------------------------
 
 def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
+    """Number a light chain sequence using Kabat numbering.
+    
+    Tries AbRSA first for accurate CDR delimitation, falls back to built-in
+    anchor-based engine if AbRSA is unavailable.
+    """
+    # Try AbRSA first for more accurate numbering
+    if is_abrsa_available():
+        result = number_with_abrsa(seq, "L", "kabat")
+        if result is not None:
+            result.species_hint = species_hint
+            return result
+    
+    # Fallback to built-in anchor-based engine
     s = seq.upper().strip()
     n = len(s)
     warnings: List[str] = []
