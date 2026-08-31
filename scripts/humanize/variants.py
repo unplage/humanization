@@ -1,8 +1,8 @@
 """Variant ladder assembly (V0 pure graft ... V3 + optional T3).
 
-V0  pure graft (all-human framework, donor CDRs)
-V1  V0 + Tier-1 back-mutations (structural pillars)
-V2  V1 + Tier-2 back-mutations (recommended structural/CDR support)
+V0  pure graft (all-human framework, donor CDRs) — FR indel positions excluded
+V1  V0 + Tier-1 back-mutations (structural pillars) — no indel positions
+V2  V1 + Tier-2 back-mutations + donor FR insertions (recommended)
 V3  V2 + selected Tier-3 (exposed, low-risk immunogenic positions)
 SDR grafted variant is produced in structure mode (see sdr module).
 """
@@ -41,21 +41,37 @@ def assemble_variants(
 ) -> List[Variant]:
     chain_type = donor.chain_type
 
-    def build(name, desc, positions):
-        g = graft_variant(donor, v_gene, j_gene, scheme, positions, is_vhh=is_vhh)
+    def build(name, desc, positions, exclude_indel=False):
+        g = graft_variant(donor, v_gene, j_gene, scheme, positions,
+                          is_vhh=is_vhh, exclude_indel=exclude_indel)
         return Variant(name=name, description=desc, graft=g, backmutations=positions)
 
+    # FR insertion positions (donor-only, not in germline)
+    indel_ins = backmut.indel_insertion_positions
+
     variants = []
+    # V0: pure graft — no back-mutations, no indel positions
+    # (germline lacks insertion positions, so they are absent from V0)
     variants.append(build(
-        f"{chain_type}_V0", "pure graft: human framework + donor CDRs", []))
+        f"{chain_type}_V0",
+        "pure graft: human framework + donor CDRs (FR indel excluded)",
+        [], exclude_indel=True))
+    # V1: T1 structural pillars only — no indel positions
+    # (inherits V0's pure graft base, no donor insertions)
     t1 = backmut.revert_positions(("T1",))
     variants.append(build(
-        f"{chain_type}_V1", "V0 + Tier-1 back-mutations (structural pillars)", t1))
+        f"{chain_type}_V1",
+        "V0 + Tier-1 back-mutations (structural pillars)",
+        t1, exclude_indel=True))
+    # V2: T1 + T2 + all donor FR insertions (user requirement: default include)
     t2 = backmut.revert_positions(("T1", "T2"))
+    v2_positions = t2 + indel_ins
+    v2_desc = "V0 + Tier-1/2 back-mutations"
+    if indel_ins:
+        v2_desc += " + %d FR insertion(s): %s" % (len(indel_ins), ", ".join(indel_ins))
     variants.append(build(
-        f"{chain_type}_V2", "V0 + Tier-1/2 back-mutations", t2))
+        f"{chain_type}_V2", v2_desc, v2_positions))
     # Tier 3: only exposed positions (immunogenicity drivers), capped
-    # 按 composite 降序（收益优先），而非位置顺序。
     t3_exposed = [
         c.position for c in sorted(
             (c for c in backmut.candidates
@@ -63,13 +79,13 @@ def assemble_variants(
             key=lambda c: (-c.composite, c.position),
         )
     ][:extra_t3_max]
-    # 无结构数据时 buried 恒为 None，"exposed" 筛选退化为按 composite 排序；
-    # 描述中如实说明，避免误导。
     has_structure = any(c.buried is not None for c in backmut.candidates)
     v3_desc = ("V0 + Tier-1/2 + selected exposed Tier-3"
                if has_structure else
                "V0 + Tier-1/2 + top-composite Tier-3 (no structure data: "
                "exposure unknown, ranked by composite)")
+    if indel_ins:
+        v3_desc += " + %d FR insertion(s)" % len(indel_ins)
     variants.append(build(
-        f"{chain_type}_V3", v3_desc, t2 + t3_exposed))
+        f"{chain_type}_V3", v3_desc, v2_positions + t3_exposed))
     return variants

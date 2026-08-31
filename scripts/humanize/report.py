@@ -213,6 +213,24 @@ def write_markdown(path: str, result: RunResult) -> None:
         L.append("**Tier summary:** " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) + "")
         L.append("")
 
+        # FR Indel Analysis
+        if rep.backmut.fr_indels:
+            L.append("### FR Insertion/Deletion Analysis")
+            L.append("")
+            L.append("| type | region | position | donor aa | germline aa | donor count | germline count |")
+            L.append("|------|--------|----------|----------|-------------|-------------|----------------|")
+            for indel in rep.backmut.fr_indels:
+                L.append(f"| {indel.indel_type} | {indel.fr_region} | {indel.position} | "
+                         f"{indel.donor_aa} | {indel.germline_aa} | {indel.donor_count} | {indel.germline_count} |")
+            L.append("")
+            # Note about V0/V1 vs V2/V3
+            ins_positions = [ind.position for ind in rep.backmut.fr_indels if ind.indel_type == "insertion"]
+            if ins_positions:
+                L.append(f"**Note:** Donor FR insertion(s) at {', '.join(ins_positions)} — "
+                         f"V0/V1 exclude this position (pure germline FR), "
+                         f"V2/V3 include it (default donor retention).")
+                L.append("")
+
         L.append("### Recommended variants")
         L.append("")
         L.append("| variant | description | # back-mutations | sequence |")

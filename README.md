@@ -84,10 +84,12 @@ python3 tests/test_pipeline.py
 |------|------|
 | **Fab / VHH 双格式** | 自动链型检测；VHH hallmark（Kabat 37/44/45/47）识别并全程保护 |
 | **零依赖便携核心** | anchor-based Kabat 编号引擎（纯标准库）；内置 373 V + 28 J 人源 germline |
+| **AbRSA 编号增强** | 可选调用 [AbRSA](https://github.com/CAO-Yang-1/AbRSA)（Li et al. 2019）进行 CDR 分区，自动回退到内置引擎；5 模型共识避免单模型偏差 |
 | **多策略 Germline 选择** | 9 种策略（FR/CDR/综合/CVI/最小突变/Adimab频率/Pioneer频率/3轴/自动），基于 BI 2024 和治疗性抗体数据优化 |
 | **多套 CDR 定义** | Kabat / Chothia / AbM / IMGT 四套边界同时报告 |
 | **回复突变量化评分** | 结构（vernier/界面/canonical/接触/埋藏）+ 免疫原性 + 可开发性三维评分 → T1/T2/T3/KEEP_DONOR 分级与逐条依据 |
-| **变体梯度** | V0 纯移植 → V1(T1) → **V2(T1+T2，推荐)** → V3(+暴露T3) → Vmin(最小回复集) → V_SDR(paratope 精确移植) |
+| **FR 插入/缺失检测** | 自动检测 donor FR 与 germline 的长度差异，识别插入/缺失位置；V0/V1 纯移植（不含 insertion），V2/V3 默认包含 donor insertion；结构数据验证 insertion 是否 buried |
+| **变体梯度** | V0 纯移植（不含 FR insertion） → V1(T1) → **V2(T1+T2+FR insertion，推荐)** → V3(+暴露T3) → Vmin(最小回复集) → V_SDR(paratope 精确移植) |
 | **结构模式（服务器）** | AF3 预测 → buried/接触/抗原接触回注评分；CDR 环 RMSD、界面与接触保留率验收 |
 | **框架矩阵** | 备选 germline 面板 + CVI 同源性指标（Boehringer Ingelheim JBC 2024 实证） |
 | **实验数据闭环** | `humanize learn`：KD 数据 → 逐位点 ΔΔG → 自动校准分级与评分 |
@@ -108,6 +110,8 @@ python3 tests/test_pipeline.py
 | `humanization_result.json` | 机器可读完整结果 |
 | `backmutations_<链>.csv` | 逐位点评分明细（含实验 ddG 列） |
 | `variants.fasta` | 全部变体序列（直接用于基因合成） |
+
+**FR 插入/缺失分析**：当 donor FR 与 germline 长度不一致时，报告中包含 **FR Insertion/Deletion Analysis** 章节，列出检测到的 indel 位置、类型和结构分析结果。
 
 **生产推荐：V2（T1+T2 回复突变）**——金标准案例（曲妥珠单抗等）的
 历史回复突变恰好属于该分级；Vmin 提供"最少回复突变"的安全下限。
@@ -178,17 +182,19 @@ grep -A25 "Back-mutation candidates" demo/humanization_report.md
 ```
 scripts/humanize/
 ├── numbering.py       # anchor-based Kabat 编号引擎（零依赖，核心）
+├── abrsa.py           # AbRSA 外部工具封装（可选，CDR 分区增强）
 ├── germline.py        # germline 加载/选择（NCBI FASTA 优先，内置后备）
-├── graft.py           # CDR 移植（4 方案）+ 变体组装
+├── graft.py           # CDR 移植（4 方案）+ 变体组装 + FR indel 处理
 ├── backmut.py         # 回复突变候选 + 三维评分 + 分级（核心）
+├── fr_indel.py        # FR 插入/缺失检测（序列比对，非位置比较）
 ├── minimal.py         # Vmin 最小回复集 / CVI / 框架矩阵 / V_SDR
-├── variants.py        # V0-V3 变体梯度
+├── variants.py        # V0-V3 变体梯度（含 FR indel 处理）
 ├── learning.py        # 实验数据闭环（ΔΔG 校准）
 ├── humanness.py       # BioPhi/Sapiens 人源度适配器
-├── structure.py       # AlphaFold3 适配器 + 无依赖 PDB/CIF 解析
+├── structure.py       # AlphaFold3 适配器 + 无依赖 PDB/CIF 解析 + 多模型共识
 ├── mpnn.py            # ProteinMPNN 适配器
 ├── developability.py  # 可开发性风险扫描
-├── report.py          # Markdown/JSON/CSV/FASTA 报告
+├── report.py          # Markdown/JSON/CSV/FASTA 报告（含 FR indel 分析）
 ├── report_docx.py     # ★ Word (.docx) 专业报告
 ├── pipeline.py        # 端到端编排
 └── cli.py             # 命令行入口
@@ -217,3 +223,5 @@ python3 tests/backtest_scale.py     # HumAb25：25 个真实药物亲本全过
 - 基准数据：HumAb25（TencentAI4S/HuDiff，Zenodo DOI 10.5281/zenodo.16974296）
 - 结构/设计工具：AlphaFold3（Google DeepMind）、ProteinMPNN（Baker Lab）、
   BioPhi/Sapiens（Merck）、ANARCI（OPIG）
+- **CDR 分区**：[AbRSA](https://github.com/CAO-Yang-1/AbRSA)（Li et al. 2019, Protein Science 28:1524-1531）——
+  可选调用，提供基于深度学习的 CDR 边界检测；当 AbRSA 不可用时自动回退到内置 anchor-based 引擎

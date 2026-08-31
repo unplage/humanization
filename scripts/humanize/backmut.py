@@ -65,12 +65,25 @@ class BackMutationResult:
     candidates: List[BackMutationCandidate]
     v_gene: GermlineGene
     germline_conservation: Dict[str, float] = field(default_factory=dict)
+    fr_indels: List = field(default_factory=list)  # List[FRIndel]
 
     def by_tier(self, tier: str) -> List[BackMutationCandidate]:
         return [c for c in self.candidates if c.tier == tier]
 
     def revert_positions(self, tiers=("T1", "T2")) -> List[str]:
         return [c.position for c in self.candidates if c.tier in tiers]
+
+    @property
+    def indel_insertion_positions(self) -> List[str]:
+        """Positions of donor insertions (for V2 default inclusion)."""
+        return [ind.position for ind in self.fr_indels
+                if ind.indel_type == "insertion"]
+
+    @property
+    def indel_deletion_positions(self) -> List[str]:
+        """Positions of donor deletions (germline residues to add)."""
+        return [ind.position for ind in self.fr_indels
+                if ind.indel_type == "deletion"]
 
 
 class StructureHints:
@@ -376,11 +389,77 @@ def analyze_backmutations(
             empirical_n=empirical_n,
         ))
 
+    # ---- FR indel candidates ----
+    from .fr_indel import detect_fr_indels
+    fr_indels = detect_fr_indels(donor, v_gene)
+
+    for indel in fr_indels:
+        if indel.indel_type == "insertion":
+            # Donor insertion: score whether to keep donor (indel) or revert
+            pos = indel.position
+            donor_aa = indel.donor_aa
+            # No germline counterpart — treat as "human_aa = missing"
+            features = ["fr_indel", "donor_specific"]
+
+            buried = structure.buried(chain_type, pos) if structure else None
+            cdr_contact = structure.cdr_contact(chain_type, pos) if structure else None
+            ag_contact = structure.antigen_contact(chain_type, pos) if structure else None
+
+            if buried:
+                features.append("buried")
+            if cdr_contact:
+                features.append("cdr_contact")
+
+            # Structural score: indel positions get moderate weight
+            w = WEIGHTS["structural"]
+            struct_scores = [w[f] for f in features if f in w]
+            structural = max(struct_scores) if struct_scores else 0.3
+            if buried is True:
+                structural = max(structural, 0.7)
+            elif buried is False:
+                structural = max(structural * 0.85, 0.0)
+
+            # Benefit score: indel is donor-specific, high immunogenicity risk
+            exposure = 0.0 if buried is True else (1.0 if buried is False else 0.5)
+            benefit = 0.3 + 0.5 * exposure * 0.8  # moderate rarity
+
+            # Chemical score: no substitution, just insertion
+            chem = 0.0
+
+            composite = 100 * (0.55 * structural + 0.30 * benefit + 0.15 * min(1, chem))
+            composite = round(composite, 1)
+
+            # Tier: default T2 for insertions (need structure verification)
+            tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
+
+            rationale = ["FR insertion: donor-specific residue not in germline"]
+            if buried is True:
+                rationale.append("Buried: structurally tolerated")
+            elif buried is False:
+                rationale.append("Exposed: immunogenicity risk")
+
+            candidates.append(BackMutationCandidate(
+                position=pos,
+                donor_aa=donor_aa,
+                human_aa="-",
+                features=sorted(features),
+                structural_score=round(structural, 2),
+                benefit_score=round(benefit, 2),
+                chemical_score=round(chem, 2),
+                composite=composite,
+                tier=tier,
+                rationale=rationale,
+                buried=buried,
+                cdr_contact=cdr_contact,
+                antigen_contact=ag_contact,
+            ))
+
     return BackMutationResult(
         chain_type=chain_type,
         candidates=candidates,
         v_gene=v_gene,
         germline_conservation=conservation,
+        fr_indels=fr_indels,
     )
 
 

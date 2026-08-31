@@ -72,12 +72,12 @@ def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
         errors = []
         try:
             chain = number_heavy(s)
-            chain_type = "H"
+            chain_type = chain.chain_type
         except ValueError as e:
             errors.append(str(e))
             try:
                 chain = number_light(s)
-                chain_type = "L"
+                chain_type = chain.chain_type
             except ValueError as e2:
                 errors.append(str(e2))
                 raise InputError(
