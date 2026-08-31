@@ -246,7 +246,7 @@ def main(argv=None):
                             "composite=0.7*FR+0.3*CDR, cvi_best=CVI homology, "
                             "min_backmutations=fewest back-mutations, "
                             "current=current system (top 30%% FR with max CDR), "
-                            "auto=cvi_best for VH, cdr_best for VL, "
+                             "auto=adimab_frequency for VH, current for VL, "
                             "adimab_frequency=Adimab recommended + frequency, "
                             "pioneer_frequency=Pioneer library + frequency, "
                             "composite_3axis=0.5*CVI+0.3*freq+0.2*FR")

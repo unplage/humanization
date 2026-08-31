@@ -125,6 +125,35 @@ VL_GERMLINE_FREQUENCY = {
 }
 
 
+# 治疗性抗体中 J germline 的使用频率
+# 数据来源：Thera-SAbDab、文献综述（"The germline origin of therapeutic antibodies"）
+JH_GERMLINE_FREQUENCY = {
+    "IGHJ4": 0.40,   # 最常用（~40%）
+    "IGHJ3": 0.15,
+    "IGHJ1": 0.10,
+    "IGHJ5": 0.10,
+    "IGHJ2": 0.05,
+    "IGHJ6": 0.05,
+}
+
+JK_GERMLINE_FREQUENCY = {
+    "IGKJ1": 0.25,
+    "IGKJ2": 0.20,
+    "IGKJ4": 0.15,
+    "IGKJ3": 0.10,
+    "IGKJ5": 0.05,
+}
+
+JL_GERMLINE_FREQUENCY = {
+    "IGLJ1": 0.20,
+    "IGLJ2": 0.15,
+    "IGLJ3": 0.15,
+    "IGLJ4": 0.10,
+    "IGLJ5": 0.05,
+    "IGLJ6": 0.05,
+}
+
+
 def _normalize(table: Dict[str, float]) -> Dict[str, float]:
     """归一化频率表（总和 = 1.0），并记录最小值用于未列基因的先验。"""
     total = sum(table.values())
@@ -136,10 +165,16 @@ def _normalize(table: Dict[str, float]) -> Dict[str, float]:
 VH_FREQ_NORM = _normalize(VH_GERMLINE_FREQUENCY)
 VK_FREQ_NORM = _normalize(VK_GERMLINE_FREQUENCY)
 VL_FREQ_NORM = _normalize(VL_GERMLINE_FREQUENCY)
+JH_FREQ_NORM = _normalize(JH_GERMLINE_FREQUENCY)
+JK_FREQ_NORM = _normalize(JK_GERMLINE_FREQUENCY)
+JL_FREQ_NORM = _normalize(JL_GERMLINE_FREQUENCY)
 # 未列基因的保守先验：该链型最小频率的一半
 VH_MIN_FREQ = min(VH_FREQ_NORM.values()) / 2.0
 VK_MIN_FREQ = min(VK_FREQ_NORM.values()) / 2.0
 VL_MIN_FREQ = min(VL_FREQ_NORM.values()) / 2.0
+JH_MIN_FREQ = min(JH_FREQ_NORM.values()) / 2.0
+JK_MIN_FREQ = min(JK_FREQ_NORM.values()) / 2.0
+JL_MIN_FREQ = min(JL_FREQ_NORM.values()) / 2.0
 
 
 def get_vh_frequency(gene_id: str) -> float:
@@ -158,6 +193,34 @@ def get_vl_frequency(gene_id: str) -> float:
     """获取 VL germline 的归一化使用频率（总和 = 1.0）"""
     gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
     return VL_FREQ_NORM.get(gene_name, VL_MIN_FREQ)
+
+
+def get_jh_frequency(gene_id: str) -> float:
+    """获取 JH germline 的归一化使用频率（总和 = 1.0）"""
+    gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
+    return JH_FREQ_NORM.get(gene_name, JH_MIN_FREQ)
+
+
+def get_jk_frequency(gene_id: str) -> float:
+    """获取 JK germline 的归一化使用频率（总和 = 1.0）"""
+    gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
+    return JK_FREQ_NORM.get(gene_name, JK_MIN_FREQ)
+
+
+def get_jl_frequency(gene_id: str) -> float:
+    """获取 JL germline 的归一化使用频率（总和 = 1.0）"""
+    gene_name = gene_id.split("*")[0] if "*" in gene_id else gene_id
+    return JL_FREQ_NORM.get(gene_name, JL_MIN_FREQ)
+
+
+def get_j_frequency(gene_id: str) -> float:
+    """获取 J germline 的归一化使用频率（根据基因名自动判断链型）"""
+    if gene_id.startswith("IGHJ"):
+        return get_jh_frequency(gene_id)
+    elif gene_id.startswith("IGKJ"):
+        return get_jk_frequency(gene_id)
+    else:
+        return get_jl_frequency(gene_id)
 
 
 def get_frequency(chain_type: str, gene_id: str) -> float:

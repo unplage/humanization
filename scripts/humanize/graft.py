@@ -68,6 +68,7 @@ def _is_shifted_germline_residue(
     dmap: Dict[str, str],
     gmap: Dict[str, str],
     fr_indels: list,
+    chain_type: str = "H",
 ) -> Optional[str]:
     """Check if a donor-only FR position is a shifted germline residue.
     
@@ -99,8 +100,8 @@ def _is_shifted_germline_residue(
         donor_seq = []
         germ_seq = []
         for offset in range(5):
-            d_p = f"H{d_num + offset}"
-            g_p = f"H{int(''.join(c for c in germ_pos if c.isdigit())) + offset}"
+            d_p = f"{chain_type}{d_num + offset}"
+            g_p = f"{chain_type}{int(''.join(c for c in germ_pos if c.isdigit())) + offset}"
             if d_p in dmap:
                 donor_seq.append(dmap[d_p])
             if g_p in gmap:
@@ -108,10 +109,10 @@ def _is_shifted_germline_residue(
         
         if len(donor_seq) >= 3 and len(germ_seq) >= 3 and donor_seq[:3] == germ_seq[:3]:
             # Sequences match — this is a shifted germline residue
-            # Find the actual germline position
-            shift = d_num - ins_num
-            germ_num = ins_num + shift
-            germ_key = f"H{germ_num}"
+            # Donor position d_num corresponds to germline position d_num - 1
+            # (shifted right by the insertion)
+            germ_num = d_num - 1
+            germ_key = f"{chain_type}{germ_num}"
             if germ_key in gmap:
                 return gmap[germ_key]
     
@@ -242,7 +243,7 @@ def graft_chain(
                 # 2. Shifted germline residue due to upstream insertion:
                 #    donor's H6A(Q) = germline's H6(Q) — use germline residue
                 is_shifted = _is_shifted_germline_residue(
-                    pos, dmap, gmap, fr_indels)
+                    pos, dmap, gmap, fr_indels, chain_type)
                 if is_shifted:
                     # This donor position corresponds to a germline position
                     # shifted by an upstream insertion — use germline residue

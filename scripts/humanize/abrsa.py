@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     from .numbering import NumberedChain
 
-_ABRSA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'AbRSA')
+_ABRSA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'AbRSA', 'ABRSA')
 _ABRSA_BIN = os.path.join(_ABRSA_DIR, 'AbRSA')
 
 
