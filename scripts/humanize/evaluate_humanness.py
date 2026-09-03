@@ -15,6 +15,7 @@ Usage:
 import argparse
 import sys
 import os
+from typing import Dict
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -107,6 +108,130 @@ def classify_humanization_level(fr_identity: float) -> str:
         return "Extremely Low (<60%) - Murine (-o-)"
 
 
+def format_sequence_comparison_table(numbered, germline_numbered, chain_type: str):
+    """Generate a table showing sequences under different numbering schemes.
+
+    Args:
+        numbered: NumberedChain object for query sequence
+        germline_numbered: NumberedChain object for germline sequence
+        chain_type: "H" or "L"
+
+    Returns:
+        Formatted string with sequence comparison table
+    """
+    lines = []
+    lines.append(f"\n{'='*70}")
+    lines.append(f"  Sequence Comparison Table (Query vs Germline)")
+    lines.append(f"{'='*70}")
+
+    # Get posmaps
+    q_map = numbered.posmap()
+    g_map = germline_numbered.posmap() if germline_numbered else {}
+
+    def get_pos_num(pos: str) -> int:
+        """Extract numeric position from label like 'H31' or 'H100A'."""
+        num_str = "".join(c for c in pos[1:] if c.isdigit())
+        return int(num_str) if num_str else 0
+
+    def get_region_seq(posmap: Dict, start_num: int, end_num: int, prefix: str) -> str:
+        """Extract sequence for a region given start/end position numbers."""
+        seq = ""
+        for pos in sorted(posmap.keys(), key=lambda x: get_pos_num(x)):
+            if pos.startswith(prefix):
+                num = get_pos_num(pos)
+                if start_num <= num <= end_num:
+                    seq += posmap[pos]
+        return seq
+
+    # Kabat numbering regions
+    if chain_type == "H":
+        kabat_regions = {
+            "FR1": (1, 30),
+            "CDR1": (31, 35),
+            "FR2": (36, 49),
+            "CDR2": (50, 65),
+            "FR3": (66, 94),
+            "CDR3": (95, 102),
+            "FR4": (103, 113),
+        }
+        imgt_regions = {
+            "FR1": (1, 26),
+            "CDR1": (27, 38),
+            "FR2": (39, 55),
+            "CDR2": (56, 65),
+            "FR3": (66, 104),
+            "CDR3": (105, 117),
+            "FR4": (118, 128),
+        }
+        prefix = "H"
+    else:  # VL
+        kabat_regions = {
+            "FR1": (1, 23),
+            "CDR1": (24, 34),
+            "FR2": (35, 49),
+            "CDR2": (50, 56),
+            "FR3": (57, 88),
+            "CDR3": (89, 97),
+            "FR4": (98, 107),
+        }
+        imgt_regions = {
+            "FR1": (1, 23),
+            "CDR1": (24, 34),
+            "FR2": (35, 55),
+            "CDR2": (56, 65),
+            "FR3": (66, 88),
+            "CDR3": (89, 104),
+            "FR4": (105, 118),
+        }
+        prefix = "L"
+
+    # Kabat numbering table
+    lines.append(f"\n  Kabat numbering:")
+    lines.append(f"  {'Region':<8} {'Positions':<15} {'Query':<30} {'Germline':<30}")
+    lines.append(f"  {'-'*8} {'-'*15} {'-'*30} {'-'*30}")
+
+    for region, (start_num, end_num) in kabat_regions.items():
+        q_seq = get_region_seq(q_map, start_num, end_num, prefix)
+        g_seq = get_region_seq(g_map, start_num, end_num, prefix)
+
+        # Truncate if too long
+        q_display = q_seq[:28] + ".." if len(q_seq) > 30 else q_seq
+        g_display = g_seq[:28] + ".." if len(g_seq) > 30 else g_seq
+
+        lines.append(f"  {region:<8} {prefix}{start_num}-{prefix}{end_num:<12} {q_display:<30} {g_display:<30}")
+
+    # IMGT numbering table
+    lines.append(f"\n  IMGT numbering:")
+    lines.append(f"  {'Region':<8} {'Positions':<15} {'Query':<30} {'Germline':<30}")
+    lines.append(f"  {'-'*8} {'-'*15} {'-'*30} {'-'*30}")
+
+    for region, (start_num, end_num) in imgt_regions.items():
+        q_seq = get_region_seq(q_map, start_num, end_num, prefix)
+        g_seq = get_region_seq(g_map, start_num, end_num, prefix)
+
+        # Truncate if too long
+        q_display = q_seq[:28] + ".." if len(q_seq) > 30 else q_seq
+        g_display = g_seq[:28] + ".." if len(g_seq) > 30 else g_seq
+
+        lines.append(f"  {region:<8} {prefix}{start_num}-{prefix}{end_num:<12} {q_display:<30} {g_display:<30}")
+
+    # Sequence identity summary
+    lines.append(f"\n  Sequence identity summary:")
+    lines.append(f"  {'Region':<10} {'Identity':<12} {'Query Length':<15} {'Germline Length':<15}")
+    lines.append(f"  {'-'*10} {'-'*12} {'-'*15} {'-'*15}")
+
+    for region, (start_num, end_num) in kabat_regions.items():
+        q_seq = get_region_seq(q_map, start_num, end_num, prefix)
+        g_seq = get_region_seq(g_map, start_num, end_num, prefix)
+        q_count = len(q_seq)
+        g_count = len(g_seq)
+        match_count = sum(1 for q_aa, g_aa in zip(q_seq, g_seq) if q_aa == g_aa and g_aa != "-")
+        identity = match_count / q_count if q_count > 0 else 0.0
+        lines.append(f"  {region:<10} {identity:.1%}     {q_count:<15} {g_count:<15}")
+
+    return "\n".join(lines)
+
+
 def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int = 10):
     """Format Kabat-based results for display."""
     lines = []
@@ -137,10 +262,20 @@ def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int 
     lines.append(f"    CDR identity: {best_scores['cdr_identity']:.4f} ({best_scores['cdr_identity']*100:.1f}%)")
     lines.append(f"    Overall:      {best_scores['all_identity']:.4f} ({best_scores['all_identity']*100:.1f}%)")
 
+    # Detailed region breakdown
+    lines.append(f"\n  Detailed region breakdown (Kabat):")
+    lines.append(f"  {'Region':<10} {'Identity':<12} {'Match':<8} {'Total':<8}")
+    lines.append(f"  {'-'*10} {'-'*12} {'-'*8} {'-'*8}")
+    lines.append(f"  {'FR1':<10} {best_scores.get('fr1_identity', 0):.1%}     {best_scores.get('n_fr1', 0):<8}")
+    lines.append(f"  {'FR2':<10} {best_scores.get('fr2_identity', 0):.1%}     {best_scores.get('n_fr2', 0):<8}")
+    lines.append(f"  {'FR3':<10} {best_scores.get('fr3_identity', 0):.1%}     {best_scores.get('n_fr3', 0):<8}")
+    lines.append(f"  {'CDR1':<10} {best_scores.get('cdr1_identity', 0):.1%}     {best_scores.get('n_cdr1', 0):<8}")
+    lines.append(f"  {'CDR2':<10} {best_scores.get('cdr2_identity', 0):.1%}     {best_scores.get('n_cdr2', 0):<8}")
+
     # Humanization classification
     fr_id = best_scores["fr_identity"]
     level = classify_humanization_level(fr_id)
-    lines.append(f"    Humanization level: {level}")
+    lines.append(f"\n    Humanization level: {level}")
 
     # Positions differing from best germline (potential back-mutations)
     q_map = numbered.posmap()
@@ -197,6 +332,17 @@ def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, t
     lines.append(f"    CDR identity: {best_scores['cdr_identity']:.4f} ({best_scores['cdr_identity']*100:.1f}%)")
     lines.append(f"    Overall:      {best_scores['all_identity']:.4f} ({best_scores['all_identity']*100:.1f}%)")
 
+    # IMGT region breakdown
+    if "imgt_region_stats" in best_scores:
+        lines.append(f"\n  IMGT region breakdown:")
+        lines.append(f"  {'Region':<10} {'Identity':<12} {'Match':<8} {'Total':<8}")
+        lines.append(f"  {'-'*10} {'-'*12} {'-'*8} {'-'*8}")
+        for region in ["FR1", "CDR1", "FR2", "CDR2", "FR3"]:
+            stats = best_scores["imgt_region_stats"].get(region, {})
+            identity = stats.get("identity", 0)
+            count = stats.get("count", 0)
+            lines.append(f"  {region:<10} {identity:.1%}     {count:<8}")
+
     # Humanization classification (USAN standard)
     fr_id = best_scores["fr_identity"]
     if fr_id >= 0.85:
@@ -205,7 +351,7 @@ def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, t
         usan_class = "Chimeric (-xi-)"
     else:
         usan_class = "Murine (-o-)"
-    lines.append(f"    USAN naming class: {usan_class} (FR identity >= 85% = humanized)")
+    lines.append(f"\n    USAN naming class: {usan_class} (FR identity >= 85% = humanized)")
 
     # Region alignment
     if best_gene.numbered:
@@ -262,9 +408,15 @@ def main():
         result = format_results(chain_type, seq, scored, numbered, args.top)
         print(result)
 
+        # Sequence comparison table (Kabat)
+        best_gene = scored[0][0]
+        if best_gene.numbered:
+            table = format_sequence_comparison_table(numbered, best_gene.numbered, chain_type)
+            print(table)
+
         # IMGT-based evaluation
-        scored_imgt, numbered = evaluate_sequence_imgt(chain_type, seq, args.db_dir)
-        result_imgt = format_results_imgt(chain_type, seq, scored_imgt, numbered, args.top)
+        scored_imgt, numbered_imgt = evaluate_sequence_imgt(chain_type, seq, args.db_dir)
+        result_imgt = format_results_imgt(chain_type, seq, scored_imgt, numbered_imgt, args.top)
         print(result_imgt)
 
     # Combined summary for Fab

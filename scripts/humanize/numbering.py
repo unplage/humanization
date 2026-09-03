@@ -496,8 +496,13 @@ ABM_CDRS = {
     "L": {"CDR1": ("L24", "L34"), "CDR2": ("L50", "L56"), "CDR3": ("L89", "L97")},
 }
 IMGT_CDRS = {
-    "H": {"CDR1": ("H26", "H34"), "CDR2": ("H56", "H65"), "CDR3": ("H95", "H102")},
-    "L": {"CDR1": ("L24", "L34"), "CDR2": ("L50", "L56"), "CDR3": ("L89", "L97")},
+    # IMGT CDR definitions (Lefranc 2003)
+    # Note: These are Kabat position labels that correspond to IMGT CDR boundaries
+    # IMGT CDR1: positions 27-38 (Kabat 26-35)
+    # IMGT CDR2: positions 56-65 (Kabat 51-57)
+    # IMGT CDR3: positions 105-117 (Kabat 93-102)
+    "H": {"CDR1": ("H26", "H35"), "CDR2": ("H51", "H57"), "CDR3": ("H93", "H102")},
+    "L": {"CDR1": ("L24", "L34"), "CDR2": ("L51", "L56"), "CDR3": ("L89", "L97")},
 }
 CDR_SCHEMES = {"kabat": KABAT_CDRS, "chothia": CHOTHIA_CDRS, "abm": ABM_CDRS, "imgt": IMGT_CDRS}
 
