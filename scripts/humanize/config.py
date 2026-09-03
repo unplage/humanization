@@ -49,6 +49,24 @@ VHH_HALLMARK = {37, 44, 45, 47}
 J_ANCHOR = {"H": 103, "L": 98}
 
 # ---------------------------------------------------------------------------
+# FR4 structural analysis (Step3 only - requires structure data)
+# ---------------------------------------------------------------------------
+# FR4 positions may need reversion to donor if they have structural importance
+# (CDR3 contact, antigen contact). This is an exception to the "never back-mutate
+# FR4" rule, applied only when structure data reveals critical contacts.
+
+FR4_STRUCTURAL_WEIGHTS = {
+    "cdr3_contact": 0.45,      # Position contacts CDR3 loop (<4.5 Å)
+    "antigen_contact": 0.35,   # Position contacts antigen (<4.5 Å)
+    "buried": 0.15,            # Position is buried (relSASA < 0.20)
+    "interface_core": 0.05,    # Position in VH/VL interface core
+}
+
+# Threshold for recommending FR4 reversion (sum of weights must exceed this)
+# Lowered to 0.4 so positions with just CDR3 contact (0.45) can be recommended
+FR4_REVERSION_THRESHOLD = 0.4
+
+# ---------------------------------------------------------------------------
 # Scoring weights (documented in docs/scoring.md)
 # ---------------------------------------------------------------------------
 
@@ -121,6 +139,7 @@ TIER_LABELS = {
     "T1": "must revert (structural pillar)",
     "T2": "strongly recommended (structural/CDR support)",
     "T3": "optional (immunogenicity/consensus)",
+    "T_FR4": "FR4 structural reversion (CDR3/antigen contact)",
     "KEEP_HUMAN": "keep human (no structural role, exposed)",
     "KEEP_DONOR": "keep donor (VHH hallmark / disulfide / CDR3 anchor)",
 }

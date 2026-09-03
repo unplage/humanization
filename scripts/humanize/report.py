@@ -11,6 +11,7 @@ from .backmut import BackMutationResult
 from .config import TIER_LABELS
 from .minimal import MatrixEntry, MinimalReversion
 from .pipeline import ChainReport, RunResult
+from .imgt_numbering import compare_to_germline_imgt, format_imgt_region_alignment
 
 
 def _num(v, nd=2):
@@ -46,6 +47,33 @@ def write_json(path: str, result: RunResult) -> None:
     }
     for rep in result.chains:
         chain = rep.input_chain
+
+        # Calculate IMGT-based scores for JSON output
+        imgt_data = {
+            "note": "IMGT-based evaluation per WHO/INN/USAN standards",
+            "fr_identity": None,
+            "cdr_identity": None,
+            "all_identity": None,
+            "usan_naming_class": None,
+        }
+        if rep.germline.v_gene and rep.germline.v_gene.numbered and chain.numbered:
+            imgt_scores = compare_to_germline_imgt(
+                chain.numbered.posmap(),
+                rep.germline.v_gene.numbered.posmap(),
+                chain.chain_type,
+            )
+            imgt_data["fr_identity"] = imgt_scores.get("fr_identity")
+            imgt_data["cdr_identity"] = imgt_scores.get("cdr_identity")
+            imgt_data["all_identity"] = imgt_scores.get("all_identity")
+            # USAN naming classification
+            fr_id = imgt_scores.get("fr_identity", 0)
+            if fr_id >= 0.85:
+                imgt_data["usan_naming_class"] = "Humanized (-zumab)"
+            elif fr_id >= 0.70:
+                imgt_data["usan_naming_class"] = "Chimeric (-xi-)"
+            else:
+                imgt_data["usan_naming_class"] = "Murine (-o-)"
+
         chain_payload = {
             "name": chain.name,
             "chain_type": chain.chain_type,
@@ -61,6 +89,7 @@ def write_json(path: str, result: RunResult) -> None:
                     (g.gene_id, s) for g, s in rep.germline.alternatives[:5]
                 ],
             },
+            "germline_imgt": imgt_data,
             "minimal_reversion": (
                 {
                     "positions": rep.minimal_reversion.positions,
@@ -172,6 +201,60 @@ def write_markdown(path: str, result: RunResult) -> None:
             for g, sc in rep.germline.alternatives[:5]:
                 L.append(f"| | {g.gene_id} | {_num(sc.get('fr_identity'), 3)} | {_num(sc.get('cdr_identity'), 3)} |")
             L.append("")
+
+            # ---- IMGT-based humanization evaluation (WHO/INN/USAN standard) ----
+            L.append("### IMGT-based Humanization Evaluation (WHO/INN/USAN Standard)")
+            L.append("")
+            L.append("*Per WHO/INN/USAN standards, humanization degree is evaluated using IMGT numbering.*")
+            L.append("")
+
+            # Calculate IMGT-based scores for all germlines
+            if v.numbered and chain.numbered:
+                imgt_scores = []
+                for g, sc in rep.germline.alternatives:
+                    if g.numbered:
+                        scores = compare_to_germline_imgt(
+                            chain.numbered.posmap(), g.numbered.posmap(), chain.chain_type
+                        )
+                        imgt_scores.append((g, scores))
+
+                if imgt_scores:
+                    L.append("| rank | gene | FR id (IMGT) | CDR id (IMGT) | Overall (IMGT) |")
+                    L.append("|------|------|--------------|---------------|----------------|")
+                    for i, (g, sc) in enumerate(imgt_scores[:5]):
+                        L.append(f"| {i+1} | {g.gene_id} | {_num(sc.get('fr_identity'), 3)} | "
+                                 f"{_num(sc.get('cdr_identity'), 3)} | {_num(sc.get('all_identity'), 3)} |")
+                    L.append("")
+
+                    # Best IMGT match details
+                    best_imgt, best_scores_imgt = imgt_scores[0]
+                    fr_id_imgt = best_scores_imgt.get("fr_identity", 0)
+
+                    # USAN naming classification
+                    if fr_id_imgt >= 0.85:
+                        usan_class = "Humanized (-zumab)"
+                    elif fr_id_imgt >= 0.70:
+                        usan_class = "Chimeric (-xi-)"
+                    else:
+                        usan_class = "Murine (-o-)"
+
+                    L.append(f"**Best IMGT match:** {best_imgt.gene_id}")
+                    L.append(f"- FR identity (IMGT): {_num(fr_id_imgt, 3)} ({fr_id_imgt*100:.1f}%)")
+                    L.append(f"- CDR identity (IMGT): {_num(best_scores_imgt.get('cdr_identity', 0), 3)}")
+                    L.append(f"- Overall (IMGT): {_num(best_scores_imgt.get('all_identity', 0), 3)}")
+                    L.append(f"- **USAN naming class:** {usan_class} (FR identity >= 85% = humanized)")
+                    L.append("")
+
+                    # Region alignment visualization
+                    if best_imgt.numbered:
+                        L.append(f"**Region alignment vs {best_imgt.gene_id} (IMGT):**")
+                        L.append("```")
+                        alignment = format_imgt_region_alignment(
+                            chain.numbered.posmap(), best_imgt.numbered.posmap(), chain.chain_type
+                        )
+                        L.append(alignment)
+                        L.append("```")
+                        L.append("")
         if rep.human_likeness:
             L.append(f"**Human-likeness (FR germline identity, pure graft):** "
                      + ", ".join(f"{k} {v:.1f}%" for k, v in rep.human_likeness.items()))
@@ -212,6 +295,23 @@ def write_markdown(path: str, result: RunResult) -> None:
             counts[c.tier] = counts.get(c.tier, 0) + 1
         L.append("**Tier summary:** " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) + "")
         L.append("")
+
+        # FR4 Structural Analysis (Step3 only - requires structure data)
+        fr4_candidates = [c for c in rep.backmut.candidates if c.tier == "T_FR4"]
+        if fr4_candidates:
+            L.append("### FR4 Structural Analysis (Step3 only)")
+            L.append("")
+            L.append("*FR4 positions with structural importance (CDR3/antogen contact):*")
+            L.append("")
+            L.append("| Position | Donor | Human | Score | Features | Recommendation |")
+            L.append("|----------|-------|-------|-------|----------|----------------|")
+            for c in sorted(fr4_candidates, key=lambda x: -x.composite):
+                L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {c.composite} | "
+                         f"{'+'.join(c.features)} | **Revert to donor ({c.donor_aa})** |")
+            L.append("")
+            L.append("**Note:** FR4 typically comes from human J gene. These positions are recommended for reversion")
+            L.append("only because structure data shows critical CDR3/antigen contacts.")
+            L.append("")
 
         # FR Indel Analysis
         if rep.backmut.fr_indels:
