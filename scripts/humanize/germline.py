@@ -279,27 +279,59 @@ CDR_REGIONS = ("CDR1", "CDR2")
 
 def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, float]:
     """Per-position comparison between query and a germline V gene.
-    Returns identity fractions over FR, CDR1-2, and all.
+    Returns identity fractions over FR, CDR1-2, and all, plus per-region breakdown.
 
     Note: CDR3 (H95-102 / L89-97) is excluded by construction — it is
     grafted from the donor and has no germline correspondence, so including
     it in the denominator would artificially lower all_identity scores.
     """
     if gene.numbered is None:
-        return {"fr_identity": 0.0, "cdr_identity": 0.0, "all_identity": 0.0, "n_fr": 0, "n_cdr": 0}
+        return {
+            "fr_identity": 0.0, "cdr_identity": 0.0, "all_identity": 0.0,
+            "n_fr": 0, "n_cdr": 0,
+            "fr1_identity": 0.0, "fr2_identity": 0.0, "fr3_identity": 0.0,
+            "cdr1_identity": 0.0, "cdr2_identity": 0.0,
+            "n_fr1": 0, "n_fr2": 0, "n_fr3": 0, "n_cdr1": 0, "n_cdr2": 0,
+        }
     q, g = query.posmap(), gene.numbered.posmap()
     common_fr = [p for p in q if p in g and query.region_of(p) in FR_REGIONS]
     common_cdr = [p for p in q if p in g and query.region_of(p) in CDR_REGIONS]
+
+    # Overall FR and CDR identity
     fr_id = sum(1 for p in common_fr if q[p] == g[p]) / len(common_fr) if common_fr else 0.0
     cdr_id = sum(1 for p in common_cdr if q[p] == g[p]) / len(common_cdr) if common_cdr else 0.0
     common = common_fr + common_cdr
     all_id = sum(1 for p in common if q[p] == g[p]) / len(common) if common else 0.0
+
+    # Per-region breakdown
+    fr1_pos = [p for p in common_fr if query.region_of(p) == "FR1"]
+    fr2_pos = [p for p in common_fr if query.region_of(p) == "FR2"]
+    fr3_pos = [p for p in common_fr if query.region_of(p) == "FR3"]
+    cdr1_pos = [p for p in common_cdr if query.region_of(p) == "CDR1"]
+    cdr2_pos = [p for p in common_cdr if query.region_of(p) == "CDR2"]
+
+    fr1_id = sum(1 for p in fr1_pos if q[p] == g[p]) / len(fr1_pos) if fr1_pos else 0.0
+    fr2_id = sum(1 for p in fr2_pos if q[p] == g[p]) / len(fr2_pos) if fr2_pos else 0.0
+    fr3_id = sum(1 for p in fr3_pos if q[p] == g[p]) / len(fr3_pos) if fr3_pos else 0.0
+    cdr1_id = sum(1 for p in cdr1_pos if q[p] == g[p]) / len(cdr1_pos) if cdr1_pos else 0.0
+    cdr2_id = sum(1 for p in cdr2_pos if q[p] == g[p]) / len(cdr2_pos) if cdr2_pos else 0.0
+
     return {
         "fr_identity": round(fr_id, 4),
         "cdr_identity": round(cdr_id, 4),
         "all_identity": round(all_id, 4),
         "n_fr": len(common_fr),
         "n_cdr": len(common_cdr),
+        "fr1_identity": round(fr1_id, 4),
+        "fr2_identity": round(fr2_id, 4),
+        "fr3_identity": round(fr3_id, 4),
+        "cdr1_identity": round(cdr1_id, 4),
+        "cdr2_identity": round(cdr2_id, 4),
+        "n_fr1": len(fr1_pos),
+        "n_fr2": len(fr2_pos),
+        "n_fr3": len(fr3_pos),
+        "n_cdr1": len(cdr1_pos),
+        "n_cdr2": len(cdr2_pos),
     }
 
 

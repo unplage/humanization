@@ -45,8 +45,13 @@ CDR_POS_SETS = {
         "L": {"CDR1": (24, 34), "CDR2": (50, 56), "CDR3": (89, 97)},
     },
     "imgt": {
-        "H": {"CDR1": (26, 34), "CDR2": (56, 65), "CDR3": (93, 102)},
-        "L": {"CDR1": (24, 34), "CDR2": (50, 56), "CDR3": (89, 97)},
+        # IMGT CDR definitions (Lefranc 2003)
+        # Note: These are Kabat position numbers that correspond to IMGT CDR boundaries
+        # IMGT CDR1: IMGT 27-38 = Kabat 26-35
+        # IMGT CDR2: IMGT 56-65 = Kabat 51-57
+        # IMGT CDR3: IMGT 105-117 = Kabat 93-102
+        "H": {"CDR1": (26, 35), "CDR2": (51, 57), "CDR3": (93, 102)},
+        "L": {"CDR1": (24, 34), "CDR2": (51, 56), "CDR3": (89, 97)},
     },
 }
 
