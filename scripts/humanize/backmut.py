@@ -21,6 +21,8 @@ from .config import (
     CANONICAL,
     EMPIRICAL_NO_EFFECT,
     EMPIRICAL_NO_EFFECT_NOTE,
+    FR4_STRUCTURAL_WEIGHTS,
+    FR4_REVERSION_THRESHOLD,
     INTERFACE_CORE,
     INTERFACE_EXTENDED,
     VERNIER_ZONE,
@@ -136,6 +138,98 @@ class StructureHints:
         return 0.15 if b else 0.85
 
 
+def _evaluate_fr4_structural(
+    pos: str,
+    num: int,
+    chain_type: str,
+    dmap: dict,
+    gmap: dict,
+    structure: StructureHints,
+) -> Optional[BackMutationCandidate]:
+    """Evaluate if an FR4 position needs reversion to donor based on structure.
+
+    FR4 comes from the human J gene by construction. However, if structure data
+    reveals that an FR4 position contacts CDR3 or the antigen, reverting to the
+    donor residue may be necessary to preserve binding.
+
+    Returns BackMutationCandidate if reversion is recommended, None otherwise.
+    """
+    donor_aa = dmap.get(pos, "").upper()
+    human_aa = gmap.get(pos, "").upper()
+
+    # Skip if residues are identical
+    if donor_aa == human_aa or donor_aa in ("", "X"):
+        return None
+
+    # Collect structural features for FR4
+    features = []
+    scores = []
+
+    # 1. CDR3 contact (most important - FR4 follows CDR3)
+    cdr3_contact = structure.cdr_contact(chain_type, pos)
+    if cdr3_contact:
+        features.append("cdr3_contact")
+        scores.append(FR4_STRUCTURAL_WEIGHTS["cdr3_contact"])
+
+    # 2. Antigen contact
+    ag_contact = structure.antigen_contact(chain_type, pos)
+    if ag_contact:
+        features.append("antigen_contact")
+        scores.append(FR4_STRUCTURAL_WEIGHTS["antigen_contact"])
+
+    # 3. Buried status
+    buried = structure.buried(chain_type, pos)
+    if buried:
+        features.append("buried")
+        scores.append(FR4_STRUCTURAL_WEIGHTS["buried"])
+
+    # 4. VH/VL interface
+    if num in INTERFACE_CORE.get(chain_type, set()):
+        features.append("interface_core")
+        scores.append(FR4_STRUCTURAL_WEIGHTS["interface_core"])
+
+    # No structural evidence - skip
+    if not scores:
+        return None
+
+    # Calculate composite score
+    composite = sum(scores)
+
+    # Check threshold
+    if composite < FR4_REVERSION_THRESHOLD:
+        return None
+
+    # Calculate individual scores for BackMutationCandidate
+    structural = max(scores)
+    benefit = 0.0  # FR4 reversion is structure-driven, not immunogenicity
+    chem = 0.0
+
+    # Build rationale
+    rationale_parts = [f"FR4 structural reversion: {', '.join(features)}"]
+    if cdr3_contact:
+        rationale_parts.append("Contacts CDR3 loop (<4.5 Å)")
+    if ag_contact:
+        rationale_parts.append("Contacts antigen (<4.5 Å)")
+    if buried:
+        rationale_parts.append("Buried position")
+
+    return BackMutationCandidate(
+        position=pos,
+        donor_aa=donor_aa,
+        human_aa=human_aa,
+        features=sorted(features),
+        structural_score=round(structural, 2),
+        benefit_score=round(benefit, 2),
+        chemical_score=round(chem, 2),
+        composite=round(100 * composite, 1),
+        tier="T_FR4",
+        rationale=rationale_parts,
+        buried=buried,
+        cdr_contact=cdr3_contact,
+        antigen_contact=ag_contact,
+    )
+
+
 def analyze_backmutations(
     donor: NumberedChain,
     v_gene: GermlineGene,
@@ -168,8 +262,17 @@ def analyze_backmutations(
     candidates: List[BackMutationCandidate] = []
     for pos in sorted(set(dmap) & set(gmap), key=lambda p: (_pos_num(p), p)):
         num = _pos_num(pos)
+
+        # FR4 structural analysis (only when structure data is available)
         if num >= J_ANCHOR[chain_type]:
+            if structure.data:  # Has structure data
+                fr4_candidate = _evaluate_fr4_structural(
+                    pos, num, chain_type, dmap, gmap, structure
+                )
+                if fr4_candidate:
+                    candidates.append(fr4_candidate)
             continue
+
         if donor.region_of(pos) not in FR_REGIONS:
             continue
         # H93/H94 carry the first two CDR3-loop residues (strict-Kabat FR3

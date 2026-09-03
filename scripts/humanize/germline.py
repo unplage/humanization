@@ -105,18 +105,18 @@ def _classify_gene(gene_id: str, chain_type: str, kind: str, seq: str) -> Germli
 
 def load_germline_db(db_dir: str) -> GermlineDB:
     """Load the germline dataset. Priority:
-      1. NCBI IgBLAST FASTA files in db_dir (human_gl_*.fasta)
-      2. bundled Kabat-space JSON (data/germline/human_germline_kabat.json)
+      1. bundled Kabat-space JSON (data/germline/human_germline_kabat.json) - preferred for amino acid sequences
+      2. NCBI IgBLAST FASTA files in db_dir (human_gl_*.fasta) - contains nucleotide sequences
     Returns an empty-ish GermlineDB on total failure (caller falls back)."""
-    # NCBI FASTA source
+    # bundled JSON source (preferred - contains amino acid sequences)
+    bundled = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "data", "germline", "human_germline_kabat.json")
+    if os.path.exists(bundled):
+        return _load_bundled_json(bundled)
+    # NCBI FASTA source (fallback - contains nucleotide sequences)
     vh_path = os.path.join(db_dir, IGHV_FILE)
     vl_path = os.path.join(db_dir, IGKV_IGLV_FILE)
     if os.path.exists(vh_path) or os.path.exists(vl_path):
         return _load_igblast_fasta(db_dir)
-    # bundled JSON source
-    bundled = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "data", "germline", "human_germline_kabat.json")
-    if os.path.exists(bundled):
-        return _load_bundled_json(bundled)
     raise FileNotFoundError(
         f"no germline data found in {db_dir} (NCBI FASTA) nor at {bundled} (bundled)"
     )
