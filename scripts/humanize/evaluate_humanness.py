@@ -53,36 +53,70 @@ def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
 
 
 def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
-    """Evaluate a single chain against human germline using IMGT numbering."""
-    from .numbering import number_heavy, number_light
-    from .germline import load_germline_db, compare_to_germline
-    from .imgt_numbering import compare_to_germline_imgt
+    """Evaluate a single chain against human germline using IMGT numbering.
 
-    # Number the sequence
-    if chain_type == "H":
-        numbered = number_heavy(sequence)
+    Uses AbRSA with IMGT scheme to number the query sequence directly,
+    then loads IMGT germline database for comparison.
+    """
+    from .imgt_numbering import (
+        number_with_abrsa_imgt, load_imgt_germline, compare_imgt_posmaps_direct
+    )
+
+    # Number the sequence using AbRSA with IMGT scheme
+    numbered = number_with_abrsa_imgt(sequence, chain_type)
+
+    if numbered is not None:
+        # AbRSA succeeded - use IMGT-numbered posmap directly
+        query_imgt = numbered.posmap()
     else:
-        numbered = number_light(sequence)
+        # AbRSA failed - fallback to Kabat numbering + conversion
+        from .numbering import number_heavy, number_light
+        from .imgt_numbering import kabat_posmap_to_imgt_posmap
 
-    # Load germline DB
-    if not db_dir:
-        db_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "germline")
-    db = load_germline_db(db_dir)
+        if chain_type == "H":
+            numbered_kabat = number_heavy(sequence)
+        else:
+            numbered_kabat = number_light(sequence)
 
-    # Get human V genes for this chain type
-    v_genes = db.human(chain_type)
+        query_imgt = kabat_posmap_to_imgt_posmap(numbered_kabat.posmap(), chain_type)
+        numbered = numbered_kabat  # For display purposes
 
-    # Score each germline using IMGT-based comparison
-    scored = []
-    for gene in v_genes:
-        if gene.numbered is None:
-            continue
-        scores = compare_to_germline_imgt(
-            numbered.posmap(),
-            gene.numbered.posmap(),
-            chain_type,
-        )
-        scored.append((gene, scores))
+    # Load IMGT germline DB (abnumber_human_imgt.json)
+    imgt_genes = load_imgt_germline(db_dir)
+
+    if not imgt_genes:
+        # Fallback: use Kabat germline with conversion
+        from .germline import load_germline_db
+        from .imgt_numbering import kabat_posmap_to_imgt_posmap
+
+        if not db_dir:
+            db_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "data", "germline"
+            )
+        db = load_germline_db(db_dir)
+        v_genes = db.human(chain_type)
+
+        scored = []
+        for gene in v_genes:
+            if gene.numbered is None:
+                continue
+            germline_imgt = kabat_posmap_to_imgt_posmap(gene.numbered.posmap(), chain_type)
+            scores = compare_imgt_posmaps_direct(query_imgt, germline_imgt)
+            scored.append((gene, scores))
+    else:
+        # Use IMGT germline directly
+        scored = []
+        for gene in imgt_genes:
+            # Filter by chain type
+            if chain_type == "H" and not gene.gene_id.startswith("IGHV"):
+                continue
+            if chain_type == "L" and not gene.gene_id.startswith(("IGKV", "IGLV")):
+                continue
+
+            # Compare using direct IMGT comparison
+            scores = compare_imgt_posmaps_direct(query_imgt, gene._imgt_posmap)
+            scored.append((gene, scores))
 
     # Sort by FR identity (primary) and CDR identity (secondary)
     scored.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"]))
@@ -91,21 +125,29 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
 
 
 def classify_humanization_level(fr_identity: float) -> str:
-    """Classify humanization level based on FR identity."""
+    """Classify humanization level based on FR identity.
+    
+    NOTE: This is an ACADEMIC ESTIMATE based on sequence identity.
+    The official USAN/INN naming is based on the technology used to create
+    the antibody (transgenic mouse, CDR grafting, phage display, etc.),
+    NOT on sequence identity thresholds.
+    
+    Academic conventions (commonly used in literature):
+    - Human (-umab): FR identity >= 95% (typically from transgenic mice/phage display)
+    - Humanized (-zumab): FR identity >= 85% (typically CDR grafting)
+    - Chimeric (-ximab): FR identity >= 70% (typically mouse V + human C)
+    - Murine (-omab): FR identity < 70%
+    
+    Official USAN/INN classification requires knowledge of the manufacturing process.
+    """
     if fr_identity >= 0.95:
-        return "Very High (>95%) - Human (-umab)"
-    elif fr_identity >= 0.90:
-        return "High (90-95%) - Humanized (-zumab)"
+        return "Academic: likely Human-like"
     elif fr_identity >= 0.85:
-        return "Moderate-High (85-90%) - Humanized (-zumab)"
-    elif fr_identity >= 0.80:
-        return "Moderate (80-85%) - Humanized (-zumab) [borderline]"
+        return "Academic: likely Humanized-like"
     elif fr_identity >= 0.70:
-        return "Low (70-80%) - Chimeric (-xi-)"
-    elif fr_identity >= 0.60:
-        return "Very Low (60-70%) - Chimeric (-xi-)"
+        return "Academic: likely Chimeric-like"
     else:
-        return "Extremely Low (<60%) - Murine (-o-)"
+        return "Academic: likely Murine-like"
 
 
 def format_sequence_comparison_table(numbered, germline_numbered, chain_type: str):
@@ -128,17 +170,29 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
     q_map = numbered.posmap()
     g_map = germline_numbered.posmap() if germline_numbered else {}
 
-    def get_pos_num(pos: str) -> int:
-        """Extract numeric position from label like 'H31' or 'H100A'."""
-        num_str = "".join(c for c in pos[1:] if c.isdigit())
-        return int(num_str) if num_str else 0
+    def get_pos_sort_key(pos: str) -> tuple:
+        """Extract sort key from position label like 'H31' or 'H100A'.
+        
+        Returns (numeric_part, letter_part) tuple for proper sorting.
+        H100A -> (100, 'A')
+        H100B -> (100, 'B')
+        H31 -> (31, '')
+        """
+        num_str = ""
+        letter_str = ""
+        for c in pos[1:]:
+            if c.isdigit():
+                num_str += c
+            else:
+                letter_str += c
+        return (int(num_str) if num_str else 0, letter_str)
 
     def get_region_seq(posmap: Dict, start_num: int, end_num: int, prefix: str) -> str:
         """Extract sequence for a region given start/end position numbers."""
         seq = ""
-        for pos in sorted(posmap.keys(), key=lambda x: get_pos_num(x)):
+        for pos in sorted(posmap.keys(), key=lambda x: get_pos_sort_key(x)):
             if pos.startswith(prefix):
-                num = get_pos_num(pos)
+                num = get_pos_sort_key(pos)[0]
                 if start_num <= num <= end_num:
                     seq += posmap[pos]
         return seq
@@ -272,10 +326,7 @@ def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int 
     lines.append(f"  {'CDR1':<10} {best_scores.get('cdr1_identity', 0):.1%}     {best_scores.get('n_cdr1', 0):<8}")
     lines.append(f"  {'CDR2':<10} {best_scores.get('cdr2_identity', 0):.1%}     {best_scores.get('n_cdr2', 0):<8}")
 
-    # Humanization classification
-    fr_id = best_scores["fr_identity"]
-    level = classify_humanization_level(fr_id)
-    lines.append(f"\n    Humanization level: {level}")
+    # Note: USAN classification is only shown in IMGT mode
 
     # Positions differing from best germline (potential back-mutations)
     q_map = numbered.posmap()
@@ -343,15 +394,25 @@ def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, t
             count = stats.get("count", 0)
             lines.append(f"  {region:<10} {identity:.1%}     {count:<8}")
 
-    # Humanization classification (USAN standard)
+    # Humanization classification (Academic estimate based on sequence identity)
+    # NOTE: Official USAN/INN naming is based on the technology used (transgenic mouse,
+    # CDR grafting, phage display, etc.), NOT on sequence identity thresholds.
+    # This is an academic convention commonly used in literature.
     fr_id = best_scores["fr_identity"]
-    if fr_id >= 0.85:
-        usan_class = "Humanized (-zumab)"
+    if fr_id >= 0.95:
+        usan_class = "Academic: likely Human-like"
+        usan_desc = "FR identity >= 95%"
+    elif fr_id >= 0.85:
+        usan_class = "Academic: likely Humanized-like"
+        usan_desc = "FR identity >= 85%"
     elif fr_id >= 0.70:
-        usan_class = "Chimeric (-xi-)"
+        usan_class = "Academic: likely Chimeric-like"
+        usan_desc = "FR identity >= 70%"
     else:
-        usan_class = "Murine (-o-)"
-    lines.append(f"\n    USAN naming class: {usan_class} (FR identity >= 85% = humanized)")
+        usan_class = "Academic: likely Murine-like"
+        usan_desc = "FR identity < 70%"
+    lines.append(f"\n    Humanization estimate: {usan_class} ({usan_desc})")
+    lines.append(f"    (Note: Official USAN/INN naming requires knowledge of manufacturing process)")
 
     # Region alignment
     if best_gene.numbered:

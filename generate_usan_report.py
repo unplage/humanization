@@ -42,13 +42,16 @@ def create_document():
     )
     
     doc.add_heading('1.2 USAN 抗体命名规则', level=2)
+    doc.add_paragraph(
+        '重要说明：USAN/INN 命名后缀是根据抗体的制备技术分配的，不是根据序列同源性百分比。'
+    )
     
     # Table 1: Naming rules
-    table1 = doc.add_table(rows=4, cols=4)
+    table1 = doc.add_table(rows=5, cols=4)
     table1.style = 'Table Grid'
     table1.alignment = WD_TABLE_ALIGNMENT.CENTER
     
-    headers = ['命名后缀', '人源化程度', 'FR 身份要求', '示例']
+    headers = ['命名后缀', '人源化程度', '制备技术', '示例']
     for i, header in enumerate(headers):
         cell = table1.rows[0].cells[i]
         cell.text = header
@@ -57,9 +60,10 @@ def create_document():
                 run.font.bold = True
     
     data = [
-        ['-zumab', '人源化 (Humanized)', 'FR ≥ 85%', 'Trastuzumab (曲妥珠单抗)'],
-        ['-xi-', '嵌合 (Chimeric)', 'FR 70-85%', 'Rituximab (利妥昔单抗)'],
-        ['-o-', '鼠源 (Murine)', 'FR < 70%', 'Muromonab (莫罗单抗)'],
+        ['-umab/-tug', '全人源 (Fully Human)', '转基因小鼠、噬菌体展示', 'Adalimumab (阿达木单抗)'],
+        ['-zumab/-zug', '人源化 (Humanized)', 'CDR 移植技术', 'Trastuzumab (曲妥珠单抗)'],
+        ['-ximab/-cig', '嵌合 (Chimeric)', '鼠 V 区 + 人 C 区融合', 'Rituximab (利妥昔单抗)'],
+        ['-omab', '鼠源 (Murine)', '杂交瘤等传统技术', 'Muromonab (莫罗单抗)'],
     ]
     
     for row_idx, row_data in enumerate(data, 1):
@@ -69,7 +73,7 @@ def create_document():
     doc.add_paragraph()
     
     doc.add_heading('1.3 USAN 是否是金标准', level=2)
-    doc.add_paragraph('是的，USAN 是抗体人源化评估的金标准之一，但需要注意：')
+    doc.add_paragraph('USAN 是抗体命名的官方标准，但需要理解以下关键点：')
     
     # Sub-items
     p = doc.add_paragraph()
@@ -79,15 +83,21 @@ def create_document():
     doc.add_paragraph('是监管机构（FDA、EMA、NMPA）认可的评估方法', style='List Bullet')
     
     p = doc.add_paragraph()
-    p.add_run('评估基础').bold = True
-    doc.add_paragraph('基于 IMGT 编号系统（国际免疫遗传学信息系统）', style='List Bullet')
-    doc.add_paragraph('评估 FR 身份（框架区同源性），不包括 CDR', style='List Bullet')
-    doc.add_paragraph('使用 WHO/INN 国际标准', style='List Bullet')
+    p.add_run('命名基于技术方法').bold = True
+    doc.add_paragraph('命名后缀根据制备技术分配（转基因小鼠、CDR移植、噬菌体展示等）', style='List Bullet')
+    doc.add_paragraph('不基于序列同源性百分比阈值', style='List Bullet')
+    doc.add_paragraph('需要了解制造工艺才能确定官方分类', style='List Bullet')
+    
+    p = doc.add_paragraph()
+    p.add_run('学术近似标准（非官方）').bold = True
+    doc.add_paragraph('文献中常用 FR 同源性阈值进行估计', style='List Bullet')
+    doc.add_paragraph('FR ≥ 95%：可能来自转基因小鼠/噬菌体展示', style='List Bullet')
+    doc.add_paragraph('FR ≥ 85%：可能来自 CDR 移植技术', style='List Bullet')
+    doc.add_paragraph('FR ≥ 70%：可能来自鼠源 V 区 + 人源 C 区', style='List Bullet')
     
     p = doc.add_paragraph()
     p.add_run('局限性').bold = True
     doc.add_paragraph('仅评估 FR 身份：不考虑 CDR 身份', style='List Bullet')
-    doc.add_paragraph('静态阈值：85% 的阈值是经验值，不是绝对标准', style='List Bullet')
     doc.add_paragraph('不考虑结构：仅基于序列比对，不考虑三维结构', style='List Bullet')
     doc.add_paragraph('不考虑功能：不评估结合亲力、稳定性等', style='List Bullet')
     
@@ -216,24 +226,25 @@ def create_document():
     doc.add_heading('3. 学术宣传最佳实践', level=1)
     
     doc.add_heading('3.1 论文/海报格式', level=2)
+    doc.add_paragraph('注意：命名基于制备技术，而非序列同源性百分比。')
     
     p = doc.add_paragraph()
     p.add_run('摘要部分：').bold = True
     p = doc.add_paragraph()
     p.style = 'Quote'
-    p.add_run('"该抗体采用 CDR 移植技术进行人源化，基于 IMGT 编号系统评估，重链 FR 同源性为 85.2%，轻链 FR 同源性为 92.3%，符合 USAN/WHO 人源化抗体标准。"')
+    p.add_run('"该抗体采用 CDR 移植技术进行人源化，基于 IMGT 编号系统评估，重链 FR 同源性为 85.2%，轻链 FR 同源性为 92.3%。根据制备技术，该抗体被命名为人源化抗体 (-zumab)。"')
     
     p = doc.add_paragraph()
     p.add_run('方法部分：').bold = True
     p = doc.add_paragraph()
     p.style = 'Quote'
-    p.add_run('"人源化程度评估采用 USAN/WHO 标准 (WHO, 2012)，使用 IMGT 编号系统 (Lefranc et al., 1999)。FR 同源性定义为框架区 (FR1+FR2+FR3，排除 FR4) 中与人 germline 相同残基的比例。"')
+    p.add_run('"人源化程度评估使用 IMGT 编号系统 (Lefranc et al., 1999)。FR 同源性定义为框架区 (FR1+FR2+FR3，排除 FR4) 中与人 germline 相同残基的比例。命名基于制备技术（WHO/INN 标准）。"')
     
     p = doc.add_paragraph()
     p.add_run('结果部分：').bold = True
     p = doc.add_paragraph()
     p.style = 'Quote'
-    p.add_run('"表 X 展示了人源化评估结果。根据 USAN 标准 (FR ≥ 85% = 人源化)，该抗体被归类为人源化抗体 (-zumab)。"')
+    p.add_run('"表 X 展示了人源化评估结果。该抗体 FR 同源性为 85.2%，基于 CDR 移植制备技术，被命名为人源化抗体 (-zumab)。"')
     
     doc.add_paragraph()
     
@@ -359,7 +370,8 @@ def create_document():
     doc.add_paragraph()
     
     doc.add_heading('5.2 命名规则', level=2)
-    doc.add_paragraph('USAN/WHO 标准：全人源抗体使用 -umab 后缀')
+    doc.add_paragraph('USAN/INN 标准：根据制备技术分配命名后缀')
+    doc.add_paragraph('2022年INN更新引入了新后缀（-tug, -zug, -cig），同时保留传统后缀（-umab, -zumab, -ximab）')
     
     # Table 9: Naming examples
     table9 = doc.add_table(rows=5, cols=3)
@@ -375,9 +387,9 @@ def create_document():
                 run.font.bold = True
     
     data9 = [
-        ['-umab', '全人源 (Fully Human)', 'Adalimumab (阿达木单抗)'],
-        ['-zumab', '人源化 (Humanized)', 'Trastuzumab (曲妥珠单抗)'],
-        ['-ximab', '嵌合 (Chimeric)', 'Rituximab (利妥昔单抗)'],
+        ['-umab/-tug', '全人源 (Fully Human)', 'Adalimumab (阿达木单抗)'],
+        ['-zumab/-zug', '人源化 (Humanized)', 'Trastuzumab (曲妥珠单抗)'],
+        ['-ximab/-cig', '嵌合 (Chimeric)', 'Rituximab (利妥昔单抗)'],
         ['-omab', '鼠源 (Murine)', 'Muromonab (莫罗单抗)'],
     ]
     
@@ -451,10 +463,10 @@ def create_document():
     
     data11 = [
         ['V 区来源', '人抗体库', '鼠 CDR + 人 FR'],
-        ['FR 同源性', '≥ 95%', '85-95%'],
-        ['CDR 同源性', '≥ 90%', '50-80%'],
+        ['FR 同源性（典型值）', '≥ 95%', '85-95%'],
+        ['CDR 同源性（典型值）', '≥ 90%', '50-80%'],
         ['免疫原性', '最低', '低'],
-        ['命名后缀', '-umab', '-zumab'],
+        ['命名后缀', '-umab/-tug', '-zumab/-zug'],
     ]
     
     for row_idx, row_data in enumerate(data11, 1):
