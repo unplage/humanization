@@ -19,11 +19,11 @@ from scripts.humanize.imgt_numbering import (
     IMGT_REGIONS
 )
 
-# Three antibodies to evaluate (sequences desensitized)
+# Three antibodies to evaluate
 antibodies = {
-    "Antibody_A": "X" * 122,
-    "Antibody_B": "X" * 123,
-    "Antibody_C": "X" * 123,
+    "C45H4_VH": "QVQLVQSGAEVKKPGASVKVSCKASGYTFTSYWMHWVRQAPGQGLEWIGQIDPSDSYTYYNEDFKDRATLTVDQSTSTAYMELSSLRSEDTAVYYCAKGYYDYDWGYAMDYWGQGTTVTVSS",
+    "E51H2_VH": "QVQLVQSGAEVKKPGSSVKVSCKDSDGTVFPIAYMSWVRQAPGQGLEWMGGIFPSIGRTIYGEKFEDRVTITADESTSTAYMELSSLRSEDTAVYYCARGRTYWEYYHAMDNWGQGTTVTVSS",
+    "E51H6_VH": "QVQLVQSGAEVKKPGSSVKVSCKDSDSEVFPIAYMSWVRQAPGQGFEWIGGIFPSIGRTIYGEKFEDRATLDADTSTNTAYMELSSLRSEDTAVYYCARGRTYWEYYHAMDNWGQGTTVTVSS",
 }
 
 def set_cell_shading(cell, color):
@@ -53,6 +53,27 @@ def get_usan_class(fr_identity):
     else:
         return "Academic: likely Murine-like"
 
+def get_imgt_region(pos_label):
+    """Get IMGT region from position label like 'H105' or 'H111A'."""
+    from scripts.humanize.imgt_numbering import IMGT_REGIONS
+    
+    # Extract numeric position
+    num_str = ""
+    for c in pos_label[1:]:
+        if c.isdigit():
+            num_str += c
+        else:
+            break
+    
+    if not num_str:
+        return "Unknown"
+    
+    num = int(num_str)
+    for region, (start, end) in IMGT_REGIONS.items():
+        if start <= num <= end:
+            return region
+    return "Unknown"
+
 def get_cdr_sequences(sequence):
     """Get CDR sequences using AbRSA IMGT numbering."""
     numbered = number_with_abrsa_imgt(sequence, 'H')
@@ -66,9 +87,18 @@ def get_cdr_sequences(sequence):
         if region.startswith('CDR'):
             seq = ''
             for num in range(start, end + 1):
+                # Add base position
                 label = f'H{num}'
                 aa = posmap.get(label, '-')
-                seq += aa
+                if aa != '-':
+                    seq += aa
+                
+                # Add insertions (e.g., H111A, H111B, etc.)
+                for letter in 'ABCDEFGHIJK':
+                    ins_label = f'H{num}{letter}'
+                    ins_aa = posmap.get(ins_label, None)
+                    if ins_aa:
+                        seq += ins_aa
             cdrs[region] = seq
     
     return cdrs
@@ -165,7 +195,8 @@ def evaluate_antibody(name, sequence):
             g_map_imgt = best_gene_imgt._imgt_posmap if hasattr(best_gene_imgt, '_imgt_posmap') else {}
             for pos in q_map_imgt:
                 if pos in g_map_imgt and q_map_imgt[pos] != g_map_imgt[pos]:
-                    imgt_diffs.append((pos, q_map_imgt[pos], g_map_imgt[pos], pos))
+                    region = get_imgt_region(pos)
+                    imgt_diffs.append((pos, q_map_imgt[pos], g_map_imgt[pos], region))
         
         results['imgt'] = {
             'best_gene': best_gene_imgt.gene_id,
