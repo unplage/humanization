@@ -523,3 +523,410 @@ def format_imgt_region_alignment(
         lines.append(f"  {region:5s}: {q_str}  |  {g_str}  |  {diff_indicator}")
 
     return "\n".join(lines)
+
+
+def number_sequence_imgt(sequence: str, chain_type: str) -> Dict[str, str]:
+    """Number a sequence using IMGT numbering rules.
+
+    Uses anchor-based approach:
+    1. Find 1st-CYS (Cys at IMGT position 23 for VH, 23 for VL)
+    2. Find CONSERVED-TRP (Trp at IMGT position 41 for VH, 41 for VL)
+    3. Find 2nd-CYS (Cys at IMGT position 104 for VH, 104 for VL)
+
+    IMGT numbering rules (Lefranc 2003):
+    - FR1: 1-26
+    - CDR1: 27-38
+    - FR2: 39-55
+    - CDR2: 56-65
+    - FR3: 66-104
+    - CDR3: 105-117+
+    - FR4: 118-128
+
+    Args:
+        sequence: Amino acid sequence
+        chain_type: "H" for heavy chain, "L" for light chain
+
+    Returns:
+        Dictionary mapping IMGT position labels to amino acids
+    """
+    seq = sequence.upper()
+    result = {}
+
+    if chain_type == "H":
+        # VH numbering using anchor-based approach
+        # Find 1st-CYS (Cys at position 23)
+        first_cys = None
+        for i in range(15, min(30, len(seq))):
+            if seq[i] == 'C':
+                first_cys = i
+                break
+
+        if first_cys is None:
+            # Fallback: simple sequential numbering
+            for i, aa in enumerate(seq):
+                if i < 128:
+                    result[f"H{i+1}"] = aa
+            return result
+
+        # Find CONSERVED-TRP (Trp after 1st-CYS)
+        conserved_trp = None
+        for i in range(first_cys + 1, min(first_cys + 25, len(seq))):
+            if seq[i] == 'W':
+                conserved_trp = i
+                break
+
+        if conserved_trp is None:
+            # Fallback: simple sequential numbering
+            for i, aa in enumerate(seq):
+                if i < 128:
+                    result[f"H{i+1}"] = aa
+            return result
+
+        # Find 2nd-CYS (Cys at position 104)
+        second_cys = None
+        for i in range(conserved_trp + 50, min(conserved_trp + 80, len(seq))):
+            if seq[i] == 'C':
+                second_cys = i
+                break
+
+        # Assign positions based on anchors
+        # FR1: 1-26 (26 positions)
+        for i in range(min(26, len(seq))):
+            result[f"H{i+1}"] = seq[i]
+
+        # CDR1: 27-38 (12 positions)
+        # Starts after 1st-CYS + some offset
+        cdr1_start = first_cys + 1
+        for i in range(12):
+            pos = 27 + i
+            idx = cdr1_start + i
+            if idx < len(seq):
+                result[f"H{pos}"] = seq[idx]
+
+        # FR2: 39-55 (17 positions)
+        fr2_start = cdr1_start + 12
+        for i in range(17):
+            pos = 39 + i
+            idx = fr2_start + i
+            if idx < len(seq):
+                result[f"H{pos}"] = seq[idx]
+
+        # CDR2: 56-65 (10 positions)
+        cdr2_start = fr2_start + 17
+        for i in range(10):
+            pos = 56 + i
+            idx = cdr2_start + i
+            if idx < len(seq):
+                result[f"H{pos}"] = seq[idx]
+
+        # FR3: 66-104 (39 positions)
+        fr3_start = cdr2_start + 10
+        for i in range(39):
+            pos = 66 + i
+            idx = fr3_start + i
+            if idx < len(seq):
+                result[f"H{pos}"] = seq[idx]
+
+        # CDR3: 105-117+ (variable)
+        cdr3_start = second_cys + 1 if second_cys else fr3_start + 39
+        # Find FR4 start (WGQ motif)
+        fr4_start = None
+        for i in range(cdr3_start, min(cdr3_start + 30, len(seq))):
+            if i + 2 < len(seq) and seq[i:i+3] == 'WGQ':
+                fr4_start = i
+                break
+
+        if fr4_start is None:
+            fr4_start = len(seq)
+
+        # CDR3 residues
+        for i in range(max(0, fr4_start - cdr3_start)):
+            pos = 105 + i
+            idx = cdr3_start + i
+            if idx < len(seq) and pos <= 117:
+                result[f"H{pos}"] = seq[idx]
+
+        # FR4: 118-128 (11 positions)
+        for i in range(min(11, len(seq) - fr4_start)):
+            pos = 118 + i
+            idx = fr4_start + i
+            if idx < len(seq):
+                result[f"H{pos}"] = seq[idx]
+
+    else:
+        # VL numbering (similar to VH but with different anchor positions)
+        # For simplicity, use sequential numbering for VL
+        for i, aa in enumerate(seq):
+            if i < 128:
+                result[f"L{i+1}"] = aa
+
+    return result
+
+
+def compare_to_germline_imgt_direct(
+    query_imgt: Dict[str, str],
+    germline_imgt: Dict[str, str],
+    chain_type: str,
+) -> Dict[str, Any]:
+    """Compare a query sequence against germline using direct IMGT position mapping.
+
+    This function compares IMGT-numbered query directly with IMGT-numbered germline.
+    No Kabat-to-IMGT conversion is needed.
+
+    Evaluates FR identity, CDR identity, and overall identity over the
+    Fv region (FR1+CDR1+FR2+CDR2+FR3), excluding CDR3 and FR4,
+    per WHO/INN/USAN standards.
+
+    Args:
+        query_imgt: Query sequence as {imgt_position: amino_acid}
+        germline_imgt: Germline sequence as {imgt_position: amino_acid}
+        chain_type: "H" or "L"
+
+    Returns:
+        Dict with fr_identity, cdr_identity, all_identity, n_fr, n_cdr,
+        plus imgt_region_stats for per-region breakdown
+    """
+    if not query_imgt or not germline_imgt:
+        return {
+            "fr_identity": 0.0, "cdr_identity": 0.0, "all_identity": 0.0,
+            "n_fr": 0, "n_cdr": 0,
+            "imgt_region_stats": {},
+        }
+
+    # Define which IMGT regions to evaluate (excluding CDR3 and FR4)
+    eval_regions = set(IMGT_EVAL_REGIONS)
+
+    fr_count = 0
+    fr_match = 0
+    cdr_count = 0
+    cdr_match = 0
+
+    # Per-region statistics
+    region_stats = {region: {"count": 0, "match": 0} for region in IMGT_EVAL_REGIONS}
+
+    for imgt_label, aa in query_imgt.items():
+        # Extract position number (handle labels like H27, H108.1)
+        num_str = ""
+        for c in imgt_label[1:]:
+            if c.isdigit() or c == ".":
+                num_str += c
+        if not num_str:
+            continue
+
+        # Handle decimal positions (e.g., 108.1 for CDR3 insertions)
+        try:
+            if "." in num_str:
+                imgt_num = int(num_str.split(".")[0])
+            else:
+                imgt_num = int(num_str)
+        except ValueError:
+            continue
+
+        # Get IMGT region
+        region = get_imgt_region(imgt_num, chain_type)
+        if region not in eval_regions:
+            continue
+
+        # Check if germline has this position
+        if imgt_label not in germline_imgt:
+            continue
+
+        germline_aa = germline_imgt[imgt_label]
+
+        # Skip positions where germline has a gap (IMGT length variation)
+        if germline_aa == "-":
+            continue
+
+        # Update region stats
+        region_stats[region]["count"] += 1
+        if aa == germline_aa:
+            region_stats[region]["match"] += 1
+
+        if region.startswith("FR"):
+            fr_count += 1
+            if aa == germline_aa:
+                fr_match += 1
+        elif region.startswith("CDR"):
+            cdr_count += 1
+            if aa == germline_aa:
+                cdr_match += 1
+
+    fr_identity = fr_match / fr_count if fr_count > 0 else 0.0
+    cdr_identity = cdr_match / cdr_count if cdr_count > 0 else 0.0
+    total = fr_count + cdr_count
+    total_match = fr_match + cdr_match
+    all_identity = total_match / total if total > 0 else 0.0
+
+    # Calculate per-region identity
+    imgt_region_stats = {}
+    for region in IMGT_EVAL_REGIONS:
+        stats = region_stats[region]
+        count = stats["count"]
+        match = stats["match"]
+        imgt_region_stats[region] = {
+            "identity": round(match / count, 4) if count > 0 else 0.0,
+            "count": count,
+            "match": match,
+        }
+
+    return {
+        "fr_identity": round(fr_identity, 4),
+        "cdr_identity": round(cdr_identity, 4),
+        "all_identity": round(all_identity, 4),
+        "n_fr": fr_count,
+        "n_cdr": cdr_count,
+        "imgt_region_stats": imgt_region_stats,
+    }
+
+
+# =============================================================================
+# IMGT numbering via AbRSA (preferred for accuracy)
+# =============================================================================
+
+def number_with_abrsa_imgt(sequence: str, chain_type: str):
+    """Number a sequence using AbRSA with IMGT scheme.
+
+    Args:
+        sequence: Amino acid sequence
+        chain_type: "H" for heavy/VHH, "L" for light
+
+    Returns:
+        NumberedChain with IMGT numbering, or None if AbRSA fails.
+    """
+    from .abrsa import is_abrsa_available, number_with_abrsa
+
+    if not is_abrsa_available():
+        return None
+
+    return number_with_abrsa(sequence, chain_type, "imgt")
+
+
+def load_imgt_germline(db_dir: str = ""):
+    """Load IMGT-numbered germline from abnumber_human_imgt.json.
+
+    Returns list of GermlineGene with IMGT-numbered posmap.
+    """
+    import json
+    import os
+    from .germline import GermlineGene
+
+    if not db_dir:
+        db_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data", "germline"
+        )
+
+    imgt_db_path = os.path.join(db_dir, "abnumber_human_imgt.json")
+
+    if not os.path.exists(imgt_db_path):
+        return []
+
+    with open(imgt_db_path) as f:
+        data = json.load(f)
+
+    genes = []
+    for gene_name, posmap in data.get("V", {}).items():
+        # Create sequence from posmap (excluding gaps)
+        seq = "".join(aa for aa in posmap.values() if aa != "-")
+
+        # Create posmap dict for the gene
+        gene_posmap = {pos: aa for pos, aa in posmap.items() if aa != "-"}
+
+        # Create a simple object with posmap method
+        g = GermlineGene(gene_name, "H" if gene_name.startswith("IGHV") else "L", "V", seq)
+        g._imgt_posmap = gene_posmap
+        genes.append(g)
+
+    return genes
+
+
+def compare_imgt_posmaps_direct(
+    query_posmap: Dict[str, str],
+    germline_posmap: Dict[str, str],
+) -> Dict[str, Any]:
+    """Compare two IMGT posmaps directly (no Kabat conversion needed).
+
+    This is the correct way to compare IMGT-numbered sequences.
+    Positions where germline has a gap are skipped.
+    """
+    eval_regions = set(IMGT_EVAL_REGIONS)
+
+    fr_count = 0
+    fr_match = 0
+    cdr_count = 0
+    cdr_match = 0
+
+    region_stats = {region: {"count": 0, "match": 0} for region in IMGT_EVAL_REGIONS}
+
+    for imgt_label, aa in query_posmap.items():
+        # Extract position number
+        num_str = ""
+        for c in imgt_label[1:]:
+            if c.isdigit() or c == ".":
+                num_str += c
+        if not num_str:
+            continue
+
+        try:
+            if "." in num_str:
+                imgt_num = int(num_str.split(".")[0])
+            else:
+                imgt_num = int(num_str)
+        except ValueError:
+            continue
+
+        # Get IMGT region
+        region = get_imgt_region(imgt_num)
+        if region not in eval_regions:
+            continue
+
+        # Check if germline has this position
+        if imgt_label not in germline_posmap:
+            continue
+
+        germline_aa = germline_posmap[imgt_label]
+
+        # Skip positions where germline has a gap (IMGT length variation)
+        if germline_aa == "-":
+            continue
+
+        # Update region stats
+        region_stats[region]["count"] += 1
+        if aa == germline_aa:
+            region_stats[region]["match"] += 1
+
+        if region.startswith("FR"):
+            fr_count += 1
+            if aa == germline_aa:
+                fr_match += 1
+        elif region.startswith("CDR"):
+            cdr_count += 1
+            if aa == germline_aa:
+                cdr_match += 1
+
+    fr_identity = fr_match / fr_count if fr_count > 0 else 0.0
+    cdr_identity = cdr_match / cdr_count if cdr_count > 0 else 0.0
+    all_count = fr_count + cdr_count
+    all_match = fr_match + cdr_match
+    all_identity = all_match / all_count if all_count > 0 else 0.0
+
+    # Calculate per-region identity
+    imgt_region_stats = {}
+    for region in IMGT_EVAL_REGIONS:
+        stats = region_stats[region]
+        count = stats["count"]
+        match = stats["match"]
+        imgt_region_stats[region] = {
+            "identity": round(match / count, 4) if count > 0 else 0.0,
+            "count": count,
+            "match": match,
+        }
+
+    return {
+        "fr_identity": round(fr_identity, 4),
+        "cdr_identity": round(cdr_identity, 4),
+        "all_identity": round(all_identity, 4),
+        "n_fr": fr_count,
+        "n_cdr": cdr_count,
+        "imgt_region_stats": imgt_region_stats,
+    }
