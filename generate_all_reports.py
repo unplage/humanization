@@ -329,6 +329,88 @@ def add_antibody_section(doc, name, sequence, chain_type, results):
     doc.add_page_break()
 
 
+def create_combined_report(all_results, output_path):
+    """Create a combined Word report with summary table and all antibody sections."""
+    doc = Document()
+    
+    # Title
+    title = doc.add_heading('Antibody Panel - Humanization Evaluation Report', level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Overview
+    doc.add_heading('Overview', level=1)
+    doc.add_paragraph(f'Total antibodies evaluated: {len(all_results)}')
+    doc.add_paragraph(f'Evaluation methods: Kabat numbering + IMGT numbering (WHO/INN/USAN)')
+    doc.add_paragraph('Excluded regions: CDR3 (donor) and FR4 (human J gene)')
+    doc.add_paragraph('Note: Official USAN/INN naming requires manufacturing process knowledge')
+    
+    doc.add_page_break()
+    
+    # ==================== Summary Tables ====================
+    doc.add_heading('Summary', level=1)
+    
+    # Kabat summary table
+    doc.add_heading('Kabat Numbering Summary', level=2)
+    table_kabat = doc.add_table(rows=1, cols=6)
+    table_kabat.style = 'Table Grid'
+    table_kabat.alignment = WD_TABLE_ALIGNMENT.CENTER
+    
+    headers_kabat = ['Antibody', 'Chain', 'Best Germline', 'FR id', 'CDR id', '# Diff']
+    for i, header in enumerate(headers_kabat):
+        cell = table_kabat.rows[0].cells[i]
+        cell.text = header
+        cell.paragraphs[0].runs[0].bold = True
+        set_cell_shading(cell, '4472C4')
+        cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+    
+    for name, sequence, chain_type, results in all_results:
+        kabat = results['kabat']
+        row = table_kabat.add_row()
+        row.cells[0].text = name
+        row.cells[1].text = 'VH' if chain_type == 'H' else 'VL'
+        row.cells[2].text = kabat['best_gene']
+        row.cells[3].text = f"{kabat['fr_identity']*100:.1f}%"
+        row.cells[4].text = f"{kabat['cdr_identity']*100:.1f}%"
+        row.cells[5].text = str(kabat['n_diff'])
+    
+    doc.add_paragraph()
+    
+    # IMGT summary table
+    doc.add_heading('IMGT Numbering Summary (WHO/INN/USAN)', level=2)
+    table_imgt = doc.add_table(rows=1, cols=7)
+    table_imgt.style = 'Table Grid'
+    table_imgt.alignment = WD_TABLE_ALIGNMENT.CENTER
+    
+    headers_imgt = ['Antibody', 'Chain', 'Best Germline', 'FR id', 'CDR id', '# Diff', 'Estimate']
+    for i, header in enumerate(headers_imgt):
+        cell = table_imgt.rows[0].cells[i]
+        cell.text = header
+        cell.paragraphs[0].runs[0].bold = True
+        set_cell_shading(cell, '548235')
+        cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+    
+    for name, sequence, chain_type, results in all_results:
+        imgt = results['imgt']
+        row = table_imgt.add_row()
+        row.cells[0].text = name
+        row.cells[1].text = 'VH' if chain_type == 'H' else 'VL'
+        row.cells[2].text = imgt['best_gene']
+        row.cells[3].text = f"{imgt['fr_identity']*100:.1f}%"
+        row.cells[4].text = f"{imgt['cdr_identity']*100:.1f}%"
+        row.cells[5].text = str(imgt['n_diff'])
+        row.cells[6].text = imgt.get('usan_class', 'N/A')
+    
+    doc.add_paragraph()
+    
+    # ==================== Individual Antibody Sections ====================
+    for name, sequence, chain_type, results in all_results:
+        add_antibody_section(doc, name, sequence, chain_type, results)
+    
+    # Save document
+    doc.save(output_path)
+    print(f"  总报告已保存: {output_path}")
+
+
 def main():
     # Parse input FASTA
     fasta_path = sys.argv[1] if len(sys.argv) > 1 else "data/examples/antibody_panel.fasta"
@@ -343,6 +425,8 @@ def main():
     os.makedirs("outputs/reports", exist_ok=True)
     
     print(f"正在评估 {len(records)} 个抗体序列...")
+    
+    all_results = []
     
     # Generate individual report for each sequence
     for name, sequence in records:
@@ -362,6 +446,7 @@ def main():
             chain_type = "L"
         
         results = evaluate_antibody(name, sequence, chain_type)
+        all_results.append((name, sequence, chain_type, results))
         
         # Create individual Word document
         print(f"  生成 {name} 报告...")
@@ -393,6 +478,11 @@ def main():
         output_path = f"outputs/reports/{name}_report.docx"
         doc.save(output_path)
         print(f"  报告已保存: {output_path}")
+    
+    # Generate combined summary report
+    print("\n  生成总报告...")
+    combined_path = "outputs/reports/combined_report.docx"
+    create_combined_report(all_results, combined_path)
     
     print("\n所有报告生成完成！")
 
