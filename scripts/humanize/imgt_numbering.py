@@ -780,24 +780,32 @@ def compare_to_germline_imgt_direct(
 
 
 # =============================================================================
-# IMGT numbering via AbRSA (preferred for accuracy)
+# IMGT numbering via external tools (ANARCI preferred, AbRSA fallback)
 # =============================================================================
 
 def number_with_abrsa_imgt(sequence: str, chain_type: str):
-    """Number a sequence using AbRSA with IMGT scheme.
+    """Number a sequence using IMGT scheme.
+
+    Tries ANARCI first (more reliable), then AbRSA, then returns None.
 
     Args:
         sequence: Amino acid sequence
         chain_type: "H" for heavy/VHH, "L" for light
 
     Returns:
-        NumberedChain with IMGT numbering, or None if AbRSA fails.
+        NumberedChain with IMGT numbering, or None if all tools fail.
     """
-    from .abrsa import is_abrsa_available, number_with_abrsa
+    # 1. Try ANARCI first (more reliable for IMGT)
+    from .anarci_adapter import is_anarci_available, number_with_anarci_imgt
+    if is_anarci_available():
+        result = number_with_anarci_imgt(sequence, chain_type)
+        if result is not None:
+            return result
 
+    # 2. Fallback to AbRSA
+    from .abrsa import is_abrsa_available, number_with_abrsa
     if not is_abrsa_available():
         return None
-
     return number_with_abrsa(sequence, chain_type, "imgt")
 
 
