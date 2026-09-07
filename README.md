@@ -48,6 +48,8 @@ python3 scripts/humanize/cli.py setup-check
 python3 tests/test_pipeline.py
 ```
 
+**注意**：VH 编号默认使用 ANARCI（如已安装），VL 使用内置引擎。无需额外配置，自动检测链类型。
+
 详细使用手册见 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**。
 
 ---
@@ -84,6 +86,7 @@ python3 tests/test_pipeline.py
 |------|------|
 | **Fab / VHH 双格式** | 自动链型检测；VHH hallmark（Kabat 37/44/45/47）识别并全程保护 |
 | **零依赖便携核心** | anchor-based Kabat 编号引擎（纯标准库）；内置 373 V + 28 J 人源 germline |
+| **ANARCI 编号增强** | 优先调用 [ANARCI](https://github.com/oxford/ANARCI)（Dunbar & Deane 2016）进行 Kabat/IMGT 编号，自动检测链类型（VH/VL/VHH），回退到内置引擎 |
 | **AbRSA 编号增强** | 可选调用 [AbRSA](https://github.com/CAO-Yang-1/AbRSA)（Li et al. 2019）进行 CDR 分区，自动回退到内置引擎；5 模型共识避免单模型偏差 |
 | **多策略 Germline 选择** | 9 种策略（FR/CDR/综合/CVI/最小突变/Adimab频率/Pioneer频率/3轴/自动），基于 BI 2024 和治疗性抗体数据优化 |
 | **多套 CDR 定义** | Kabat / Chothia / AbM / IMGT 四套边界同时报告 |
@@ -97,6 +100,45 @@ python3 tests/test_pipeline.py
 | **可开发性优化（Step 4）** | 高风险位点检测 → 结构约束分类（埋藏/CDR接触/表面暴露）→ MPNN 优化表面暴露位点 |
 | **专业报告** | Markdown + **Word（.docx）** + JSON + 逐位点 CSV + variants FASTA |
 | **验证基准** | 4D5→曲妥珠单抗、A4.6.1→贝伐珠单抗、**cAb-Lys3→hCAb-Lys3（VHH）** 回测 + **25 例 HumAb25 规模化验证** |
+
+---
+
+## 编号引擎策略
+
+本 pipeline 采用多引擎组合策略，确保编号准确性：
+
+### Kabat 编号
+
+| 链类型 | 首选引擎 | Fallback | 说明 |
+|--------|----------|----------|------|
+| **VH** | ANARCI | AbRSA → 内置引擎 | ANARCI HMM 准确识别 CDR2 插入位点（H52A） |
+| **VL** | 内置引擎 | - | ANARCI 有 VL CDR3 bug（L91-L95 错位到 L96-L97） |
+| **VHH** | ANARCI | AbRSA → 内置引擎 | 自动检测 VHH hallmark（Kabat 37/44/45/47） |
+
+### IMGT 编号
+
+| 链类型 | 首选引擎 | Fallback | 说明 |
+|--------|----------|----------|------|
+| **VH/VL** | ANARCI | AbRSA → Kabat 转换 | ANARCI 原生支持 IMGT，CDR2 gap 处理正确 |
+
+### 关键修复
+
+1. **H52A 插入位点**：AbRSA 错误地将 CDR2 插入放在 H56A（非标准），ANARCI 正确放在 H52A
+2. **VL 链类型检测**：通过 ANARCI HMM 分类结果（chain_type='K'/'L'）自动识别轻链，避免误分类为重链
+3. **VL CDR3 编号**：内置引擎正确处理 L89-L95，ANARCI 有已知 bug
+
+### 安装 ANARCI（可选）
+
+```bash
+# 服务器模式自动安装
+bash scripts/install.sh --full
+
+# 或手动安装
+pip install anarci
+
+# 验证安装
+python3 -c "from anarci import anarci; print('ANARCI available')"
+```
 
 ---
 
@@ -123,6 +165,10 @@ python3 tests/test_pipeline.py
 ```bash
 bash scripts/install.sh --full     # ANARCI + IgBLAST + NCBI germline
 conda activate humanize
+
+# ANARCI 现在是 VH 编号的首选引擎（自动链类型检测）
+# 便携模式下如已安装 ANARCI，会自动使用
+pip install anarci  # 可选：提升 VH 编号准确性
 
 # 结构模式（AlphaFold3 + ProteinMPNN + 抗原复合物）
 python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
@@ -182,6 +228,7 @@ grep -A25 "Back-mutation candidates" demo/humanization_report.md
 ```
 scripts/humanize/
 ├── numbering.py       # anchor-based Kabat 编号引擎（零依赖，核心）
+├── anarci_adapter.py  # ANARCI 编号适配器（Kabat/IMGT，自动链类型检测）
 ├── abrsa.py           # AbRSA 外部工具封装（可选，CDR 分区增强）
 ├── germline.py        # germline 加载/选择（NCBI FASTA 优先，内置后备）
 ├── graft.py           # CDR 移植（4 方案）+ 变体组装 + FR indel 处理
