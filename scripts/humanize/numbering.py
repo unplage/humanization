@@ -117,11 +117,35 @@ def _find_fr2_trp(s: str, start: int, end: int, chain_type: str) -> Optional[int
 
 def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
     """Number a heavy chain sequence using Kabat numbering.
-    
-    Tries AbRSA first for accurate CDR delimitation, falls back to built-in
-    anchor-based engine if AbRSA is unavailable.
+
+    Tries ANARCI first (more accurate), then AbRSA, then built-in engine.
     """
-    # Try AbRSA first for more accurate numbering
+    # 1. Try ANARCI first (more accurate for standard Kabat numbering)
+    from .anarci_adapter import is_anarci_available, number_with_anarci_imgt
+    if is_anarci_available():
+        # For Kabat, we still use ANARCI with kabat scheme
+        try:
+            from anarci import anarci as _anarci_fn
+            result_anarci = _anarci_fn([('query', seq.upper().strip())], scheme='kabat', output=False)
+            if result_anarci[0]:
+                # Check ANARCI HMM chain type classification to avoid
+                # mis-numbering a VL sequence as heavy (causes classify_sequences
+                # to detect vhh_pair instead of fab).
+                try:
+                    _hit = result_anarci[1][0][0]
+                    _detected = _hit.get('chain_type', 'H')
+                except (IndexError, TypeError, AttributeError):
+                    _detected = 'H'
+                if _detected not in ('K', 'L'):
+                    from .anarci_adapter import _anarci_to_numbered_chain
+                    result = _anarci_to_numbered_chain(result_anarci, 'H', seq)
+                    if result is not None:
+                        result.species_hint = species_hint
+                        return result
+        except Exception:
+            pass
+
+    # 2. Fallback to AbRSA
     if is_abrsa_available():
         result = number_with_abrsa(seq, "H", "kabat")
         if result is not None:
@@ -345,18 +369,12 @@ def _find_j_anchor(s: str, start: int, end: int, chain_type: str) -> Optional[in
 
 def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
     """Number a light chain sequence using Kabat numbering.
-    
-    Tries AbRSA first for accurate CDR delimitation, falls back to built-in
-    anchor-based engine if AbRSA is unavailable.
+
+    Uses built-in engine (ANARCI has VL CDR3 bug that shifts positions).
     """
-    # Try AbRSA first for more accurate numbering
-    if is_abrsa_available():
-        result = number_with_abrsa(seq, "L", "kabat")
-        if result is not None:
-            result.species_hint = species_hint
-            return result
-    
-    # Fallback to built-in anchor-based engine
+    # Note: ANARCI has a known bug with VL CDR3 numbering (shifts L91-L95 to L96-L97).
+    # AbRSA also has issues with VL numbering. So we use the built-in engine directly.
+    # The built-in engine correctly handles VL CDR3 at positions L89-L95.
     s = seq.upper().strip()
     n = len(s)
     warnings: List[str] = []
