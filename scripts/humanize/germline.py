@@ -122,24 +122,90 @@ def load_germline_db(db_dir: str) -> GermlineDB:
     )
 
 
-def _load_bundled_json(path: str) -> GermlineDB:
-    import json
-    with open(path) as fh:
-        blob = json.load(fh)
+# Bump when the numbering output would change (engine behaviour, position
+# fixes); invalidates the on-disk numbered-germline cache.
+_NUMBERING_CACHE_VERSION = 1
+_DB_MEMORY_CACHE: Dict[str, "GermlineDB"] = {}
+
+
+def _numbering_engine_tag() -> str:
+    try:
+        from .anarci_adapter import is_anarci_available
+        return "anarci" if is_anarci_available() else "builtin"
+    except Exception:
+        return "builtin"
+
+
+def _numbering_cache_key(path: str) -> str:
+    import hashlib
+    with open(path, "rb") as fh:
+        digest = hashlib.sha1(fh.read()).hexdigest()[:16]
+    return f"{digest}_{_numbering_engine_tag()}_v{_NUMBERING_CACHE_VERSION}"
+
+
+def _build_genes_from_maps(blob: dict, maps: dict) -> List[GermlineGene]:
+    """Rebuild germline genes from cached {pos: aa} maps (no external tools)."""
     genes: List[GermlineGene] = []
     for gene, pmap in blob["V"].items():
         ctype = "H" if gene.startswith("IGHV") else "L"
         seq = "".join(pmap.values())
         g = GermlineGene(gene, ctype, "V", seq)
-        # Re-number with the (fixed) portable engine so H93/H94 are
+        cached = maps.get("V", {}).get(gene)
+        g.numbered = _chain_from_map(seq, cached, ctype) if cached else None
+        genes.append(g)
+    for gene, pmap in blob["J"].items():
+        ctype = "H" if gene.startswith("IGHJ") else "L"
+        seq = "".join(pmap.values())
+        g = GermlineGene(gene, ctype, "J", seq)
+        cached = maps.get("J", {}).get(gene) or pmap
+        g.numbered = _chain_from_map(seq, cached, ctype)
+        genes.append(g)
+    return genes
+
+
+def _load_bundled_json(path: str) -> GermlineDB:
+    import json
+    key = _numbering_cache_key(path)
+    if key in _DB_MEMORY_CACHE:
+        return _DB_MEMORY_CACHE[key]
+    with open(path) as fh:
+        blob = json.load(fh)
+
+    cache_path = os.path.join(os.path.dirname(path), ".cache",
+                              f"numbered_kabat_{key}.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as fh:
+                cached = json.load(fh)
+            if (cached.get("version") == _NUMBERING_CACHE_VERSION
+                    and cached.get("key") == key):
+                genes = _build_genes_from_maps(blob, cached["maps"])
+                db = GermlineDB(
+                    v_genes=[g for g in genes if g.kind == "V"],
+                    j_genes=[g for g in genes if g.kind == "J"],
+                    source_dir="bundled:" + path,
+                )
+                _DB_MEMORY_CACHE[key] = db
+                return db
+        except (ValueError, KeyError, OSError):
+            pass  # corrupt/stale cache -> rebuild
+
+    # Slow path: number every V gene (ANARCI when available). This is the
+    # dominant load cost, so the result is cached on disk keyed by the file
+    # content, the numbering engine and the cache version.
+    genes: List[GermlineGene] = []
+    maps: Dict[str, Dict[str, Optional[dict]]] = {"V": {}, "J": {}}
+    for gene, pmap in blob["V"].items():
+        ctype = "H" if gene.startswith("IGHV") else "L"
+        seq = "".join(pmap.values())
+        g = GermlineGene(gene, ctype, "V", seq)
+        # Re-number with the (fixed) portable/ANARCI engine so H93/H94 are
         # present and CDR3 starts at H95 (Kabat standard).
         try:
-            if ctype == "H":
-                g.numbered = number_heavy(seq)
-            else:
-                g.numbered = number_light(seq)
+            g.numbered = number_heavy(seq) if ctype == "H" else number_light(seq)
         except ValueError:
             g.numbered = None
+        maps["V"][gene] = g.numbered.posmap() if g.numbered else None
         genes.append(g)
     for gene, pmap in blob["J"].items():
         ctype = "H" if gene.startswith("IGHJ") else "L"
@@ -149,12 +215,26 @@ def _load_bundled_json(path: str) -> GermlineDB:
         # number_heavy/number_light engines cannot number them; keep the
         # curated JSON position map instead.
         g.numbered = _chain_from_map(seq, pmap, ctype)
+        maps["J"][gene] = dict(pmap)
         genes.append(g)
-    return GermlineDB(
+
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        tmp = cache_path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"version": _NUMBERING_CACHE_VERSION, "key": key,
+                       "maps": maps}, fh)
+        os.replace(tmp, cache_path)
+    except OSError:
+        pass
+
+    db = GermlineDB(
         v_genes=[g for g in genes if g.kind == "V"],
         j_genes=[g for g in genes if g.kind == "J"],
         source_dir="bundled:" + path,
     )
+    _DB_MEMORY_CACHE[key] = db
+    return db
 
 
 def _chain_from_map(seq: str, pmap: dict, ctype: str) -> Optional[NumberedChain]:

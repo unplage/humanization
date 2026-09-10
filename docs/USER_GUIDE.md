@@ -103,6 +103,10 @@ python3 scripts/humanize/cli.py run \
   --design-panel \                     # 输出结构引导变体面板 V_opt
   --design-panel-steps N \             # 面板步数（默认 3）
   --interactive-indel \                # 交互确认 FR 插入位点
+  --immunogenicity-json <epitopes.json> \ # 预计算 {Kabat位置: 分数} MHC-II 表位图
+  --netmhciipan <bin> \                # 调用 NetMHCIIpan 计算逐位点表位分
+  --netmhciipan-alleles "HLA-..." \    # HLA 等位基因列表
+  --netmhciipan-env <conda-env> \      # NetMHCIIpan 所在 conda 环境
   --mpnn-mode off|local \              # ProteinMPNN 模式
   --mpnn-script <path> \               # protein_mpnn.py 路径
 
@@ -311,6 +315,29 @@ python3 scripts/humanize/cli.py run --input seq.fasta --biophi-env biophi
 ```
 
 报告新增逐变体 Sapiens 均分与 OASis 身份，与 germline 同源性指标互相印证。
+
+### 5.7 免疫原性精化（MHC-II 表位，可选）
+
+默认免疫原性项为"表面暴露 × germline 稀有度"代理。可提供逐位点 MHC-II 表位
+分数来替代/增强（供体残基在强表位内 → 回复以降低 ADA 风险的收益提高）：
+
+```bash
+# (a) 预计算 {Kabat位置: 0-1 分数} 的 JSON
+python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
+  --immunogenicity-json epitopes.json
+
+# (b) 直接调用 NetMHCIIpan（服务器）
+python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
+  --netmhciipan /path/netMHCIIpan --netmhciipan-env mhc \
+  --netmhciipan-alleles "HLA-DRB1*01:01,HLA-DRB1*04:01,HLA-DRB1*15:01"
+```
+
+- 分数映射：NetMHCIIpan `%Rank < 2`（强结合）≈ 0.8–1.0；`%Rank ≥ 10` 记 0
+- 报告新增 `immuno` 列；JSON 中每位点 `immunogenicity_score`
+- 工具/文件缺失时静默回退到默认代理，不中断流程
+
+> 性能提示：germline 编号结果缓存在 `data/germline/.cache/`（按文件内容 + 编号
+> 引擎 + 版本失效）。首次载入约 5s，之后近即时；单 Fab 端到端约 18s → 约 9s。
 
 ---
 

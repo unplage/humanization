@@ -1214,6 +1214,54 @@ def test_design_panel():
           all(len(v.backmutations) == len(set(v.backmutations)) for v in panel))
 
 
+def test_immunogenicity_integration():
+    """Optional per-position MHC-II scores raise the humanization benefit."""
+    print("immunogenicity integration")
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor = number_heavy(M4D5_VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    base = analyze_backmutations(donor, vg)
+    cand = next((c for c in base.candidates if c.position == "H48"), None)
+    if cand is None:
+        check("immunogenicity test has candidate H48", False)
+        return
+    immuno = {cand.position: 0.9}
+    res = analyze_backmutations(donor, vg, immunogenicity=immuno)
+    c = next(x for x in res.candidates if x.position == cand.position)
+    check("immunogenicity score stored", c.immunogenicity_score == 0.9,
+          str(c.immunogenicity_score))
+    check("benefit raised by epitope score", c.benefit_score > cand.benefit_score,
+          f"{c.benefit_score} vs {cand.benefit_score}")
+    check("composite raised by benefit", c.composite >= cand.composite,
+          f"{c.composite} vs {cand.composite}")
+    other = next(x for x in res.candidates if x.position != cand.position)
+    check("unspecified positions keep no score", other.immunogenicity_score is None)
+
+
+def test_netmhciipan_parser():
+    """Column-driven NetMHCIIpan xls parser maps peptides to Kabat positions."""
+    print("NetMHCIIpan parser")
+    from humanize.immunogenicity import parse_netmhciipan_xls
+    donor = number_heavy(M4D5_VH)
+    with tempfile.NamedTemporaryFile("w", suffix=".xls", delete=False) as fh:
+        fh.write("# NetMHCIIpan test output\n")
+        fh.write("Pos\tPeptide\tCore\tAffinity(nM)\t%Rank\tBindLevel\n")
+        fh.write("1\tEVQLQQSGPELVKPG\tX\t1000\t0.5\tSB\n")
+        fh.write("2\tVQLQQSGPELVKPGT\tX\t5000\t8.0\tWB\n")
+        fh.write("3\tQLQQSGPELVKPGAS\tX\t50000\t25.0\t\n")
+        path = fh.name
+    scores = parse_netmhciipan_xls(path, donor)
+    os.unlink(path)
+    check("strong binder scored high", scores.get("H1", 0) >= 0.9,
+          str(scores.get("H1")))
+    check("weak binder scored lower", 0 < scores.get("H16", 0) < 0.9,
+          str(scores.get("H16")))
+    check("non-binder (%Rank>10) dropped",
+          all(v > 0 for v in scores.values()) and "H3" in scores)
+    check("peptide window mapped past its start", scores.get("H10", 0) >= 0.9,
+          str(scores.get("H10")))
+
+
 def test_end_to_end():
     print("end-to-end")
     with tempfile.TemporaryDirectory() as out:
@@ -1267,6 +1315,8 @@ def main():
     test_clash_detection()
     test_structural_score_and_plddt()
     test_design_panel()
+    test_immunogenicity_integration()
+    test_netmhciipan_parser()
     test_end_to_end()
     print()
     if FAILURES:

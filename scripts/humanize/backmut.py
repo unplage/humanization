@@ -108,6 +108,7 @@ class BackMutationCandidate:
     empirical_ddG: Optional[float] = None   # kcal/mol from experiments
     empirical_n: int = 0
     empirical_note: str = ""
+    immunogenicity_score: Optional[float] = None  # optional MHC-II epitope proxy
 
 
 @dataclass
@@ -288,6 +289,7 @@ def analyze_backmutations(
     calibration: Optional[Dict[str, dict]] = None,
     indel_overrides: Optional[Dict[str, str]] = None,
     j_gene: Optional[GermlineGene] = None,
+    immunogenicity: Optional[Dict[str, float]] = None,
 ) -> BackMutationResult:
     """Score all framework positions where donor != chosen germline.
 
@@ -418,13 +420,21 @@ def analyze_backmutations(
         structural *= _plddt_factor(plddt_val)
 
         # ---- immunogenicity benefit ----
+        # Default: surface-exposure x germline-rarity proxy. When a per-position
+        # MHC-II epitope score is supplied (NetMHCIIpan or a precomputed map),
+        # it dominates: a donor residue inside a strong predicted T-cell
+        # epitope gives a high benefit for reverting to the human germline.
         exposure = structure.exposure(pos)
-        # rare donor residue among germlines -> more human-like to revert
         rare = 1.0 - conservation_val
-        benefit = 0.3 + 0.5 * exposure * rare
+        epitope = immunogenicity.get(pos) if immunogenicity else None
+        if epitope is not None:
+            benefit = 0.3 + 0.5 * (0.4 * exposure * rare + 0.6 * float(epitope))
+        else:
+            benefit = 0.3 + 0.5 * exposure * rare
+        benefit = max(0.3, min(0.8, benefit))
         # 无结构特征位点: 人源化收益低，但仍保留 conservation 相对梯度
-        # （仅设上限，不抹平排序信息）
-        if not features:
+        # （仅设上限，不抹平排序信息；表位证据存在时不压低）
+        if not features and epitope is None:
             benefit = min(benefit, 0.50)
 
         # ---- chemical score (developability) ----
@@ -534,6 +544,10 @@ def analyze_backmutations(
             rationale.append(empirical_note)
         if demoted_note:
             rationale.append(demoted_note)
+        if epitope is not None and epitope >= 0.5:
+            rationale.append(
+                f"immunogenicity: donor residue in predicted MHC-II epitope "
+                f"(score {epitope:.2f}); reverting lowers ADA risk")
 
         candidates.append(BackMutationCandidate(
             position=pos,
@@ -551,6 +565,7 @@ def analyze_backmutations(
             antigen_contact=ag_contact,
             empirical_ddG=empirical_ddG,
             empirical_n=empirical_n,
+            immunogenicity_score=epitope,
         ))
 
     # ---- FR4 structural reversion (only with J gene + structure data) ----

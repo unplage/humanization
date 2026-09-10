@@ -246,6 +246,28 @@ python3 scripts/humanize/cli.py run --input ab.fasta --outdir outputs \
   --design-panel --design-panel-steps 3
 ```
 
+### 免疫原性精化（可选，MHC-II 表位）
+
+默认免疫原性项是"表面暴露 × germline 稀有度"代理。可选用真实 MHC-II 表位预测
+替代/增强：提供预计算的 `{Kabat位置: 分数}` JSON，或让 pipeline 调用 NetMHCIIpan：
+
+```bash
+# 预计算表位分数
+python3 scripts/humanize/cli.py run --input ab.fasta --outdir outputs \
+  --immunogenicity-json epitopes.json
+
+# 或直接调用 NetMHCIIpan（服务器）
+python3 scripts/humanize/cli.py run --input ab.fasta --outdir outputs \
+  --netmhciipan /path/netMHCIIpan --netmhciipan-env mhc \
+  --netmhciipan-alleles "HLA-DRB1*01:01,HLA-DRB1*04:01,HLA-DRB1*15:01"
+```
+
+供体残基落在强预测表位内时，该位点"回复以降低 ADA 风险"的收益提高；
+报告新增 `immuno` 列，缺失工具/文件时静默回退到代理。
+
+> 性能：germline 编号结果会缓存到 `data/germline/.cache/`（内容/引擎/版本变化
+> 自动失效），首次约 5s、之后近即时，端到端由约 18s 降到约 9s。
+
 ---
 
 ## 回复突变设计逻辑（核心）
