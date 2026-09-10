@@ -2,7 +2,9 @@
 
 ## 0. Germline selection strategy (auto routing)
 
-After large-scale backtest optimization (31 mouse→humanized pairs, 9 strategies):
+After large-scale backtest optimization (mouse→humanized pairs, 9 strategies;
+driver: `tests/backtest_large.py`, which requires the non-bundled
+`data/benchmarks/humanized_pairs.csv`):
 
 | Strategy | Precision | Recall | F1 |
 |----------|-----------|--------|-----|
