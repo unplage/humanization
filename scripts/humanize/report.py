@@ -122,6 +122,9 @@ def write_json(path: str, result: RunResult) -> None:
                     "rationale": c.rationale,
                     "empirical_ddG": c.empirical_ddG,
                     "empirical_n": c.empirical_n,
+                    "buried": c.buried,
+                    "cdr_contact": c.cdr_contact,
+                    "antigen_contact": c.antigen_contact,
                 }
                 for c in rep.backmut.candidates
             ],

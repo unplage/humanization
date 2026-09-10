@@ -62,6 +62,7 @@ def cmd_run(args):
             script=args.mpnn_script or "",
             outdir=os.path.join(args.outdir, "mpnn"),
         ),
+        interactive_indel=getattr(args, 'interactive_indel', False),
     )
     
     # Determine which step is being run and create appropriate subdirectory
@@ -265,6 +266,8 @@ def main(argv=None):
     p_run.add_argument("--af3-api", default="", help="AF3 API base URL")
     p_run.add_argument("--mpnn-mode", default="off", choices=["off", "local"])
     p_run.add_argument("--mpnn-script", default="", help="path to protein_mpnn.py")
+    p_run.add_argument("--interactive-indel", action="store_true",
+                       help="enable interactive FR indel selection (VH+VL)")
     p_run.set_defaults(func=cmd_run)
 
     # ---- compare: lightweight germline evaluation (Step 1) ----
