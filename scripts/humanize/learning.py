@@ -105,15 +105,64 @@ def _ddg(kd_var: float, kd_parent: float) -> float:
     return RT_KCAL * math.log(kd_var / kd_parent)
 
 
+def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
+    """Gauss-Jordan solve of A x = b (small dense system, pure stdlib)."""
+    n = len(b)
+    M = [list(A[i]) + [b[i]] for i in range(n)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-12:
+            continue
+        M[col], M[piv] = M[piv], M[col]
+        pv = M[col][col]
+        M[col] = [x / pv for x in M[col]]
+        for r in range(n):
+            if r != col and abs(M[r][col]) > 1e-15:
+                f = M[r][col]
+                M[r] = [M[r][k] - f * M[col][k] for k in range(n + 1)]
+    return [M[i][n] for i in range(n)]
+
+
+def _ridge_solve(rows: List[List[str]], y: List[float],
+                 pos_list: List[str], lam: float = 1.0) -> List[float]:
+    """Ridge regression of ddG on the 'carries human residue' indicators.
+
+    Deconvolves co-occurring framework substitutions: with a single V2-style
+    variant a per-position mean would smear the whole ddG across every changed
+    position; least squares attributes it to the positions actually present in
+    the variant set.
+    """
+    p = len(pos_list)
+    idx = {pos: i for i, pos in enumerate(pos_list)}
+    A = [[0.0] * p for _ in range(p)]
+    b = [0.0] * p
+    for row, yy in zip(rows, y):
+        cols = [idx[pos] for pos in row]
+        for i in cols:
+            b[i] += yy
+            for j in cols:
+                A[i][j] += 1.0
+    for i in range(p):
+        A[i][i] += lam
+    return _solve_linear(A, b)
+
+
 def compute_position_effects(
     records: List[ExperimentRecord],
     db: GermlineDB,
 ) -> Tuple[Dict[str, PositionEffect], List[str]]:
-    """Estimate per-position effects. Returns (effects, warnings)."""
+    """Estimate per-position effects. Returns (effects, warnings).
+
+    For each experiment the ddG of every variant is regressed on which
+    framework positions carry the humanized residue (ridge, lam=1). When the
+    variant set does not identify the positions (fewer variants than changed
+    positions, e.g. a single V0), it falls back to attributing each variant's
+    ddG equally to its changed positions. Per-experiment effects are then
+    combined across experiments weighted by sample size and shrunk toward 0
+    (empirical-Bayes-lite).
+    """
     warnings: List[str] = []
-    # donor/human aa at each FR position, per experiment
-    state: Dict[str, Dict[str, dict]] = {}   # exp -> pos -> {donor: [ddg], human: [ddg]}
-    pos_info: Dict[str, Dict] = {}           # exp -> pos -> (donor_aa, human_aa)
+    accum: Dict[str, Dict] = {}
 
     for exp in records:
         try:
@@ -127,14 +176,10 @@ def compute_position_effects(
             pd.update(parent.posmap())
         if pl:
             pd.update(pl.posmap())
-        pidx = {}
-        if parent:
-            pidx.update({r.pos: r.index for r in parent.residues})
-        if pl:
-            pidx.update({r.pos: r.index for r in pl.residues})
 
-        exp_state: Dict[str, Dict[str, list]] = {}
-        exp_info: Dict[str, Tuple[str, str]] = {}
+        pos_pairs: Dict[str, Tuple[str, str]] = {}
+        rows: List[List[str]] = []
+        ys: List[float] = []
         for v in exp.variants:
             vh = vl = None
             if v.get("vh"):
@@ -164,66 +209,64 @@ def compute_position_effects(
             if vl:
                 vd.update(vl.posmap())
             ddg = _ddg(float(v["kd"]), exp.parent_kd)
-            for pos in set(pd) & set(vd):
+            row = []
+            for pos in sorted(set(pd) & set(vd)):
                 num = int("".join(c for c in pos if c.isdigit()))
                 if num >= (103 if pos[0] == "H" else 98):
                     continue
                 if pd[pos] == vd[pos]:
                     continue
-                # only framework positions (structure of the CDR is constant)
-                # resolve the region against the chain that OWNS this
-                # position ("H.." -> VH, "L.." -> VL); querying the other
-                # chain returns None and would silently drop every VL (or
-                # VHH) framework position from calibration.
+                # resolve the region against the chain that OWNS the position
                 num_chain = vh if pos.startswith("H") else vl
                 reg = num_chain.region_of(pos) or "" if num_chain else ""
                 if not reg.startswith("FR"):
                     continue
-                # parent carries the donor residue; a variant differing at
-                # pos therefore carries the humanized residue. (Back-mutated
-                # variants that re-match the parent are skipped above.)
-                donor_aa, human_aa = pd[pos], vd[pos]
-                exp_state.setdefault(pos, {"donor": [], "human": []})
-                exp_info[pos] = (donor_aa, human_aa)
-                # The parent is the implicit donor baseline (ddG = 0 by
-                # construction); any variant that differs at pos carries the
-                # HUMANIZED residue there, so its ddG lands in the "human"
-                # bucket. Back-mutated variants re-matching the parent are
-                # skipped above and carry no information beyond the baseline.
-                exp_state[pos]["human"].append(ddg)
-        state[exp.name] = exp_state
-        pos_info[exp.name] = exp_info
+                pos_pairs[pos] = (pd[pos], vd[pos])
+                row.append(pos)
+            rows.append(row)
+            ys.append(ddg)
+
+        pos_list = sorted(pos_pairs)
+        if not pos_list:
+            continue
+        if len(rows) >= len(pos_list) and len(pos_list) > 1:
+            beta = _ridge_solve(rows, ys, pos_list, lam=1.0)
+            contribs = [(pos, b, len(rows)) for pos, b in zip(pos_list, beta)]
+        else:
+            sums: Dict[str, float] = {}
+            counts: Dict[str, int] = {}
+            for row, yy in zip(rows, ys):
+                for pos in row:
+                    sums[pos] = sums.get(pos, 0.0) + yy
+                    counts[pos] = counts.get(pos, 0) + 1
+            contribs = [(pos, sums[pos] / counts[pos], counts[pos])
+                        for pos in sums if counts[pos] > 0]
+
+        for pos, eff, n in contribs:
+            a = accum.setdefault(pos, {"num": 0.0, "den": 0.0, "raw_n": 0,
+                                       "best_n": 0, "donor": "", "human": ""})
+            a["num"] += eff * n
+            a["den"] += n
+            a["raw_n"] += n
+            if n > a["best_n"]:
+                a["best_n"] = n
+                a["donor"], a["human"] = pos_pairs[pos]
 
     effects: Dict[str, PositionEffect] = {}
-    for exp_name, exp_state in state.items():
-        for pos, sides in exp_state.items():
-            donor_ddg = sides.get("donor", [])
-            human_ddg = sides.get("human", [])
-            n = len(donor_ddg) + len(human_ddg)
-            if n == 0:
-                continue
-            mean_donor = sum(donor_ddg) / len(donor_ddg) if donor_ddg else 0.0
-            mean_human = sum(human_ddg) / len(human_ddg) if human_ddg else 0.0
-            # effect > 0  <=>  variants carrying the HUMAN residue have worse
-            # affinity  <=>  reverting to the donor residue helps
-            effect = mean_human - mean_donor
-            # shrinkage toward 0 (empirical-Bayes-lite): weight by n
-            shrunk = effect * n / (n + 1.0)
-            donor_aa, human_aa = pos_info[exp_name][pos]
-            if pos not in effects or effects[pos].raw_n < n:
-                effects[pos] = PositionEffect(
-                    position=pos,
-                    donor_aa=donor_aa,
-                    human_aa=human_aa,
-                    effect=round(shrunk, 3),
-                    n=1,
-                    raw_n=n,
-                )
-            else:
-                e = effects[pos]
-                e.effect = round((e.effect * e.raw_n + shrunk) / (e.raw_n + n), 3)
-                e.raw_n += n
-                e.n += 1
+    for pos, a in accum.items():
+        if a["den"] <= 0:
+            continue
+        combined = a["num"] / a["den"]
+        # shrinkage toward 0 (empirical-Bayes-lite): weight by total sample size
+        shrunk = combined * a["den"] / (a["den"] + 1.0)
+        effects[pos] = PositionEffect(
+            position=pos,
+            donor_aa=a["donor"],
+            human_aa=a["human"],
+            effect=round(shrunk, 3),
+            n=1,
+            raw_n=a["raw_n"],
+        )
     return effects, warnings
 
 

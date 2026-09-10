@@ -14,6 +14,7 @@ immunogenicity, then assign:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -39,6 +40,54 @@ J_ANCHOR = {"H": 103, "L": 98}
 
 def _pos_num(pos: str) -> int:
     return int("".join(c for c in pos if c.isdigit()))
+
+
+def _noisy_or(weights: List[float]) -> float:
+    """Probabilistic OR of independent evidence weights (0-1)."""
+    prod = 1.0
+    for w in weights:
+        prod *= (1.0 - max(0.0, min(1.0, w)))
+    return 1.0 - prod
+
+
+def _plddt_factor(plddt: Optional[float]) -> float:
+    """Continuous confidence factor for structural evidence.
+
+    None (no pLDDT available, e.g. experimental PDB) -> 1.0 (no change).
+    Otherwise scales 0.2 (pLDDT <= 50) to 1.0 (pLDDT >= 90).
+    """
+    if plddt is None:
+        return 1.0
+    frac = (float(plddt) - 50.0) / 40.0
+    frac = max(0.0, min(1.0, frac))
+    return 0.2 + 0.8 * frac
+
+
+_LIABILITY_PATTERNS: Optional[List[Tuple[re.Pattern, float]]] = None
+
+
+def _liability_score(sequence: str) -> float:
+    """Sum of developability liability weights present in ``sequence``."""
+    global _LIABILITY_PATTERNS
+    if _LIABILITY_PATTERNS is None:
+        from .config import LIABILITY_MOTIFS
+        _LIABILITY_PATTERNS = [
+            (re.compile(pat), weight) for pat, weight in LIABILITY_MOTIFS.values()
+        ]
+    return sum(len(rx.findall(sequence)) * w for rx, w in _LIABILITY_PATTERNS)
+
+
+def _calibration_matches(entry: dict, donor_aa: str, human_aa: str) -> bool:
+    """True when a calibration entry applies to this donor/human pair.
+
+    Older calibration files may omit the residue fields; treat those as
+    position-only and accept them for backward compatibility.
+    """
+    ed = (entry.get("donor_aa") or "").upper()
+    eh = (entry.get("human_aa") or "").upper()
+    if not ed and not eh:
+        return True
+    return ed == donor_aa.upper() and eh == human_aa.upper()
 
 
 @dataclass
@@ -238,11 +287,17 @@ def analyze_backmutations(
     top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
     calibration: Optional[Dict[str, dict]] = None,
     indel_overrides: Optional[Dict[str, str]] = None,
+    j_gene: Optional[GermlineGene] = None,
 ) -> BackMutationResult:
     """Score all framework positions where donor != chosen germline.
-    
+
+    Positions are walked in germline numbering and resolved to the aligned
+    donor residue through the FR correspondence, so a donor framework insertion
+    does not shift every downstream position.
+
     indel_overrides: dict mapping FR region to user-selected insertion position
                      (e.g. {"FR1": "H6A"})
+    j_gene:          human J gene, enabling FR4 structural reversion analysis.
     """
     chain_type = donor.chain_type
     if v_gene.numbered is None:
@@ -251,44 +306,75 @@ def analyze_backmutations(
     gmap = v_gene.numbered.posmap()
     structure = structure or StructureHints()
 
-    # conservation of the donor residue across the top germlines
+    # FR indels (respecting user overrides) + donor<->germline correspondence
+    from .fr_indel import (
+        build_fr_correspondence,
+        detect_fr_indels,
+        update_indel_selection,
+    )
+    fr_indels = detect_fr_indels(donor, v_gene)
+    if indel_overrides:
+        for i, indel in enumerate(fr_indels):
+            if indel.fr_region in indel_overrides:
+                fr_indels[i] = update_indel_selection(
+                    indel, indel_overrides[indel.fr_region])
+    corr = build_fr_correspondence(donor, v_gene, fr_indels)
+    insertion_set = set(corr.insertion_positions)
+
     conservation: Dict[str, float] = {}
-    for p, aa in dmap.items():
-        hits = 0
-        n = 0
-        for g, _s in (top_germlines or []):
-            gm = g.numbered.posmap() if g.numbered else {}
-            if p in gm and gm[p]:
-                n += 1
-                if gm[p] == aa:
-                    hits += 1
-        conservation[p] = hits / n if n else 0.0
+
+    # Precompute the frequency-weighted residue distribution of the reference
+    # panel per position (single pass over the repertoire), so each candidate
+    # lookup is O(1). The panel is the full human repertoire (see
+    # pipeline._top_homologous_germlines), so conservation is measured against
+    # the whole repertoire rather than 20 close homologs.
+    from .germline_frequency import get_frequency
+    ref_freq: Dict[str, Dict[str, float]] = {}
+    ref_total: Dict[str, float] = {}
+    for g, _s in (top_germlines or []):
+        gm = g.numbered.posmap() if g.numbered else {}
+        if not gm:
+            continue
+        w = get_frequency(chain_type, g.gene_id) or 0.0
+        for p, aa in gm.items():
+            ref_freq.setdefault(p, {})
+            ref_freq[p][aa] = ref_freq[p].get(aa, 0.0) + w
+            ref_total[p] = ref_total.get(p, 0.0) + w
+
+    def _conservation(dpos: str, gpos: str, donor_aa: str) -> float:
+        total = ref_total.get(gpos, 0.0)
+        if total <= 0:
+            return 0.0
+        return ref_freq.get(gpos, {}).get(donor_aa, 0.0) / total
 
     candidates: List[BackMutationCandidate] = []
-    for pos in sorted(set(dmap) & set(gmap), key=lambda p: (_pos_num(p), p)):
-        num = _pos_num(pos)
-
-        # FR4 structural analysis (only when structure data is available)
-        if num >= J_ANCHOR[chain_type]:
-            if structure.data:  # Has structure data
-                fr4_candidate = _evaluate_fr4_structural(
-                    pos, num, chain_type, dmap, gmap, structure
-                )
-                if fr4_candidate:
-                    candidates.append(fr4_candidate)
+    for gpos in sorted(gmap, key=lambda p: (_pos_num(p), p)):
+        dpos = corr.germline_to_donor.get(gpos)
+        if dpos is None or dpos in insertion_set:
+            # donor deletion (no donor residue) or donor insertion
+            # (scored as an indel candidate, not a substitution)
             continue
-
-        if donor.region_of(pos) not in FR_REGIONS:
+        # Structural feature membership and the FR/J boundaries are properties
+        # of the DONOR Kabat numbering (the donor is the antibody being
+        # humanized); the germline label can differ around insertions.
+        num = _pos_num(dpos)
+        if num >= J_ANCHOR[chain_type]:
+            continue  # FR4 is handled separately (human J region)
+        donor_res = donor.residue(dpos)
+        if donor_res is None or donor_res.region not in FR_REGIONS:
             continue
         # H93/H94 carry the first two CDR3-loop residues (strict-Kabat FR3
         # labels, IMGT CDR3 105-106). They are grafted from the donor as part
         # of the loop and must never become back-mutation candidates.
         if chain_type == "H" and num in (93, 94):
             continue
-        donor_aa = dmap[pos].upper()
-        human_aa = gmap[pos].upper()
+        donor_aa = dmap.get(dpos, "").upper()
+        human_aa = gmap.get(gpos, "").upper()
         if donor_aa == human_aa or donor_aa in ("", "X"):
             continue
+        pos = dpos  # candidate label = donor position (graft resolves it)
+        conservation_val = _conservation(dpos, gpos, donor_aa)
+        conservation[pos] = conservation_val
 
         features: List[str] = []
         if num in INTERFACE_CORE[chain_type]:
@@ -315,27 +401,24 @@ def analyze_backmutations(
             features.append("antigen_contact")
 
         # ---- structural score ----
+        # Noisy-OR combination: independent pieces of structural evidence
+        # accumulate (multiple weak features reinforce each other) instead of
+        # being collapsed to the single strongest feature by max().
         w = WEIGHTS["structural"]
-        struct_scores = [w[f] for f in features if f in w]
-        # buried + any structural feature boosts confidence
-        structural = max(struct_scores) if struct_scores else 0.0
+        structural = _noisy_or([w[f] for f in features if f in w])
         if features and buried is True:
             structural = max(structural, 0.7)
         if features and buried is False:
-            structural = max(structural * 0.85, 0.0)
+            structural = structural * 0.85
 
-        # 方案1: pLDDT 加权 - 低置信度区域降低结构证据权重
+        # pLDDT: continuous confidence weighting (not a hard threshold). The
+        # structure evidence is scaled smoothly from 0.2 at pLDDT <= 50 to 1.0
+        # at pLDDT >= 90; unknown pLDDT leaves the evidence untouched.
         plddt_val = structure.plddt(pos)
-        if plddt_val is not None and plddt_val < 50:
-            # pLDDT < 50: 结构证据不可靠，大幅降权
-            structural *= 0.3
-        elif plddt_val is not None and plddt_val < 70:
-            # pLDDT 50-70: 结构证据中等置信度，适度降权
-            structural *= 0.7
+        structural *= _plddt_factor(plddt_val)
 
         # ---- immunogenicity benefit ----
         exposure = structure.exposure(pos)
-        conservation_val = conservation.get(pos, 0.5)
         # rare donor residue among germlines -> more human-like to revert
         rare = 1.0 - conservation_val
         benefit = 0.3 + 0.5 * exposure * rare
@@ -345,95 +428,45 @@ def analyze_backmutations(
             benefit = min(benefit, 0.50)
 
         # ---- chemical score (developability) ----
-        # WARNING: 仅基于序列模式检测，未考虑结构暴露状态；
-        # 埋藏位点实际风险较低，表面暴露位点风险更高。
-        # 已排除保守 Cys（VH 22/92, VL 23/88）和双计风险。
-        # 每个 motif 均锚定当前回复位点（避免窗口内无关 motif 误报）。
-        wc = WEIGHTS["chemical"]
-        chem = 0.0
-        rpos = donor.residue(pos)
-        ridx = rpos.index if rpos is not None else max(0, donor.sequence.find(donor_aa))
+        # Symmetric liability delta at this position:
+        #   chem > 0 -> reverting to the donor REMOVES a liability that the
+        #               human (graft) state carries  -> reward reversion
+        #   chem < 0 -> reverting INTRODUCES / retains a donor liability
+        #               -> penalise reversion
+        # This is a pure sequence-pattern scan (exposure-agnostic): buried
+        # liabilities are less risky in practice, but the term stays
+        # conservative. Conserved disulfide Cys are not in the motif table.
+        d_res = donor.residue(pos)
+        ridx = d_res.index if d_res is not None else max(0, donor.sequence.find(donor_aa))
         seq = donor.sequence
-
-        def _aa(off: int) -> str:
-            j = ridx + off
-            return seq[j] if 0 <= j < len(seq) else ""
-
-        a0, a1, a2 = _aa(0), _aa(1), _aa(2)
-
-        # N-glycan (NxS/T): 当前位点是 N，N+1 非 P，N+2 是 S/T
-        ngly = a0 == "N" and a1 not in ("P", "") and a2 in ("S", "T")
-        if ngly:
-            chem += wc["removes_nglycan"]
-
-        # deamidation: 当前位点是 N（N-glycan 已计分时跳过 NS/NG 防双计）
-        if a0 == "N" and not ngly:
-            chem += wc["removes_deamidation_ng"] if a1 == "G" else 0
-            chem += wc["removes_deamidation_ns"] if a1 == "S" else 0
-            chem += wc["removes_deamidation_nh"] if a1 == "H" else 0
-            chem += wc["removes_deamidation_nd"] if a1 == "D" else 0
-
-        # isomerization / acid hydrolysis: 当前位点是 D
-        if a0 == "D":
-            chem += wc["removes_isomerization_dg"] if a1 == "G" else 0
-            chem += wc["removes_isomerization_ds"] if a1 == "S" else 0
-            chem += wc["removes_isomerization_dt"] if a1 == "T" else 0
-            chem += wc["removes_isomerization_dh"] if a1 == "H" else 0
-            # acid hydrolysis: D-X (X=A/V/L/I/P，不含 G/S/T/H/D 避免重叠)；DD 单独计分
-            if a1 == "D":
-                chem += wc["removes_acid_hydrolysis_dd"]
-            elif a1 in ("A", "V", "L", "I", "P"):
-                chem += wc["removes_acid_hydrolysis"]
-
-        # oxidation: 当前位点是 M/W，或非保守 C
-        if a0 in ("M", "W"):
-            chem += wc["removes_oxidation"]
-        # 保守二硫键 Cys：VH 22/92；kappa VL 23/88；lambda VL FR1 短一个
-        # 残基，第一个保守 Cys 落在 22（与 developability.py 保持一致）。
-        conserved_cys = ({22, 92} if chain_type == "H" else {22, 23, 88})
-        if a0 == "C" and num not in conserved_cys:
-            chem += wc["removes_oxidation"]  # 非保守 Cys（排除保守二硫键 Cys）
-
-        # base hydrolysis: 当前位点是 K，K+1 是 D/E
-        if a0 == "K" and a1 in ("D", "E"):
-            chem += wc["removes_base_hydrolysis"]
-
-        # metalloprotease cleavage: 当前位点是 M，M+1 是 K
-        if a0 == "M" and a1 == "K":
-            chem += wc["removes_met_lyscleavage"]
-
-        # ---- introduced risk penalty (回复可能引入新风险) ----
-        # 回复将当前位点改为 human_aa 后，检查是否新形成 N-glycan (N-X-S/T)。
-        # 覆盖三种锚定方式（当前位点是 N / N+1 / N+2）。
-        # 注：回复要求 donor != human，故 donor 的 N-glycan 已被移除（见上方
-        # removes_nglycan），此处只惩罚"新引入"，不与移除奖励冲突。
-        h0 = human_aa
-        prev1 = seq[ridx - 1] if ridx - 1 >= 0 else ""
-        prev2 = seq[ridx - 2] if ridx - 2 >= 0 else ""
-        nxt1 = seq[ridx + 1] if ridx + 1 < len(seq) else ""
-        # 情况1: 当前位点是 N，N+1 非 P，N+2 是 S/T
-        case1 = h0 == "N" and a1 not in ("P", "") and a2 in ("S", "T")
-        # 情况2: 当前位点是 N-glycan 的 X（N-X-S/T），X 由 human_aa 提供且非 P
-        case2 = prev1 == "N" and h0 not in ("P", "") and nxt1 in ("S", "T")
-        # 情况3: 当前位点是 N-glycan 的 S/T（N-X-S/T），S/T 由 human_aa 提供
-        case3 = prev2 == "N" and prev1 not in ("P", "") and h0 in ("S", "T")
-        if case1 or case2 or case3:
-            chem += wc["introduces_nglycan"]  # -0.8 惩罚
+        human_state = seq[:ridx] + human_aa + seq[ridx + 1:]
+        chem = _liability_score(human_state) - _liability_score(seq)
 
         # ---- tier ----
         tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
 
-        # Step 3 structural demotion: positions buried but with no CDR/antigen
-        # contact are demoted from T1/T2 to T3. Literature features (Vernier,
-        # Canonical, Interface core) alone are not sufficient -- structure must
-        # show functional relevance (CDR/antigen contact) to retain high tier.
+        # ---- Step 3 structure-driven tier adjustment ----
+        # Only demote on *positive* exposure evidence (AF3 says the residue is
+        # surface-exposed) combined with *absence* of any functional contact
+        # (CDR / antigen) and a reliable pLDDT. An exposed, non-contacting
+        # framework residue has no structural reason to stay donor and is the
+        # one that carries real immunogenicity risk, so it goes to T3.
+        #
+        # Buried positions are NOT demoted: packing/core residues can still
+        # support the fold, and reverting the (buried) donor residue is
+        # immunologically silent. Interface-core positions are also protected
+        # because the contact detector may miss their packing partners.
         structural_demoted = False
-        if structure and structure.data and tier in ("T1", "T2"):
-            if buried is True and cdr_contact is not True and ag_contact is not True:
-                partners = structure.cdr_partners(pos)
-                if not partners:
-                    tier = "T3"
-                    structural_demoted = True
+        if structure.data and tier in ("T1", "T2"):
+            partners = structure.cdr_partners(pos)
+            has_contact = (
+                cdr_contact is True or ag_contact is True
+                or bool(partners) or "interface_core" in features
+            )
+            plddt_ok = (plddt_val is None or plddt_val >= 50)
+            if buried is False and not has_contact and plddt_ok:
+                tier = "T3"
+                structural_demoted = True
 
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
@@ -463,6 +496,11 @@ def analyze_backmutations(
         empirical_note = ""
         if calibration:
             entry = calibration.get(pos)
+            # A calibration effect is only meaningful for the exact donor/human
+            # substitution pair it was measured on; a different germline at the
+            # same position is a different substitution.
+            if entry and not _calibration_matches(entry, donor_aa, human_aa):
+                entry = None
             if entry:
                 empirical_ddG = float(entry.get("ddG_kcal", 0.0))
                 empirical_n = int(entry.get("n_variants", 0))
@@ -490,7 +528,7 @@ def analyze_backmutations(
         rationale = _rationale(features, tier, buried, cdr_contact, ag_contact,
                                exposure, conservation_val, donor_aa, human_aa)
         if structural_demoted:
-            rationale.append("structural: buried but no CDR/antigen contact; "
+            rationale.append("structural: exposed and no CDR/antigen contact; "
                             "demoted from T1/T2 to T3")
         if empirical_note:
             rationale.append(empirical_note)
@@ -515,17 +553,25 @@ def analyze_backmutations(
             empirical_n=empirical_n,
         ))
 
-    # ---- FR indel candidates ----
-    from .fr_indel import detect_fr_indels, update_indel_selection
-    fr_indels = detect_fr_indels(donor, v_gene)
-    
-    # Apply user overrides if provided
-    if indel_overrides:
-        for i, indel in enumerate(fr_indels):
-            if indel.fr_region in indel_overrides:
-                selected_pos = indel_overrides[indel.fr_region]
-                fr_indels[i] = update_indel_selection(indel, selected_pos)
+    # ---- FR4 structural reversion (only with J gene + structure data) ----
+    # FR4 is human by construction, but a J-region residue that contacts CDR3
+    # or the antigen may need to stay donor. This is the one sanctioned
+    # exception to the "never back-mutate FR4" rule.
+    if j_gene is not None and j_gene.numbered is not None and structure.data:
+        jmap = j_gene.numbered.posmap()
+        for jpos in sorted(jmap, key=lambda p: (_pos_num(p), p)):
+            if _pos_num(jpos) < J_ANCHOR[chain_type]:
+                continue
+            donor_aa = dmap.get(jpos, "").upper()
+            human_aa = jmap.get(jpos, "").upper()
+            if donor_aa == human_aa or donor_aa in ("", "X"):
+                continue
+            fr4_candidate = _evaluate_fr4_structural(
+                jpos, _pos_num(jpos), chain_type, dmap, jmap, structure)
+            if fr4_candidate:
+                candidates.append(fr4_candidate)
 
+    # ---- FR indel candidates (donor insertions) ----
     for indel in fr_indels:
         if indel.indel_type == "insertion":
             # Donor insertion: score whether to keep donor (indel) or revert
@@ -543,23 +589,29 @@ def analyze_backmutations(
             if cdr_contact:
                 features.append("cdr_contact")
 
-            # Structural score: indel positions get moderate weight
+            # Structural score: noisy-OR of the indel evidence, pLDDT-weighted
             w = WEIGHTS["structural"]
-            struct_scores = [w[f] for f in features if f in w]
-            structural = max(struct_scores) if struct_scores else 0.3
+            structural = _noisy_or([w[f] for f in features if f in w]) or 0.3
             if buried is True:
                 structural = max(structural, 0.7)
             elif buried is False:
-                structural = max(structural * 0.85, 0.0)
+                structural = structural * 0.85
+            structural *= _plddt_factor(structure.plddt(pos))
 
             # Benefit score: indel is donor-specific, high immunogenicity risk
             exposure = 0.0 if buried is True else (1.0 if buried is False else 0.5)
             benefit = 0.3 + 0.5 * exposure * 0.8  # moderate rarity
 
-            # Chemical score: no substitution, just insertion
-            chem = 0.0
+            # Chemical score: insertion liability delta (donor residue kept vs
+            # absent); the insertion residue itself is scanned in context.
+            d_res = donor.residue(pos)
+            ridx = d_res.index if d_res is not None else max(0, donor.sequence.find(donor_aa))
+            inserted_state = donor.sequence[:ridx] + donor_aa + donor.sequence[ridx + 1:]
+            chem = _liability_score(inserted_state) - _liability_score(donor.sequence)
 
-            composite = 100 * (0.55 * structural + 0.30 * benefit + 0.15 * min(1, chem))
+            composite = 100 * (WEIGHTS["blend"][0] * structural
+                               + WEIGHTS["blend"][1] * benefit
+                               + WEIGHTS["blend"][2] * min(1, chem))
             composite = round(composite, 1)
 
             # Tier: default T2 for insertions (need structure verification)

@@ -132,12 +132,10 @@ def test_vl_cdr3_insertion_numbering():
               cdr3 in graft.sequence)
 
 
-def test_nglycan_introduction_penalty():
-    """Regression: a back-mutation that would CREATE an N-glycan motif
-    carries chemical_score = -0.8, and the composite must include that
-    penalty. The old formula clamped the whole chemical term to [0, 1],
-    so the penalty vanished whenever it was the only chemical factor."""
-    print("introduced N-glycan penalty")
+def test_chemical_liability_delta():
+    """Symmetric chemical term: reverting away from a human-state liability
+    is rewarded; reverting into a donor-state liability is penalised."""
+    print("chemical liability delta")
     from humanize.config import WEIGHTS
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
     g = [x for x in db.v_genes if x.gene_id == "IGHV1-8*01"][0]
@@ -145,23 +143,34 @@ def test_nglycan_introduction_penalty():
     r72 = g.numbered.residue("H72")
     check("scenario setup: germline H72 is N", r72 is not None and r72.aa == "N",
           r72.aa if r72 else "?")
+    # donor lacks the glycan (A72), human germline has it -> reversion removes
+    # the human-state liability -> positive chemical bonus
     donor = number_heavy(seq[:r72.index] + "A" + seq[r72.index + 1:])
     bm = analyze_backmutations(donor, g)
     hits = [c for c in bm.candidates if c.position == "H72" and c.human_aa == "N"]
-    check("scenario exists: H72 candidate with negative chemical score",
-          bool(hits) and hits[0].chemical_score <= -0.5,
+    check("reversion removing a human N-glycan is rewarded",
+          bool(hits) and hits[0].chemical_score >= 0.5,
           str([(c.position, c.chemical_score) for c in bm.candidates]))
-    if not hits:
-        return
-    c = hits[0]
-    # composite must equal the unclamped weighted blend of the stored parts
-    expected = round(100 * (
-        WEIGHTS["blend"][0] * c.structural_score
-        + WEIGHTS["blend"][1] * c.benefit_score
-        + WEIGHTS["blend"][2] * c.chemical_score), 1)
-    check("composite reflects introduced-N-glycan penalty",
-          abs(c.composite - expected) <= 0.2,
-          f"composite={c.composite} unclamped-expected={expected}")
+    if hits:
+        c = hits[0]
+        expected = round(100 * (
+            WEIGHTS["blend"][0] * c.structural_score
+            + WEIGHTS["blend"][1] * c.benefit_score
+            + WEIGHTS["blend"][2] * min(1, c.chemical_score)), 1)
+        check("composite includes the (capped) positive chemical term",
+              abs(c.composite - expected) <= 0.2,
+              f"composite={c.composite} expected={expected}")
+    # donor HAS the N-glycan (N72), human germline replaces it with A ->
+    # reversion would REINTRODUCE the liability -> negative chemical penalty
+    from humanize.germline import GermlineGene
+    human_a = seq[:r72.index] + "A" + seq[r72.index + 1:]
+    g2 = GermlineGene("test-human*01", "H", "V", human_a, number_heavy(human_a))
+    bm2 = analyze_backmutations(number_heavy(seq), g2)
+    hits2 = [c for c in bm2.candidates
+             if c.position == "H72" and c.donor_aa == "N"]
+    check("reversion introducing a donor N-glycan is penalised",
+          bool(hits2) and hits2[0].chemical_score <= -0.5,
+          str([(c.position, c.chemical_score) for c in bm2.candidates]))
 
 
 def test_structure_hint_chain_filtering():
@@ -740,14 +749,32 @@ def test_fr_indel_detection():
     # Graft should include indel info
     graft = graft_chain(vh_chain, vh_gene, j_gene, "kabat")
     check("graft has fr_indels", len(graft.fr_indels) == 1)
-    check("graft origin H6 is germline (shifted residue)",
-          graft.origin.get("H6") in ("germline", "donor(indel)"))
+    check("default graft keeps insertion at H6 as donor",
+          graft.origin.get("H6") == "donor(indel)", str(graft.origin.get("H6")))
+
+    # Correspondence: germline H6 maps to donor H6A (shifted by the insertion)
+    from humanize.fr_indel import build_fr_correspondence
+    corr = build_fr_correspondence(vh_chain, vh_gene)
+    check("correspondence maps germline H6 -> donor H6A",
+          corr.germline_to_donor.get("H6") == "H6A",
+          str(corr.germline_to_donor.get("H6")))
+    check("H6 is the insertion position", "H6" in corr.insertion_positions)
+
+    # Regression: the inserted E must not be replaced by a duplicated germline
+    # residue ("QVQLVQQSGAE" was the old buggy output).
+    check("default graft no duplicated residue",
+          graft.sequence.startswith("QVQLVEQSGAE"), graft.sequence[:12])
+    excl = graft_chain(vh_chain, vh_gene, j_gene, "kabat", exclude_indel=True)
+    check("pure graft drops insertion", excl.sequence.startswith("QVQLVQSGAE"),
+          excl.sequence[:12])
 
     # Back-mutation should include indel candidate
     bm = analyze_backmutations(vh_chain, vh_gene, is_vhh=False)
     indel_cands = [c for c in bm.candidates if "fr_indel" in c.features]
     check("backmut has indel candidate", len(indel_cands) == 1)
     check("indel candidate position is H6", indel_cands[0].position == "H6")
+    check("insertion position not duplicated as a substitution candidate",
+          sum(1 for c in bm.candidates if c.position == "H6") == 1)
 
     # V0 excludes indel (shorter), V2 includes it (full length)
     variants = assemble_variants(vh_chain, vh_gene, j_gene, "kabat", bm, is_vhh=False)
@@ -757,6 +784,11 @@ def test_fr_indel_detection():
     check("V2 length = donor", len(v2.sequence) == len(M4D5_VH))
     check("V0 no H6 backmutation", "H6" not in v0.backmutations)
     check("V2 has H6 backmutation", "H6" in v2.backmutations)
+    check("V2 keeps insertion E (no duplicate)", v2.sequence.startswith("QVQLVEQSGAE"),
+          v2.sequence[:12])
+    for v in variants:
+        check(f"{v.name} has no duplicate back-mutation positions",
+              len(v.backmutations) == len(set(v.backmutations)), str(v.backmutations))
 
     # 4D5 VL has no FR indels (kappa, same family)
     M4D5_VL = ("DIQMTQTTSSLSASLGDRVTISCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSG"
@@ -766,6 +798,420 @@ def test_fr_indel_detection():
     if vl_gene:
         vl_indels = detect_fr_indels(vl_chain, vl_gene[0])
         check("4D5 VL has no FR indels", len(vl_indels) == 0)
+
+
+def test_fr_insertion_interactive_override():
+    """A user-confirmed insertion position drives the correspondence, the
+    back-mutation candidates and the grafted variants consistently."""
+    print("FR insertion interactive override")
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    # Shifted residue (H6A) differs from the germline, so the insertion point
+    # is ambiguous and the override matters.
+    VH = ("EVQLLEWSGAELVRPGTSVKISCKASGYAFTNYWLGWVKQRPGHGLEWIGDIFPGSG"
+          "NIHYNEKFKGKATLTADKSSSTAYMQLSSLTFEDSAVYFCARLRNWDEPMDYWGQGTTVTVSS")
+    ch = number_heavy(VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV1-46*01"][0]
+    jg = db.j_for("H")[0]
+    from humanize.fr_indel import build_fr_correspondence
+
+    bm = analyze_backmutations(ch, vg, indel_overrides={"FR1": "H6"})
+    check("override selects H6 as the insertion",
+          bm.indel_insertion_positions == ["H6"], str(bm.indel_insertion_positions))
+    corr = build_fr_correspondence(ch, vg, bm.fr_indels)
+    check("override maps germline H6 -> donor H6A",
+          corr.germline_to_donor.get("H6") == "H6A",
+          str(corr.germline_to_donor.get("H6")))
+    check("aligned mismatch is a substitution candidate at H6A",
+          any(c.position == "H6A" for c in bm.candidates))
+    v2 = [v for v in assemble_variants(ch, vg, jg, "kabat", bm)
+          if v.name == "H_V2"][0]
+    check("V2 keeps the insertion without duplicating a residue",
+          v2.sequence.startswith("QVQLVEQSGAE"), v2.sequence[:12])
+
+
+def test_step3_structure_tier_rules():
+    """Step 3: structure-driven tier adjustment is symmetric and safe.
+
+    * explicit exposure with no CDR/antigen contact -> demote T1/T2 -> T3
+    * buried -> do NOT demote (packing/core residues retained)
+    * CDR/antigen contact -> promote to T1/T2
+    """
+    print("Step 3 structure tier rules")
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    ch = number_heavy(M4D5_VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    base = analyze_backmutations(ch, vg)
+    base_tiers = {c.position: c.tier for c in base.candidates}
+    poslist = list(base_tiers)
+    check("H78 is T1 without structure", base_tiers.get("H78") == "T1")
+
+    exposed = analyze_backmutations(
+        ch, vg, structure=StructureHints({"buried": {p: False for p in poslist}}))
+    exposed_tiers = {c.position: c.tier for c in exposed.candidates}
+    check("exposed + no contact demotes H78 to T3", exposed_tiers.get("H78") == "T3")
+
+    buried = analyze_backmutations(
+        ch, vg, structure=StructureHints({"buried": {p: True for p in poslist}}))
+    buried_tiers = {c.position: c.tier for c in buried.candidates}
+    check("buried H78 is retained (T1)", buried_tiers.get("H78") == "T1")
+
+    contact = analyze_backmutations(
+        ch, vg, structure=StructureHints({"cdr_contact": {p: True for p in poslist}}))
+    contact_tiers = {c.position: c.tier for c in contact.candidates}
+    check("cdr-contact promotes every literature candidate to T1/T2",
+          all(contact_tiers[p] in ("T1", "T2") for p in poslist
+              if base_tiers[p] in ("T1", "T2", "T3")))
+
+    # low pLDDT must not trigger a demotion (unreliable structure)
+    lowq = analyze_backmutations(
+        ch, vg, structure=StructureHints({
+            "buried": {p: False for p in poslist},
+            "plddt": {p: 30.0 for p in poslist},
+        }))
+    lowq_tiers = {c.position: c.tier for c in lowq.candidates}
+    check("low pLDDT blocks demotion", lowq_tiers.get("H78") == "T1")
+
+
+def test_multi_model_consensus_fields():
+    """Multi-model consensus keeps cdr_partners/antigen_contact and relaxes
+    the agreement threshold when fewer than 3 models are available."""
+    print("multi-model consensus fields")
+    from humanize.structure import (
+        PDBAtom, PDBModel, compute_hints, compute_multi_model_consensus,
+    )
+
+    def mk_model(shift=0.0):
+        m = PDBModel()
+        for i in range(1, 9):
+            m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, 0.0, 0.0, 90.0))
+            m.atoms.append(PDBAtom("CB", "ALA", "A", i, i * 3.0 + 1.0, 1.0, 0.0, 90.0))
+        m.atoms.append(PDBAtom("CA", "ALA", "C", 1, 6.0 + shift, 2.0, 0.0, 90.0))
+        return m
+
+    pm = {f"H{i}": i for i in range(1, 9)}
+    single = compute_hints(mk_model(), "A", pm, {"H6": 6}, antigen_chains=["C"])
+    check("cdr_contact uses all side-chain atoms",
+          single.data["cdr_contact"].get("H5") is True)
+    check("antigen contact detected", single.data["antigen_contact"].get("H3") is True)
+
+    import tempfile as _tf
+
+    def write_pdb(path, shift):
+        lines = []
+
+        def atom(chain, res, an, x, y, z):
+            lines.append(
+                'ATOM  %5d  %-3s %3s %s%4d    %8.3f%8.3f%8.3f  1.00 90.00'
+                % (len(lines) + 1, an, "ALA", chain, res, x, y, z))
+
+        for i in range(1, 9):
+            atom("A", i, "CA", i * 3.0, 0.0, 0.0)
+            atom("A", i, "CB", i * 3.0 + 1.0, 1.0, 0.0)
+        atom("C", 1, "CA", 6.0 + shift, 2.0, 0.0)
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    with _tf.TemporaryDirectory() as td:
+        paths = []
+        for k in range(2):
+            p = os.path.join(td, f"rank_{k + 1}.pdb")
+            write_pdb(p, shift=k * 0.1)
+            paths.append(p)
+        cons = compute_multi_model_consensus(
+            paths, "A", pm, {"H6": 6}, antigen_chains=["C"], min_consensus=3)
+        check("consensus preserves cdr_partners", bool(cons.data.get("cdr_partners")))
+        check("consensus preserves antigen_contact",
+              cons.data.get("antigen_contact", {}).get("H3") is True)
+        check("consensus preserves plddt", "H6" in cons.data.get("plddt", {}))
+        check("consensus relaxes threshold for <3 models",
+              cons.data.get("cdr_contact", {}).get("H6") is True)
+
+
+def test_structure_rmsd_engine():
+    """Kabsch superposition + framework-superposed CDR-RMSD."""
+    print("structure RMSD engine")
+    from humanize.structure import PDBAtom, PDBModel, kabsch_superpose, structure_rmsd
+    import math
+
+    # known rigid transform recovery
+    P = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1)]
+    c, s = math.cos(0.4), math.sin(0.4)
+    R = [[c, -s, 0], [s, c, 0], [0, 0, 1]]
+    t = (4.0, -1.5, 2.0)
+    Q = [tuple(sum(R[i][j] * p[j] for j in range(3)) + t[i] for i in range(3))
+         for p in P]
+    rmsd, _, _ = kabsch_superpose(P, Q)
+    check("kabsch recovers a rigid transform", rmsd < 1e-6, str(rmsd))
+
+    def mk(shift_cdr=0.0):
+        m = PDBModel()
+        for i in range(1, 9):  # framework
+            m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, 0.0, 0.0, 90.0))
+        for i in range(20, 23):  # CDR3
+            m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, 5.0 + shift_cdr,
+                                   0.0, 90.0))
+        return m
+
+    pos = {f"H{i}": i for i in list(range(1, 9)) + list(range(20, 23))}
+    fw = {f"H{i}" for i in range(1, 9)}
+    cdrs = {"CDR3": {f"H{i}" for i in range(20, 23)}}
+    res = structure_rmsd(mk(0.0), "A", pos, mk(0.0), "A", pos, cdrs, fw)
+    check("identical models -> 0 CDR-RMSD", res["cdr_rmsd"] == 0.0, str(res))
+    res2 = structure_rmsd(mk(0.0), "A", pos, mk(1.0), "A", pos, cdrs, fw)
+    check("CDR deviation detected", res2["cdr_rmsd"] is not None
+          and res2["cdr_rmsd"] > 0.9, str(res2))
+    check("framework RMSD stays ~0", res2["fr_rmsd"] is not None
+          and res2["fr_rmsd"] < 1e-6, str(res2))
+
+
+def test_af3_variant_rmsd_wiring():
+    """Pipeline wiring: paired Fab variant x variant CDR-RMSD vs donor."""
+    print("AF3 variant RMSD wiring")
+    import humanize.pipeline as pl
+    from types import SimpleNamespace
+    from humanize.structure import load_model
+    from humanize.graft import graft_variant, CDR_POS_SETS
+    from humanize.variants import Variant
+
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor_h = number_heavy(M4D5_VH)
+    donor_l = number_light(M4D5_VL)
+    vgh = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    vgl = [g for g in db.v_genes if g.gene_id == "IGKV1-39*01"][0]
+    jh, jl = db.j_for("H")[0], db.j_for("L")[0]
+    cdr_h = set()
+    for lo, hi in CDR_POS_SETS["kabat"]["H"].values():
+        cdr_h.update(range(lo, hi + 1))
+    cdr_l = set()
+    for lo, hi in CDR_POS_SETS["kabat"]["L"].values():
+        cdr_l.update(range(lo, hi + 1))
+
+    three = {"A": "ALA", "R": "ARG", "N": "ASN", "D": "ASP", "C": "CYS",
+             "Q": "GLN", "E": "GLU", "G": "GLY", "H": "HIS", "I": "ILE",
+             "L": "LEU", "K": "LYS", "M": "MET", "F": "PHE", "P": "PRO",
+             "S": "SER", "T": "THR", "W": "TRP", "Y": "TYR", "V": "VAL"}
+
+    def write_pdb(path, chains_meta, shift):
+        # chains_meta: [(chain_id, seq, numbered, cdr_set)]
+        lines = []
+        for cid, seq, numbered, cdr in chains_meta:
+            for i, aa in enumerate(seq):
+                pos = numbered.residues[i].pos if i < len(numbered.residues) else ""
+                num = int("".join(ch for ch in pos if ch.isdigit()) or 0)
+                y = 1.0 if (shift and num in cdr) else 0.0
+                lines.append(
+                    "ATOM  %5d  CA  %3s %s%4d    %8.3f%8.3f%8.3f  1.00 90.00"
+                    % (len(lines) + 1, three.get(aa, "GLY"), cid, i + 1,
+                       i * 3.0, y, 0.0))
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    gH = graft_variant(donor_h, vgh, jh, "kabat", [])
+    gL = graft_variant(donor_l, vgl, jl, "kabat", [])
+
+    with tempfile.TemporaryDirectory() as td:
+        # donor reference: chain A = donor H, chain B = donor L
+        donor_pdb = os.path.join(td, "donor.pdb")
+        write_pdb(donor_pdb, [("A", donor_h.sequence, donor_h, cdr_h),
+                              ("B", donor_l.sequence, donor_l, cdr_l)], False)
+        dmodel = load_model(donor_pdb)
+        dh = (dmodel, "A", pl.pdb_chain_pos_map(dmodel, "A", donor_h))
+        dl = (dmodel, "B", pl.pdb_chain_pos_map(dmodel, "B", donor_l))
+
+        def fake_predict_fv(cfg, vh, vl, ag, tag):
+            p = os.path.join(td, f"pred_{tag}.pdb")
+            write_pdb(p, [("A", vh, gH.numbered, cdr_h),
+                          ("B", vl, gL.numbered, cdr_l)], True)
+            return p
+
+        hv = Variant("H_V2", "test", gH, [])
+        lv = Variant("L_V2", "test", gL, [])
+        hrep = SimpleNamespace(
+            input_chain=SimpleNamespace(chain_type="H", name="4D5_VH",
+                                        sequence=donor_h.sequence,
+                                        numbered=donor_h, warnings=[]),
+            donor_structure=dh, variants=[hv], structure_validation={})
+        lrep = SimpleNamespace(
+            input_chain=SimpleNamespace(chain_type="L", name="4D5_VL",
+                                        sequence=donor_l.sequence,
+                                        numbered=donor_l, warnings=[]),
+            donor_structure=dl, variants=[lv], structure_validation={})
+        result = SimpleNamespace(format="fab", chains=[hrep, lrep], warnings=[])
+
+        orig = pl.predict_fv
+        pl.predict_fv = fake_predict_fv
+        try:
+            pl._validate_all_variants(result, PipelineConfig(af3_validate_variants=True,
+                                                             af3=pl.AF3Config(mode="local")))
+        finally:
+            pl.predict_fv = orig
+
+        check("paired H variant measured", "H_V2" in hrep.structure_validation,
+              str(hrep.structure_validation))
+        check("paired L variant measured", "L_V2" in lrep.structure_validation,
+              str(lrep.structure_validation))
+        check("CDR deviation reported for H",
+              hrep.structure_validation.get("H_V2", {}).get("cdr_rmsd") is not None
+              and hrep.structure_validation["H_V2"]["cdr_rmsd"] > 0.5,
+              str(hrep.structure_validation.get("H_V2")))
+        check("FR-RMSD ~0 for L",
+              lrep.structure_validation.get("L_V2", {}).get("fr_rmsd") is not None
+              and lrep.structure_validation["L_V2"]["fr_rmsd"] < 1e-6,
+              str(lrep.structure_validation.get("L_V2")))
+
+
+def test_standalone_rmsd_cli():
+    """`humanize rmsd` compares external variant structures to a donor model."""
+    print("standalone rmsd CLI")
+    import contextlib, io
+    from humanize.cli import main as cli_main
+    from humanize.graft import CDR_POS_SETS
+
+    donor = number_heavy(M4D5_VH)
+    cdr = set()
+    for lo, hi in CDR_POS_SETS["kabat"]["H"].values():
+        cdr.update(range(lo, hi + 1))
+    three = {"A": "ALA", "R": "ARG", "N": "ASN", "D": "ASP", "C": "CYS",
+             "Q": "GLN", "E": "GLU", "G": "GLY", "H": "HIS", "I": "ILE",
+             "L": "LEU", "K": "LYS", "M": "MET", "F": "PHE", "P": "PRO",
+             "S": "SER", "T": "THR", "W": "TRP", "Y": "TYR", "V": "VAL"}
+
+    def write_pdb(path, seq, numbered, shift):
+        lines = []
+        for i, aa in enumerate(seq):
+            num = int("".join(c for c in numbered.residues[i].pos
+                              if c.isdigit()) or 0)
+            y = 1.0 if (shift and num in cdr) else 0.0
+            lines.append("ATOM  %5d  CA  %3s A%4d    %8.3f%8.3f%8.3f  1.00 90.00"
+                         % (i + 1, three.get(aa, "GLY"), i + 1, i * 3.0, y, 0.0))
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    with tempfile.TemporaryDirectory() as td:
+        donor_pdb = os.path.join(td, "donor.pdb")
+        good = os.path.join(td, "v_good.pdb")
+        bad = os.path.join(td, "v_bad.pdb")
+        write_pdb(donor_pdb, donor.sequence, donor, False)
+        write_pdb(good, donor.sequence, donor, False)
+        write_pdb(bad, donor.sequence, donor, True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli_main([
+                "rmsd",
+                "--input", os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"),
+                "--donor", donor_pdb,
+                "--variants", good, bad,
+                "--chain", "H",
+            ])
+        out = buf.getvalue()
+        check("rmsd CLI exit 0", rc == 0, str(rc))
+        check("rmsd CLI reports CDR-RMSD", "CDR-RMSD" in out, out[:200])
+        check("rmsd CLI zero for identical", "v_good.pdb" in out and "0.00" in out)
+
+
+def test_calibration_substitution_match():
+    """A calibration effect only applies to the donor/human pair it measured."""
+    print("calibration substitution match")
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor = number_heavy(M4D5_VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    base = analyze_backmutations(donor, vg)
+    cand = next((c for c in base.candidates if c.donor_aa != c.human_aa), None)
+    if cand is None:
+        check("calibration test has a candidate", False)
+        return
+    match = {cand.position: {"ddG_kcal": 0.8, "n_variants": 3,
+                             "donor_aa": cand.donor_aa, "human_aa": cand.human_aa}}
+    mismatch = {cand.position: {"ddG_kcal": 0.8, "n_variants": 3,
+                                "donor_aa": cand.human_aa, "human_aa": cand.donor_aa}}
+    r_match = analyze_backmutations(donor, vg, calibration=match)
+    r_mism = analyze_backmutations(donor, vg, calibration=mismatch)
+    cm = next(c for c in r_match.candidates if c.position == cand.position)
+    cx = next(c for c in r_mism.candidates if c.position == cand.position)
+    check("matching pair applies the empirical effect",
+          cm.empirical_ddG == 0.8 and cm.empirical_n == 3,
+          f"{cm.empirical_ddG}/{cm.empirical_n}")
+    check("mismatched pair is ignored (different substitution)",
+          cx.empirical_ddG is None, str(cx.empirical_ddG))
+
+
+def test_learning_deconvolution():
+    """Ridge regression separates co-occurring positions from multi-position variants."""
+    print("learning deconvolution")
+    from humanize.learning import _ridge_solve
+
+    # a appears in variants 1,3; b in 2,3; y = a + 2b (rows: a, b, a+b)
+    beta = _ridge_solve([["a"], ["b"], ["a", "b"]], [1.0, 2.0, 3.0],
+                        ["a", "b"], lam=0.0)
+    check("ridge recovers additive effects",
+          abs(beta[0] - 1.0) < 1e-6 and abs(beta[1] - 2.0) < 1e-6, str(beta))
+
+
+def test_clash_detection():
+    print("clash detection")
+    from humanize.structure import PDBAtom, PDBModel, count_clashes
+
+    def mk(dist):
+        m = PDBModel()
+        m.atoms.append(PDBAtom("CA", "ALA", "A", 1, 0.0, 0.0, 0.0, 90.0))
+        m.atoms.append(PDBAtom("CA", "ALA", "A", 2, dist, 0.0, 0.0, 90.0))
+        return m
+
+    check("close contact counted as a clash",
+          count_clashes(mk(1.5))["n_clashes"] >= 1, str(count_clashes(mk(1.5))))
+    check("normal distance not a clash", count_clashes(mk(4.0))["n_clashes"] == 0)
+    check("same-residue atoms are not clashes",
+          count_clashes(mk(1.5))["worst"] is not None)
+
+
+def test_structural_score_and_plddt():
+    """Noisy-OR structural combination + continuous pLDDT weighting."""
+    print("structural score + pLDDT")
+    from humanize.backmut import _noisy_or, _plddt_factor
+    from humanize.config import WEIGHTS
+
+    check("noisy-OR accumulates independent evidence",
+          _noisy_or([0.85, 0.80]) > 0.85,
+          str(_noisy_or([0.85, 0.80])))
+    check("pLDDT unknown -> no change", _plddt_factor(None) == 1.0)
+    check("pLDDT low -> strong down-weight", _plddt_factor(50) <= 0.21,
+          str(_plddt_factor(50)))
+    check("pLDDT high -> full weight", _plddt_factor(90) >= 0.999)
+    check("pLDDT monotonic", _plddt_factor(60) < _plddt_factor(80))
+
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor = number_heavy(M4D5_VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    base = analyze_backmutations(donor, vg)
+    h27 = next((c for c in base.candidates if c.position == "H27"
+                and "canonical" in c.features and "vernier" in c.features), None)
+    check("multi-feature structural score uses noisy-OR",
+          h27 is not None
+          and abs(h27.structural_score
+                  - round(_noisy_or([WEIGHTS["structural"]["canonical"],
+                                     WEIGHTS["structural"]["vernier"]]), 2)) < 0.02,
+          str(h27.structural_score if h27 else None))
+
+
+def test_design_panel():
+    print("structure-guided design panel")
+    from humanize.variants import structure_guided_panel
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    donor = number_heavy(M4D5_VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    jg = db.j_for("H")[0]
+    bm = analyze_backmutations(donor, vg)
+    panel = structure_guided_panel(donor, vg, jg, "kabat", bm, structure=None,
+                                   n_extra=3)
+    check("panel has the requested steps", len(panel) == 3, str(len(panel)))
+    check("panel names are graded",
+          [v.name for v in panel] == ["H_V_opt1", "H_V_opt2", "H_V_opt3"],
+          str([v.name for v in panel]))
+    lengths = [len(v.backmutations) for v in panel]
+    check("panel back-mutations strictly increase",
+          lengths[0] < lengths[1] < lengths[2], str(lengths))
+    check("panel positions unique within each variant",
+          all(len(v.backmutations) == len(set(v.backmutations)) for v in panel))
 
 
 def test_end_to_end():
@@ -789,7 +1235,7 @@ def test_end_to_end():
 
 def main():
     test_numbering()
-    test_nglycan_introduction_penalty()
+    test_chemical_liability_delta()
     test_vl_cdr3_insertion_numbering()
     test_structure_hint_chain_filtering()
     test_learning_fab_vl_positions()
@@ -810,6 +1256,17 @@ def main():
     test_docx_report()
     test_enhanced_report()
     test_fr_indel_detection()
+    test_fr_insertion_interactive_override()
+    test_step3_structure_tier_rules()
+    test_multi_model_consensus_fields()
+    test_structure_rmsd_engine()
+    test_af3_variant_rmsd_wiring()
+    test_standalone_rmsd_cli()
+    test_calibration_substitution_match()
+    test_learning_deconvolution()
+    test_clash_detection()
+    test_structural_score_and_plddt()
+    test_design_panel()
     test_end_to_end()
     print()
     if FAILURES:

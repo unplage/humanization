@@ -21,7 +21,11 @@ from .numbering import (
     _cdr_segments,
 )
 from .config import VHH_HALLMARK
-from .fr_indel import detect_fr_indels
+from .fr_indel import (
+    FRCorrespondence,
+    build_fr_correspondence,
+    detect_fr_indels,
+)
 
 # CDR position sets per scheme (Kabat space). Framework-flanking positions
 # included in Chothia/AbM/IMGT CDR1 (the 26-30 stem) are grafted as well.
@@ -68,62 +72,6 @@ def _pos_num(pos: str) -> int:
     return int("".join(c for c in pos if c.isdigit()))
 
 
-def _is_shifted_germline_residue(
-    donor_pos: str,
-    dmap: Dict[str, str],
-    gmap: Dict[str, str],
-    fr_indels: list,
-    chain_type: str = "H",
-) -> Optional[str]:
-    """Check if a donor-only FR position is a shifted germline residue.
-    
-    When the donor has an upstream insertion (e.g. H6), downstream positions
-    get shifted (donor H6A = germline H6). This function detects this by
-    checking if the donor's downstream sequence matches the germline's
-    sequence from the corresponding position.
-    
-    Returns the germline amino acid if this is a shifted residue, else None.
-    """
-    if not fr_indels:
-        return None
-    
-    d_num = _pos_num(donor_pos)
-    
-    for indel in fr_indels:
-        if indel.indel_type != "insertion":
-            continue
-        ins_num = _pos_num(indel.position)
-        if d_num <= ins_num:
-            continue  # This position is before or at the insertion
-        
-        # Check if downstream sequence matches germline
-        # Donor H6A+ should match germline H6+ (shifted by 1)
-        ins_base = indel.position.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        germ_pos = ins_base  # germline position corresponding to donor insertion + 1
-        
-        # Build sequences from donor position and germline position
-        donor_seq = []
-        germ_seq = []
-        for offset in range(5):
-            d_p = f"{chain_type}{d_num + offset}"
-            g_p = f"{chain_type}{int(''.join(c for c in germ_pos if c.isdigit())) + offset}"
-            if d_p in dmap:
-                donor_seq.append(dmap[d_p])
-            if g_p in gmap:
-                germ_seq.append(gmap[g_p])
-        
-        if len(donor_seq) >= 3 and len(germ_seq) >= 3 and donor_seq[:3] == germ_seq[:3]:
-            # Sequences match — this is a shifted germline residue
-            # Donor position d_num corresponds to germline position d_num - 1
-            # (shifted right by the insertion)
-            germ_num = d_num - 1
-            germ_key = f"{chain_type}{germ_num}"
-            if germ_key in gmap:
-                return gmap[germ_key]
-    
-    return None
-
-
 def cdr_positions_for(scheme: str, chain_type: str) -> set:
     """Position numbers included in each CDR for the scheme (for grafting)."""
     out = set()
@@ -142,6 +90,7 @@ class GraftResult:
     donor_positions: List[str]
     warnings: List[str] = field(default_factory=list)
     fr_indels: List = field(default_factory=list)  # List[FRIndel]
+    fr_correspondence: Optional["FRCorrespondence"] = None
 
 
 def chain_from_origin_map(
@@ -176,6 +125,10 @@ def chain_from_origin_map(
     return chain
 
 
+def _order_key(pos: str):
+    return (pos[0], _pos_num(pos), pos)
+
+
 def graft_chain(
     donor: NumberedChain,
     v_gene: GermlineGene,
@@ -183,11 +136,18 @@ def graft_chain(
     scheme: str = "kabat",
     is_vhh: bool = False,
     exclude_indel: bool = False,
+    fr_indels: Optional[list] = None,
 ) -> GraftResult:
     """Build one humanized V domain (CDR grafting).
-    
+
+    Framework positions are populated from the human germline using the
+    donor<->germline correspondence (so a donor FR insertion never overwrites
+    the germline residue). CDRs come from the donor.
+
     exclude_indel: if True, exclude donor-only FR positions (insertions) from
                    the graft. Used for V0 (pure graft without donor indels).
+    fr_indels:     pre-computed FR indel list (keeps user-confirmed insertion
+                   positions); detected internally when omitted.
     """
     chain_type = donor.chain_type
     if v_gene.numbered is None or j_gene.numbered is None:
@@ -200,80 +160,87 @@ def graft_chain(
     gmap = gmap_src.posmap()             # human germline V
     jmap = jmap_src.posmap()             # human J (FR4)
 
-    # Detect FR indels for shifted-residue detection
-    fr_indels = detect_fr_indels(donor, v_gene)
+    if fr_indels is None:
+        fr_indels = detect_fr_indels(donor, v_gene)
+    corr = build_fr_correspondence(donor, v_gene, fr_indels)
 
     cdr_nums = cdr_positions_for(scheme, chain_type)
     j_anchor = 103 if chain_type == "H" else 98
+    insertion_set = set(corr.insertion_positions)
 
-    # build the grafted map
     out: Dict[str, str] = {}
     origin: Dict[str, str] = {}
-    all_positions = sorted(
-        set(dmap) | set(gmap) | set(jmap),
-        key=lambda p: (p[0], _pos_num(p), p),
-    )
-    for pos in all_positions:
+
+    # ---- 1. CDR loops from donor (donor defines the loop, incl. insertions)
+    for pos, aa in dmap.items():
         num = _pos_num(pos)
         if num >= j_anchor:
-            if pos in jmap and jmap[pos]:
-                out[pos] = jmap[pos]
-                origin[pos] = "j"
-            elif pos in dmap and dmap[pos]:
-                # Position in donor but not covered by the J gene — keep
-                # the donor residue so the sequence stays complete (warn
-                # but do NOT drop: a missing J residue truncates FR4).
-                out[pos] = dmap[pos]
-                origin[pos] = "donor"
-                warnings.append(
-                    f"[{chain_type}] FR4 position {pos} absent from J "
-                    f"gene; keeping donor residue to avoid truncation")
             continue
-        is_cdr = num in cdr_nums
-        keep_donor = is_vhh and chain_type == "H" and num in VHH_HALLMARK
-        if is_cdr:
-            if pos in dmap and dmap[pos]:
-                out[pos] = dmap[pos]
-                origin[pos] = "donor"
-        elif keep_donor and pos in dmap and dmap[pos]:
-            out[pos] = dmap[pos]
-            origin[pos] = "donor(vhh)"
-        else:
-            if pos in gmap and gmap[pos]:
-                out[pos] = gmap[pos]
-                origin[pos] = "germline"
-            elif pos in dmap and dmap[pos]:
-                # germline lacks this FR position. Two cases:
-                # 1. True insertion (e.g. VH3-family H49 for VHH): keep donor
-                # 2. Shifted germline residue due to upstream insertion:
-                #    donor's H6A(Q) = germline's H6(Q) — use germline residue
-                is_shifted = _is_shifted_germline_residue(
-                    pos, dmap, gmap, fr_indels, chain_type)
-                if is_shifted:
-                    # This donor position corresponds to a germline position
-                    # shifted by an upstream insertion — use germline residue
-                    out[pos] = is_shifted
-                    origin[pos] = "germline"
-                elif exclude_indel:
-                    # Pure graft mode (V0): skip true donor insertion positions
-                    continue
-                else:
-                    out[pos] = dmap[pos]
-                    origin[pos] = "donor(vhh)" if (is_vhh and chain_type == "H") else "donor(indel)"
+        if num in cdr_nums and aa:
+            out[pos] = aa
+            origin[pos] = "donor"
 
-    seq = "".join(aa for pos, aa in sorted(out.items(), key=lambda kv: (kv[0][0], _pos_num(kv[0]), kv[0])))
+    # ---- 2. Framework FR1-FR3: human germline template, aligned via corr
+    for gpos, gaa in gmap.items():
+        num = _pos_num(gpos)
+        if num >= j_anchor or num in cdr_nums:
+            continue
+        dpos = corr.germline_to_donor.get(gpos)
+        key = dpos if dpos is not None else gpos
+        if (is_vhh and chain_type == "H" and num in VHH_HALLMARK
+                and dpos is not None and dmap.get(dpos)):
+            out[key] = dmap[dpos]
+            origin[key] = "donor(vhh)"
+        else:
+            out[key] = gaa
+            origin[key] = "germline"
+
+    # ---- 3. Deletions (germline residues the donor lacks) stay human
+    for gpos in corr.deletion_positions:
+        if gpos not in out and gmap.get(gpos):
+            out[gpos] = gmap[gpos]
+            origin[gpos] = "germline"
+
+    # ---- 4. Donor insertions (FR): kept unless pure graft (V0)
+    for dpos in corr.insertion_positions:
+        if exclude_indel:
+            continue
+        if dmap.get(dpos):
+            out[dpos] = dmap[dpos]
+            if is_vhh and chain_type == "H" and _pos_num(dpos) in VHH_HALLMARK:
+                origin[dpos] = "donor(vhh)"
+            else:
+                origin[dpos] = "donor(indel)"
+
+    # ---- 5. FR4 / J region (human J by construction; donor fallback)
+    fr4_positions = sorted(
+        (set(jmap) | {p for p in dmap if _pos_num(p) >= j_anchor}),
+        key=_order_key,
+    )
+    for pos in fr4_positions:
+        if _pos_num(pos) < j_anchor:
+            continue
+        if jmap.get(pos):
+            out[pos] = jmap[pos]
+            origin[pos] = "j"
+        elif dmap.get(pos):
+            # Position in donor but not covered by the J gene — keep the
+            # donor residue so FR4 is not truncated (warn).
+            out[pos] = dmap[pos]
+            origin[pos] = "donor"
+            warnings.append(
+                f"[{chain_type}] FR4 position {pos} absent from J "
+                f"gene; keeping donor residue to avoid truncation")
+
+    seq = "".join(aa for pos, aa in sorted(out.items(), key=lambda kv: _order_key(kv[0])))
+
     # Build the numbered chain directly from the assembled position map.
     # Positions come from consistently-numbered donor/germline/J maps, so
     # framework lengths (e.g. VH3-family FR2 = 13 with gap at H49 vs a donor
-    # that fills H49) are preserved by construction. Re-running the heuristic
-    # anchor numbering on the assembled sequence would mis-derive FR2 length
-    # from sequence content ("KG" -> 13) and shift CDR2 by one residue.
+    # that fills H49) are preserved by construction.
     numbered = chain_from_origin_map(seq, out, chain_type, donor, gmap_src, jmap_src)
 
     donor_positions = [pos for pos in out if origin[pos].startswith("donor")]
-
-    # Detect FR indels between donor and germline
-    fr_indels = detect_fr_indels(donor, v_gene)
 
     return GraftResult(
         scheme=scheme,
@@ -284,7 +251,34 @@ def graft_chain(
         donor_positions=donor_positions,
         warnings=warnings,
         fr_indels=fr_indels,
+        fr_correspondence=corr,
     )
+
+
+def _materialize(
+    origin: Dict[str, str],
+    corr: "FRCorrespondence",
+    dmap: Dict[str, str],
+    gmap: Dict[str, str],
+    jmap: Dict[str, str],
+) -> Tuple[str, Dict[str, str]]:
+    """Turn an origin map into the amino-acid sequence.
+
+    Donor labels are resolved directly from the donor map; germline labels are
+    resolved through the correspondence (a donor label may correspond to a
+    different germline position because of an upstream insertion).
+    """
+    aas: Dict[str, str] = {}
+    for pos, src in origin.items():
+        if src in ("donor", "donor(vhh)", "donor(indel)"):
+            aas[pos] = dmap.get(pos, "")
+        elif src == "germline":
+            gpos = corr.donor_to_germline.get(pos, pos)
+            aas[pos] = gmap.get(gpos) or dmap.get(pos, "")
+        else:  # J
+            aas[pos] = jmap.get(pos) or dmap.get(pos, "")
+    seq = "".join(aa for pos, aa in sorted(aas.items(), key=lambda kv: _order_key(kv[0])))
+    return seq, aas
 
 
 def graft_variant(
@@ -296,20 +290,25 @@ def graft_variant(
     is_vhh: bool = False,
     force_human: Optional[List[str]] = None,
     exclude_indel: bool = False,
+    fr_indels: Optional[list] = None,
 ) -> GraftResult:
     """Graft + apply a list of back-mutations (position labels like 'H67').
 
     backmutations: donor residues to restore at these positions (position ->
     donor aa). force_human: positions to keep human even if recommended.
     exclude_indel: if True, exclude donor FR insertions from base graft (V0).
+    fr_indels:     pre-computed FR indels (keeps user-confirmed insertion pos).
     """
     base = graft_chain(donor, v_gene, j_gene, scheme, is_vhh,
-                       exclude_indel=exclude_indel)
+                       exclude_indel=exclude_indel, fr_indels=fr_indels)
     if not backmutations and not force_human:
         return base
     if v_gene.numbered is None or j_gene.numbered is None:
         raise ValueError(f"[{base.chain_type}] germline gene without numbering: {v_gene.gene_id}")
     dmap = donor.posmap()
+    gmap = v_gene.numbered.posmap()
+    jmap = j_gene.numbered.posmap()
+    corr = base.fr_correspondence or build_fr_correspondence(donor, v_gene, fr_indels)
     out = dict(base.origin)
     for pos in backmutations or []:
         if pos in dmap and dmap[pos]:
@@ -318,18 +317,8 @@ def graft_variant(
         if pos in out and out[pos] == "donor(vhh)":
             continue   # VHH hallmark must not be touched
         out[pos] = "germline"
-    # rebuild sequence from origin map
-    seqs: Dict[str, str] = {}
-    for pos, src in out.items():
-        if src in ("donor", "donor(vhh)", "donor(indel)"):
-            seqs[pos] = dmap[pos]
-        elif src == "germline":
-            if v_gene.numbered is not None:
-                seqs[pos] = v_gene.numbered.posmap()[pos]
-        else:
-            if j_gene.numbered is not None:
-                seqs[pos] = j_gene.numbered.posmap()[pos]
-    seq = "".join(aa for pos, aa in sorted(seqs.items(), key=lambda kv: (kv[0][0], _pos_num(kv[0]), kv[0])))
+    # rebuild sequence from origin map (germline labels resolve through corr)
+    seq, seqs = _materialize(out, corr, dmap, gmap, jmap)
     # rebuild the numbered chain from the position map (see graft_chain)
     numbered = chain_from_origin_map(
         seq, seqs, base.chain_type, donor,
@@ -343,4 +332,6 @@ def graft_variant(
         origin=out,
         donor_positions=[p for p in out if out[p].startswith("donor")],
         warnings=base.warnings,
+        fr_indels=base.fr_indels,
+        fr_correspondence=corr,
     )

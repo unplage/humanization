@@ -22,6 +22,7 @@ from .germline import (
     compare_to_germline,
     score_j_match,
 )
+from .config import CVI
 from .germline_frequency import (
     get_frequency,
     is_recommended,
@@ -76,25 +77,11 @@ class MultiStrategyResult:
         return "\n".join(lines)
 
 
-# CVI (canonical + vernier + interface) 位置集
-CVI_POSITIONS = {
-    "H": {
-        "canonical": {24, 26, 27, 29, 33, 34, 47, 48, 49, 57, 58, 71, 78, 94},
-        "vernier": {2, 27, 28, 29, 30, 47, 48, 49, 67, 69, 71, 73, 78, 93, 94, 103},
-        "interface_core": {37, 39, 45, 47, 91, 93, 95, 103},
-    },
-    "L": {
-        "canonical": {2, 25, 33, 34, 36, 37, 45, 46, 48, 49, 58, 64, 71, 90, 94, 97, 98},
-        "vernier": {2, 4, 35, 36, 37, 38, 43, 44, 45, 46, 48, 49, 58, 62, 63, 66, 67, 68, 69, 71, 87, 88, 98},
-        "interface_core": {34, 36, 37, 38, 44, 45, 46, 87, 89, 91, 96, 98},
-    },
-}
-
-
 def _calculate_cvi_score(query: NumberedChain, gene: GermlineGene) -> float:
     """计算 CVI (canonical + vernier + interface) 同源性
     
-    基于 BI 2024 研究：CVI 同源性与表达量和亲和力保留显著相关
+    基于 BI 2024 研究：CVI 同源性与表达量和亲和力保留显著相关。
+    位置集来自 config.CVI（与 minimal.cvi_homology 共用，避免口径漂移）。
     """
     if gene.numbered is None:
         return 0.0
@@ -103,10 +90,7 @@ def _calculate_cvi_score(query: NumberedChain, gene: GermlineGene) -> float:
     g = gene.numbered.posmap()
     ctype = query.chain_type
     
-    # 合并所有 CVI 位置
-    all_cvi_positions = set()
-    for category in CVI_POSITIONS.get(ctype, {}).values():
-        all_cvi_positions.update(category)
+    all_cvi_positions = CVI.get(ctype, set())
     
     n = 0
     same = 0

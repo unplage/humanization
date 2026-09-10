@@ -111,6 +111,8 @@ def parse_cif_atom_site(path: str) -> Optional[PDBModel]:
                     d = dict(zip(cols, parts))
                     if d.get("group_PDB") in ("ATOM", "HETATM"):
                         try:
+                            b_iso = d.get("B_iso_or_equiv", "0")
+                            plddt = float(b_iso) if b_iso not in (".", "?") else 0.0
                             model.atoms.append(PDBAtom(
                                 name=d.get("auth_atom_id", d.get("label_atom_id", "?")),
                                 resname=d.get("auth_comp_id", d.get("label_comp_id", "?")),
@@ -119,6 +121,7 @@ def parse_cif_atom_site(path: str) -> Optional[PDBModel]:
                                 x=float(d["Cartn_x"]),
                                 y=float(d["Cartn_y"]),
                                 z=float(d["Cartn_z"]),
+                                plddt=plddt,
                             ))
                         except (ValueError, KeyError):
                             continue
@@ -251,6 +254,7 @@ def compute_hints(
     antigen_chains: Optional[List[str]] = None,
     pdb_path: Optional[str] = None,
     literature_positions: Optional[set] = None,
+    use_plddt: bool = True,
 ) -> StructureHints:
     """Compute per-position hints for a chain in the model.
 
@@ -261,6 +265,9 @@ def compute_hints(
     literature_positions: Optional set of positions with literature evidence
                          (vernier/canonical/interface). If provided, structural
                          evidence is only applied to these positions.
+    use_plddt:    Interpret the B-factor column as an AF3 pLDDT score. Must be
+                  False for experimental PDB/CIF files, whose B-factor is a
+                  crystallographic temperature factor, not a confidence score.
     """
     heavy = model.heavy_atoms()
     by_res: Dict[Tuple[str, int], List] = {}
@@ -280,13 +287,15 @@ def compute_hints(
     # map resseq -> kabat pos
     resseq_to_pos = {v: k for k, v in position_map.items()}
 
-    # Extract pLDDT from model (AF3 B-factor column)
+    # Extract pLDDT from model (AF3 B-factor column). Skipped for experimental
+    # structures where the B-factor is a temperature factor, not pLDDT.
     plddt_by_pos: Dict[str, float] = {}
-    for a in model.atoms:
-        if a.chain == chain_label and a.plddt > 0:
-            pos = resseq_to_pos.get(a.resseq)
-            if pos and pos not in plddt_by_pos:
-                plddt_by_pos[pos] = a.plddt
+    if use_plddt:
+        for a in model.atoms:
+            if a.chain == chain_label and a.plddt > 0:
+                pos = resseq_to_pos.get(a.resseq)
+                if pos and pos not in plddt_by_pos:
+                    plddt_by_pos[pos] = a.plddt
 
     # Try FreeSASA for buriedness calculation
     # Returns: {pos: (is_buried, rel_sasa)} or None
@@ -333,10 +342,12 @@ def compute_hints(
         pos = resseq_to_pos.get(resseq)
         if pos is None:
             continue
-        # CDR contact: any atom within 4.5 A of a CDR atom; record partners
+        # CDR contact: any heavy atom within 4.5 A of any CDR heavy atom.
+        # All atoms of the residue are tested (not just the first one), so a
+        # side-chain-mediated contact is not missed.
         partners = set()
         for (r2, _n2, a2) in cdr_atoms:
-            if _dist(a2, atoms[0][1]) < 4.5:
+            if any(_dist(a2, a1) < 4.5 for (_n1, a1) in atoms):
                 ppos = resseq_to_pos.get(r2[1])
                 if ppos:
                     partners.add(ppos)
@@ -379,33 +390,39 @@ def compute_multi_model_consensus(
     cdr_positions: Dict[str, int],
     antigen_chains: Optional[List[str]] = None,
     min_consensus: int = 3,
+    use_plddt: bool = True,
 ) -> StructureHints:
-    """Compute structure hints from multiple models (e.g., AF3 rank_1-5).
-    
-    Only marks a position as buried/CDR-contact if at least min_consensus
-    models agree, reducing false positives from model uncertainty.
-    
+    """Compute structure hints from multiple models (e.g., AF3 rank_1-N).
+
+    Buried / CDR-contact / antigen-contact calls require at least
+    ``min_consensus`` models to agree (auto-relaxed when fewer models are
+    available). CDR partner lists are unioned across models, and pLDDT /
+    relSASA are averaged, so the structure-derived features consumed by
+    Step 3 (minimal reversion, paratope grafting) are all preserved.
+
     Args:
-        pdb_paths: List of PDB file paths (rank_1 through rank_N)
+        pdb_paths: PDB file paths (e.g. rank_1.pdb ... rank_N.pdb)
         chain_label: PDB chain id of the target chain
         position_map: {Kabat pos: residue number}
         cdr_positions: {Kabat pos: residue number} for CDR residues
         antigen_chains: Optional antigen chain ids
-        min_consensus: Minimum number of models that must agree (default: 3)
-    
+        min_consensus: Minimum number of agreeing models (default: 3)
+        use_plddt: Interpret the B-factor column as an AF3 pLDDT score.
+
     Returns:
-        StructureHints with consensus-based buried/CDR-contact calls
+        Consensus StructureHints (all six fields populated).
     """
-    from collections import Counter
-    
     if not pdb_paths:
         return StructureHints()
-    
-    # Collect buried/CDR-contact from each model
-    all_buried = []  # List[Dict[str, bool]]
-    all_cdr = []     # List[Dict[str, bool]]
-    all_plddt = []   # List[Dict[str, float]]
-    
+
+    buried_votes: Dict[str, List[bool]] = {}
+    cdr_votes: Dict[str, List[bool]] = {}
+    ag_votes: Dict[str, List[bool]] = {}
+    partners_all: Dict[str, set] = {}
+    plddt_vals: Dict[str, List[float]] = {}
+    sasa_vals: Dict[str, List[float]] = {}
+    n_models = 0
+
     for pdb_path in pdb_paths:
         if not os.path.exists(pdb_path):
             continue
@@ -414,75 +431,62 @@ def compute_multi_model_consensus(
             continue
         hints = compute_hints(
             model, chain_label, position_map, cdr_positions,
-            antigen_chains, pdb_path=pdb_path,
+            antigen_chains, pdb_path=pdb_path, use_plddt=use_plddt,
         )
-        buried = hints.data.get("buried", {})
-        cdr = hints.data.get("cdr_contact", {})
-        plddt = hints.data.get("plddt", {})
-        
-        # Filter out None values (uncertain) for consensus counting
-        all_buried.append({k: v for k, v in buried.items() if v is not None})
-        all_cdr.append({k: v for k, v in cdr.items() if v is not None})
-        all_plddt.append(plddt)
-    
-    if not all_buried:
+        n_models += 1
+        for pos, v in (hints.data.get("buried") or {}).items():
+            if v is not None:
+                buried_votes.setdefault(pos, []).append(v)
+        for pos, v in (hints.data.get("cdr_contact") or {}).items():
+            cdr_votes.setdefault(pos, []).append(bool(v))
+        for pos, v in (hints.data.get("antigen_contact") or {}).items():
+            ag_votes.setdefault(pos, []).append(bool(v))
+        for pos, ps in (hints.data.get("cdr_partners") or {}).items():
+            partners_all.setdefault(pos, set()).update(ps)
+        for pos, v in (hints.data.get("plddt") or {}).items():
+            plddt_vals.setdefault(pos, []).append(v)
+        for pos, v in (hints.data.get("rel_sasa") or {}).items():
+            sasa_vals.setdefault(pos, []).append(v)
+
+    if n_models == 0:
         return StructureHints()
-    
-    # Compute consensus for buried
-    consensus_buried = {}
-    all_positions = set()
-    for b in all_buried:
-        all_positions.update(b.keys())
-    
-    for pos in all_positions:
-        buried_votes = [b.get(pos) for b in all_buried if pos in b]
-        if len(buried_votes) >= min_consensus:
-            # Consensus: majority must agree
-            true_count = sum(1 for v in buried_votes if v is True)
-            false_count = sum(1 for v in buried_votes if v is False)
-            if true_count >= min_consensus:
-                consensus_buried[pos] = True
-            elif false_count >= min_consensus:
-                consensus_buried[pos] = False
-            else:
-                consensus_buried[pos] = None  # uncertain
-    
-    # Compute consensus for CDR contact
-    consensus_cdr = {}
-    all_cdr_positions = set()
-    for c in all_cdr:
-        all_cdr_positions.update(c.keys())
-    
-    for pos in all_cdr_positions:
-        cdr_votes = [c.get(pos) for c in all_cdr if pos in c]
-        if len(cdr_votes) >= min_consensus:
-            true_count = sum(1 for v in cdr_votes if v is True)
-            consensus_cdr[pos] = true_count >= min_consensus
-    
-    # Average pLDDT across models
-    avg_plddt = {}
-    all_plddt_positions = set()
-    for p in all_plddt:
-        all_plddt_positions.update(p.keys())
-    
-    for pos in all_plddt_positions:
-        values = [p[pos] for p in all_plddt if pos in p]
-        if values:
-            avg_plddt[pos] = sum(values) / len(values)
-    
+    thr = min(min_consensus, n_models) if min_consensus else 1
+
+    consensus_buried: Dict[str, Optional[bool]] = {}
+    for pos, vs in buried_votes.items():
+        if len(vs) >= thr:
+            t = sum(1 for v in vs if v)
+            f = len(vs) - t
+            consensus_buried[pos] = True if t >= thr else (False if f >= thr else None)
+
+    consensus_cdr = {
+        pos: sum(1 for v in vs if v) >= thr
+        for pos, vs in cdr_votes.items() if len(vs) >= thr
+    }
+    consensus_ag = {
+        pos: sum(1 for v in vs if v) >= thr
+        for pos, vs in ag_votes.items() if len(vs) >= thr
+    }
+    consensus_partners = {
+        pos: sorted(ps) for pos, ps in partners_all.items() if ps
+    }
+    avg_plddt = {p: sum(v) / len(v) for p, v in plddt_vals.items() if v}
+    avg_sasa = {p: sum(v) / len(v) for p, v in sasa_vals.items() if v}
+
     return StructureHints({
         "buried": consensus_buried,
         "cdr_contact": consensus_cdr,
-        "antigen_contact": {},  # antigen contact not computed in consensus
-        "cdr_partners": {},
+        "antigen_contact": consensus_ag,
+        "cdr_partners": consensus_partners,
         "plddt": avg_plddt,
-        "rel_sasa": {},
+        "rel_sasa": avg_sasa,
     })
 
 
 def cdr_rmsd(model_a: PDBModel, model_b: PDBModel, resseqs: List[int]) -> Optional[float]:
-    """CA-based RMSD of a residue subset between two models (same residue
-    numbering). Returns None when one model is missing residues."""
+    """CA-based RMSD of a residue subset between two models in the SAME frame
+    (no superposition). Kept for callers that already share a coordinate
+    frame; use ``structure_rmsd`` for independently predicted models."""
     def ca(model):
         out = {}
         for a in model.atoms:
@@ -500,6 +504,190 @@ def cdr_rmsd(model_a: PDBModel, model_b: PDBModel, resseqs: List[int]) -> Option
         return None
     s = sum(_dist(a, b) ** 2 for a, b in pairs)
     return math.sqrt(s / len(pairs))
+
+
+# ---------------------------------------------------------------------------
+# Superposition + CDR-RMSD validation (AF3 variant structures)
+# ---------------------------------------------------------------------------
+
+def ca_map(model: PDBModel, chain: str) -> Dict[int, Tuple[float, float, float]]:
+    """{resseq: CA xyz} for one chain."""
+    return {a.resseq: (a.x, a.y, a.z)
+            for a in model.atoms if a.chain == chain and a.name == "CA"}
+
+
+def kabsch_superpose(
+    mobile: List[Tuple[float, float, float]],
+    target: List[Tuple[float, float, float]],
+):
+    """Least-squares superposition of ``mobile`` onto ``target`` (Horn 1987).
+
+    Returns ``(rmsd, R, t)`` where R is a 3x3 rotation matrix and t a
+    translation, such that ``R @ mobile_i + t ~= target_i``. Pure stdlib
+    (quaternion power iteration); no numpy required.
+    """
+    n = len(mobile)
+    if n == 0 or n != len(target):
+        return None
+    cm = [sum(p[i] for p in mobile) / n for i in range(3)]
+    ct = [sum(p[i] for p in target) / n for i in range(3)]
+    P = [[p[i] - cm[i] for i in range(3)] for p in mobile]
+    Q = [[p[i] - ct[i] for i in range(3)] for p in target]
+
+    # covariance S = sum p_i q_i^T
+    S = [[sum(P[k][i] * Q[k][j] for k in range(n)) for j in range(3)]
+         for i in range(3)]
+    Sxx, Sxy, Sxz = S[0]
+    Syx, Syy, Syz = S[1]
+    Szx, Szy, Szz = S[2]
+    N = [
+        [Sxx + Syy + Szz, Syz - Szy, Szx - Sxz, Sxy - Syx],
+        [Syz - Szy, Sxx - Syy - Szz, Sxy + Syx, Szx + Sxz],
+        [Szx - Sxz, Sxy + Syx, -Sxx + Syy - Szz, Syz + Szy],
+        [Sxy - Syx, Szx + Sxz, Syz + Szy, -Sxx - Syy + Szz],
+    ]
+    # shift eigenvalues positive so power iteration finds the rotation
+    shift = sum(N[i][i] for i in range(4))
+    for i in range(4):
+        N[i][i] += shift
+    v = [1.0, 0.0, 0.0, 0.0]
+    for _ in range(200):
+        w = [sum(N[i][j] * v[j] for j in range(4)) for i in range(4)]
+        norm = math.sqrt(sum(x * x for x in w))
+        if norm < 1e-12:
+            break
+        v = [x / norm for x in w]
+    qw, qx, qy, qz = v
+    R = [
+        [qw * qw + qx * qx - qy * qy - qz * qz, 2 * (qx * qy - qw * qz),
+         2 * (qx * qz + qw * qy)],
+        [2 * (qx * qy + qw * qz), qw * qw - qx * qx + qy * qy - qz * qz,
+         2 * (qy * qz - qw * qx)],
+        [2 * (qx * qz - qw * qy), 2 * (qy * qz + qw * qx),
+         qw * qw - qx * qx - qy * qy + qz * qz],
+    ]
+    t = [ct[i] - sum(R[i][j] * cm[j] for j in range(3)) for i in range(3)]
+    s = 0.0
+    for p, q in zip(mobile, target):
+        rp = [sum(R[i][j] * p[j] for j in range(3)) + t[i] for i in range(3)]
+        s += _dist(rp, q) ** 2
+    return math.sqrt(s / n), R, tuple(t)
+
+
+def _apply(R, t, pt):
+    return tuple(sum(R[i][j] * pt[j] for j in range(3)) + t[i] for i in range(3))
+
+
+def count_clashes(model: PDBModel, min_dist: float = 2.0) -> Dict:
+    """Count inter-residue heavy-atom clashes below ``min_dist`` (grid-accelerated).
+
+    Returns ``{n_clashes, worst, examples}``; ``examples`` are
+    ``(chain,resseq,atom,chain,resseq,atom,distance)`` tuples (up to 5).
+    """
+    heavy = model.heavy_atoms()  # [((ch, resseq), name, xyz)]
+    if len(heavy) < 2:
+        return {"n_clashes": 0, "worst": None, "examples": []}
+    cell = max(min_dist, 0.1)
+    grid: Dict[Tuple[int, int, int], List[int]] = {}
+    key_of = [(int(math.floor(xyz[0] / cell)),
+               int(math.floor(xyz[1] / cell)),
+               int(math.floor(xyz[2] / cell))) for _, _, xyz in heavy]
+    for i, k in enumerate(key_of):
+        grid.setdefault(k, []).append(i)
+    n_clashes = 0
+    worst = None
+    examples = []
+    for i, ((res_i, name_i, xyz_i), k) in enumerate(zip(heavy, key_of)):
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for j in grid.get((k[0] + dx, k[1] + dy, k[2] + dz), ()):
+                        if j <= i:
+                            continue
+                        res_j, name_j, xyz_j = heavy[j]
+                        if res_i == res_j:
+                            continue
+                        d = _dist(xyz_i, xyz_j)
+                        if d < min_dist:
+                            n_clashes += 1
+                            if worst is None or d < worst:
+                                worst = d
+                            if len(examples) < 5:
+                                examples.append(
+                                    (res_i[0], res_i[1], name_i,
+                                     res_j[0], res_j[1], name_j, round(d, 2)))
+    return {"n_clashes": n_clashes,
+            "worst": round(worst, 2) if worst is not None else None,
+            "examples": examples}
+
+
+def _pos_key(pos: str):
+    return (int("".join(c for c in pos if c.isdigit())), pos)
+
+
+def structure_rmsd(
+    donor_model: PDBModel,
+    donor_chain: str,
+    donor_pos_to_resseq: Dict[str, int],
+    variant_model: PDBModel,
+    variant_chain: str,
+    variant_pos_to_resseq: Dict[str, int],
+    cdr_sets: Dict[str, set],
+    framework_positions: set,
+) -> Dict:
+    """Superpose a variant on the donor framework, then measure CDR CA-RMSD.
+
+    ``*_pos_to_resseq`` are {Kabat pos: PDB residue number} maps. Returns
+    ``{cdr_rmsd, fr_rmsd, n_cdr, n_fr, per_cdr}`` (RMSD in Angstrom, None when
+    there is not enough aligned structure).
+    """
+    dca = ca_map(donor_model, donor_chain)
+    vca = ca_map(variant_model, variant_chain)
+
+    def xyz_map(pos_to_resseq, ca):
+        out = {}
+        for pos, resseq in pos_to_resseq.items():
+            if resseq in ca:
+                out[pos] = ca[resseq]
+        return out
+
+    dxyz = xyz_map(donor_pos_to_resseq, dca)
+    vxyz = xyz_map(variant_pos_to_resseq, vca)
+
+    fr_common = [p for p in sorted(framework_positions, key=_pos_key)
+                 if p in dxyz and p in vxyz]
+    if len(fr_common) < 3:
+        return {"cdr_rmsd": None, "fr_rmsd": None, "n_cdr": 0,
+                "n_fr": len(fr_common), "per_cdr": {}}
+    fit = kabsch_superpose([dxyz[p] for p in fr_common],
+                           [vxyz[p] for p in fr_common])
+    if fit is None:
+        return {"cdr_rmsd": None, "fr_rmsd": None, "n_cdr": 0,
+                "n_fr": len(fr_common), "per_cdr": {}}
+    fr_rmsd, R, t = fit
+
+    per_cdr: Dict[str, Optional[float]] = {}
+    all_pairs: List[float] = []
+    for name, posset in cdr_sets.items():
+        common = [p for p in sorted(posset, key=_pos_key)
+                  if p in dxyz and p in vxyz]
+        if not common:
+            per_cdr[name] = None
+            continue
+        ss = sum(_dist(_apply(R, t, dxyz[p]), vxyz[p]) ** 2 for p in common)
+        per_cdr[name] = round(math.sqrt(ss / len(common)), 3)
+        all_pairs.extend(
+            _dist(_apply(R, t, dxyz[p]), vxyz[p]) for p in common)
+
+    cdr_rmsd = (round(math.sqrt(sum(d * d for d in all_pairs) / len(all_pairs)), 3)
+                if all_pairs else None)
+    return {
+        "cdr_rmsd": cdr_rmsd,
+        "fr_rmsd": round(fr_rmsd, 3),
+        "n_cdr": len(all_pairs),
+        "n_fr": len(fr_common),
+        "per_cdr": per_cdr,
+    }
 
 
 # ---------------------------------------------------------------------------

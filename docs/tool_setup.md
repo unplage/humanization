@@ -58,8 +58,9 @@ What the pipeline does with AF3 models (per chain and per variant):
    CDR contacts (<4.5 A), antigen contacts;
 3. feed the hints back into back-mutation scoring (structural score
    refinement);
-4. per-variant: CDR-loop CA RMSD vs the donor model (same numbering),
-   VH/VL interface contact count retention.
+4. with `--af3-rmsd`: predict each variant (in the donor partner context) and
+   report framework-superposed CDR-loop CA-RMSD vs the donor model
+   (`structure_validation` in the JSON report).
 
 Recommended seeds: 2-3 per job; report the best-pLDDT model.
 

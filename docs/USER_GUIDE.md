@@ -123,7 +123,7 @@ python3 scripts/humanize/cli.py learn \
 | `adimab_frequency` | Adimab 推荐 germline + 频率 | 治疗性抗体优化 |
 | `pioneer_frequency` | Pioneer 库 germline + 频率 | 600+ 临床阶段抗体 |
 | `composite_3axis` | 0.5*CVI + 0.3*频率 + 0.2*FR | **综合最优** |
-| `auto` (默认) | VH=cvi_best, VL=cdr_best | **默认推荐** |
+| `auto` (默认) | VH=adimab_frequency, VL=current | **默认推荐** |
 
 **使用频率数据**：基于已获批和临床阶段的治疗性抗体分析，IGHV3-23 (~18%)、IGHV1-69 (~12%)、IGKV1-39 (~15%) 是最常用的 germline。
 

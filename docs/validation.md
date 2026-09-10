@@ -53,15 +53,21 @@ must be resolved before synthesis (adjust numbering or ANARCI-mode config).
 
 ## 4. Structure-based acceptance (AF3 mode, server)
 
-Per variant:
-1. CDR loop CA-RMSD vs donor model: H1/H2/L1/L2 < 1.0 A,
+Run with `--af3-mode ... --af3-rmsd`. The pipeline predicts each variant,
+superposes it on the donor framework (Kabsch) and writes CDR CA-RMSD
+(CDR1/CDR2/CDR3) plus the framework RMSD to the report/JSON.
+
+Automated checks:
+1. CDR loop CA-RMSD vs donor model (framework-superposed): H1/H2/L1/L2 < 1.0 A,
    H3/L3 < 1.5 A (AF3 accuracy limits; higher = redesign needed).
-2. VH/VL interface: buried interface area within 15% of donor Fv;
+2. Inter-residue heavy-atom clashes < 2.0 A: expect 0; any clash = redesign.
+
+Manual/follow-up checks (not yet automated):
+1. VH/VL interface: buried interface area within 15% of donor Fv;
    identical interface-core residue side-chain conformations.
-3. Antigen complex (if `--antigen`): paratope contact set of the variant
-   must cover >= 90% of donor contacts; no new steric clashes
-   (AF3 clash score / pLDDT per residue).
-4. pLDDT of grafted CDRs >= pLDDT of donor CDRs - 5.
+2. Antigen complex (if `--antigen`): paratope contact set of the variant
+   must cover >= 90% of donor contacts.
+3. pLDDT of grafted CDRs >= pLDDT of donor CDRs - 5.
 
 If any check fails: revert additional positions (from T3/contact lists),
 re-run AF3, iterate (max 2 rounds before consulting experimental data).

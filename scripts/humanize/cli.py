@@ -63,6 +63,9 @@ def cmd_run(args):
             outdir=os.path.join(args.outdir, "mpnn"),
         ),
         interactive_indel=getattr(args, 'interactive_indel', False),
+        af3_validate_variants=getattr(args, 'af3_rmsd', False),
+        design_panel=getattr(args, 'design_panel', False),
+        design_panel_steps=getattr(args, 'design_panel_steps', 3),
     )
     
     # Determine which step is being run and create appropriate subdirectory
@@ -110,6 +113,110 @@ def cmd_run(args):
     print("\n[humanize] outputs:")
     for k, p in paths.items():
         print(f"  {k}: {p}")
+    return 0
+
+
+def cmd_rmsd(args):
+    """Superpose externally predicted variant structures on a donor structure
+    and compute framework-superposed CDR CA-RMSD.
+
+    The donor reference comes from ``--donor``; the variant structures may be
+    any PDB/CIF that contains the chain being evaluated (they do NOT need to
+    contain a donor chain). The donor sequence/numbering comes from ``--input``.
+    """
+    from humanize.sequences import parse_input
+    from humanize.numbering import number_heavy, number_light
+    from humanize.structure import (
+        _AA3TO1, count_clashes, load_model, match_pdb_chain, structure_rmsd,
+    )
+    from humanize.pipeline import build_cdr_framework_sets, pdb_chain_pos_map
+
+    _fmt, chains = parse_input(args.input, args.format)
+    ctype = args.chain
+    donor_chain = next((c for c in chains if c.chain_type == ctype), None)
+    if donor_chain is None or donor_chain.numbered is None:
+        print(f"[humanize] no {ctype} chain in {args.input}", file=sys.stderr)
+        return 1
+    donor = donor_chain.numbered
+
+    dmodel = load_model(args.donor)
+    if dmodel is None:
+        print(f"[humanize] could not read donor structure {args.donor}",
+              file=sys.stderr)
+        return 1
+    dchains = {}
+    for a in dmodel.atoms:
+        dchains.setdefault(a.chain, []).append(a)
+    dlabel = args.donor_chain or match_pdb_chain(dchains, donor.sequence)
+    if dlabel is None or dlabel not in dchains:
+        print("[humanize] could not match the donor chain by sequence; "
+              "pass --donor-chain", file=sys.stderr)
+        return 1
+    donor_pos = pdb_chain_pos_map(dmodel, dlabel, donor)
+    cdr_sets, framework = build_cdr_framework_sets(donor, args.scheme)
+
+    results = {}
+    for vpath in args.variants:
+        vmodel = load_model(vpath)
+        if vmodel is None:
+            print(f"[humanize] could not read {vpath}", file=sys.stderr)
+            continue
+        vchains = {}
+        for a in vmodel.atoms:
+            vchains.setdefault(a.chain, []).append(a)
+        vlabel = args.variant_chain or match_pdb_chain(vchains, donor.sequence)
+        if vlabel is None or vlabel not in vchains:
+            print(f"[humanize] could not match a chain in {vpath}",
+                  file=sys.stderr)
+            continue
+        ca = sorted((a.resseq, a.resname)
+                    for a in vchains[vlabel] if a.name == "CA")
+        vseq = "".join(_AA3TO1.get(rn, "X") for _, rn in ca)
+        try:
+            vnum = number_heavy(vseq) if ctype == "H" else number_light(vseq)
+        except ValueError as e:
+            print(f"[humanize] numbering failed for {vpath}: {e}",
+                  file=sys.stderr)
+            continue
+        vpos = pdb_chain_pos_map(vmodel, vlabel, vnum)
+        res = structure_rmsd(
+            dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework)
+        clashes = count_clashes(vmodel)
+        res["n_clashes"] = clashes["n_clashes"]
+        res["worst_clash"] = clashes["worst"]
+        by_res = {a.resseq: a.plddt for a in vmodel.atoms
+                  if a.chain == vlabel and a.name == "CA" and a.plddt > 0}
+        cdr_all = set().union(*cdr_sets.values()) if cdr_sets else set()
+        cdr_vals = [by_res[vpos[p]] for p in cdr_all
+                    if p in vpos and vpos[p] in by_res]
+        res["cdr_plddt"] = (round(sum(cdr_vals) / len(cdr_vals), 1)
+                            if cdr_vals else None)
+        res["variant_chain"] = vlabel
+        results[os.path.basename(vpath)] = res
+
+    if not results:
+        print("[humanize] no variant structures evaluated", file=sys.stderr)
+        return 1
+
+    def _f(x):
+        return f"{x:.2f}" if isinstance(x, (int, float)) else "-"
+
+    print(f"[humanize] CDR-RMSD vs donor {os.path.basename(args.donor)} "
+          f"(chain {dlabel}, {args.scheme}, framework-superposed)")
+    print(f"{'variant':<28} {'CDR-RMSD':>9} {'FR-RMSD':>8} "
+          f"{'CDR1':>6} {'CDR2':>6} {'CDR3':>6} {'CDR pLDDT':>10} "
+          f"{'n_cdr':>6} {'clashes':>8} {'worst':>6}")
+    for name, r in results.items():
+        per = r.get("per_cdr") or {}
+        print(f"{name:<28} {_f(r.get('cdr_rmsd')):>9} {_f(r.get('fr_rmsd')):>8} "
+              f"{_f(per.get('CDR1')):>6} {_f(per.get('CDR2')):>6} "
+              f"{_f(per.get('CDR3')):>6} {_f(r.get('cdr_plddt')):>10} "
+              f"{r.get('n_cdr', 0):>6} "
+              f"{r.get('n_clashes', 0):>8} {_f(r.get('worst_clash')):>6}")
+    if args.out:
+        with open(args.out, "w") as fh:
+            json.dump(results, fh, indent=2)
+        print(f"\n[humanize] wrote {args.out}")
     return 0
 
 
@@ -268,6 +375,13 @@ def main(argv=None):
     p_run.add_argument("--mpnn-script", default="", help="path to protein_mpnn.py")
     p_run.add_argument("--interactive-indel", action="store_true",
                        help="enable interactive FR indel selection (VH+VL)")
+    p_run.add_argument("--af3-rmsd", action="store_true",
+                       help="predict each variant with AF3 and compute CDR-RMSD "
+                            "vs the donor model (requires --af3-mode)")
+    p_run.add_argument("--design-panel", action="store_true",
+                       help="emit a structure-guided V_opt panel of variants")
+    p_run.add_argument("--design-panel-steps", type=int, default=3,
+                       help="number of V_opt panel variants (default 3)")
     p_run.set_defaults(func=cmd_run)
 
     # ---- compare: lightweight germline evaluation (Step 1) ----
@@ -276,6 +390,27 @@ def main(argv=None):
     p_compare.add_argument("--format", default="auto", choices=["auto", "fab", "vhh"])
     p_compare.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
     p_compare.set_defaults(func=cmd_compare)
+
+    # ---- rmsd: compare external variant structures to a donor structure ----
+    p_rmsd = sub.add_parser(
+        "rmsd", help="CDR-RMSD of variant structures vs a donor structure")
+    p_rmsd.add_argument("--input", required=True,
+                        help="donor FASTA (for sequence/numbering)")
+    p_rmsd.add_argument("--donor", required=True,
+                        help="donor reference structure (PDB/CIF)")
+    p_rmsd.add_argument("--variants", nargs="+", required=True,
+                        help="variant structures (PDB/CIF), any chain composition")
+    p_rmsd.add_argument("--chain", default="H", choices=["H", "L"],
+                        help="chain type being evaluated")
+    p_rmsd.add_argument("--scheme", default="kabat",
+                        choices=["kabat", "chothia", "abm", "imgt"])
+    p_rmsd.add_argument("--format", default="auto", choices=["auto", "fab", "vhh"])
+    p_rmsd.add_argument("--donor-chain", default=None,
+                        help="force the donor PDB chain id")
+    p_rmsd.add_argument("--variant-chain", default=None,
+                        help="force the variant PDB chain id")
+    p_rmsd.add_argument("--out", default=None, help="write results JSON here")
+    p_rmsd.set_defaults(func=cmd_rmsd)
 
     p_g = sub.add_parser("setup-germline", help="download NCBI IgBLAST germline")
     p_g.add_argument("--dir", default="")

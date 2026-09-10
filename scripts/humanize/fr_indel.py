@@ -230,56 +230,6 @@ def _needleman_wunsch(seq1: List[str], seq2: List[str]) -> List[Tuple[str, str]]
     return alignment
 
 
-def _find_insertion_point(
-    long_aas: List[str], short_aas: List[str],
-    long_positions: List[str], short_positions: List[str],
-) -> Tuple[Optional[str], str]:
-    """Find where the extra residue is in the longer sequence.
-
-    Uses Needleman-Wunsch global alignment to find the insertion point.
-    Returns (position_label, amino_acid) of the insertion, or (None, '') if
-    not found.
-    """
-    if len(long_aas) <= len(short_aas):
-        return None, ''
-
-    alignment = _needleman_wunsch(long_aas, short_aas)
-
-    # Find gaps in seq2 (short) = insertions in seq1 (long)
-    # Collect insertion positions and their context scores
-    best_pos = None
-    best_aa = ''
-    best_score = -1
-
-    li = 0  # index into long_positions
-    for al, as_ in alignment:
-        if al != '-' and as_ != '-':
-            # Both match/mismatch - count as alignment evidence
-            pass
-        if al != '-' and as_ == '-':
-            # Gap in short = insertion in long
-            pos_label = long_positions[li] if li < len(long_positions) else None
-            # Score by counting matches in the alignment
-            match_count = sum(1 for a, b in alignment if a == b and a != '-')
-            if match_count > best_score:
-                best_score = match_count
-                best_pos = pos_label
-                best_aa = al
-        if al != '-':
-            li += 1
-
-    # Also check: gap in long = deletion from short (not needed here but
-    # useful for completeness in detect_fr_indels)
-
-    if best_pos is not None:
-        # Verify alignment quality: at least 40% identity
-        total = min(len(long_aas), len(short_aas))
-        if best_score >= total * 0.3:
-            return best_pos, best_aa
-
-    return None, ''
-
-
 def _find_nearby(
     target: str,
     source_set: set,
@@ -514,3 +464,123 @@ def _find_all_insertion_candidates(
         candidates[0].is_recommended = True
     
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# FR donor<->germline correspondence
+# ---------------------------------------------------------------------------
+
+def _nw_insertion_positions(
+    long_positions: List[str],
+    long_aas: List[str],
+    short_aas: List[str],
+) -> List[str]:
+    """Donor positions that are aligned to a gap in the shorter sequence."""
+    if len(long_aas) <= len(short_aas):
+        return []
+    alignment = _needleman_wunsch(long_aas, short_aas)
+    ins: List[str] = []
+    li = 0
+    for al, a_s in alignment:
+        if al != "-":
+            if a_s == "-":
+                if li < len(long_positions):
+                    ins.append(long_positions[li])
+            li += 1
+    return ins
+
+
+@dataclass
+class FRCorrespondence:
+    """Aligned mapping between donor and germline framework positions.
+
+    Built per FR region by removing the (user-confirmed) insertion positions
+    from the ordered donor position list and pairing the remainder 1:1 with the
+    ordered germline positions. This is what makes a donor insertion such as::
+
+        donor   H5 H6(E,inserted) H6A H7
+        germline    H5 H6            H7
+
+    map donor H6A -> germline H6, so the inserted residue never overwrites the
+    germline residue and back-mutations can be resolved to the right donor
+    residue.
+    """
+    donor_to_germline: Dict[str, str] = field(default_factory=dict)
+    germline_to_donor: Dict[str, str] = field(default_factory=dict)
+    insertion_positions: List[str] = field(default_factory=list)
+    deletion_positions: List[str] = field(default_factory=list)
+
+    def donor_for_germline(self, gpos: str) -> Optional[str]:
+        return self.germline_to_donor.get(gpos)
+
+    def germline_for_donor(self, dpos: str) -> Optional[str]:
+        return self.donor_to_germline.get(dpos)
+
+
+def build_fr_correspondence(
+    donor: NumberedChain,
+    v_gene: GermlineGene,
+    indels: Optional[List[FRIndel]] = None,
+) -> FRCorrespondence:
+    """Build the donor<->germline framework position correspondence.
+
+    ``indels`` (when given) carries the user-confirmed insertion positions, so
+    an override chosen interactively is honoured here as well.
+    """
+    corr = FRCorrespondence()
+    if v_gene.numbered is None:
+        return corr
+
+    chain_type = donor.chain_type
+    if indels is None:
+        indels = detect_fr_indels(donor, v_gene)
+
+    d_regions = _group_positions_by_region(donor.posmap(), chain_type)
+    g_regions = _group_positions_by_region(v_gene.numbered.posmap(), chain_type)
+
+    for region in ("FR1", "FR2", "FR3"):
+        d_set = d_regions.get(region, {})
+        g_set = g_regions.get(region, {})
+        d_positions = sorted(d_set, key=lambda p: (_pos_num(p), _pos_ins(p)))
+        g_positions = sorted(g_set, key=lambda p: (_pos_num(p), _pos_ins(p)))
+        d_aas = [d_set[p] for p in d_positions]
+        g_aas = [g_set[p] for p in g_positions]
+        k = len(d_positions) - len(g_positions)
+
+        if k > 0:
+            known = [i.position for i in indels
+                     if i.indel_type == "insertion"
+                     and i.fr_region == region
+                     and i.position in d_set]
+            if known:
+                ins = list(dict.fromkeys(known))
+                if len(ins) < k:
+                    ins += [p for p in _nw_insertion_positions(
+                        d_positions, d_aas, g_aas) if p not in ins]
+            else:
+                ins = _nw_insertion_positions(d_positions, d_aas, g_aas)
+            # keep insertion count == region length difference
+            ins = list(dict.fromkeys(ins))[:k]
+            remaining_d = [p for p in d_positions if p not in set(ins)]
+            for dp, gp in zip(remaining_d, g_positions):
+                corr.donor_to_germline[dp] = gp
+                corr.germline_to_donor[gp] = dp
+            # any donor residue beyond the germline length is also an insertion
+            for dp in remaining_d[len(g_positions):]:
+                ins.append(dp)
+            corr.insertion_positions.extend(ins)
+        elif k == 0:
+            for dp, gp in zip(d_positions, g_positions):
+                corr.donor_to_germline[dp] = gp
+                corr.germline_to_donor[gp] = dp
+        else:
+            # germline has extra residues (donor deletion)
+            for dp, gp in zip(d_positions, g_positions):
+                corr.donor_to_germline[dp] = gp
+                corr.germline_to_donor[gp] = dp
+            for gp in g_positions[len(d_positions):]:
+                corr.deletion_positions.append(gp)
+
+    corr.insertion_positions = list(dict.fromkeys(corr.insertion_positions))
+    corr.deletion_positions = list(dict.fromkeys(corr.deletion_positions))
+    return corr
