@@ -126,6 +126,7 @@ def write_json(path: str, result: RunResult) -> None:
                     "buried": c.buried,
                     "cdr_contact": c.cdr_contact,
                     "antigen_contact": c.antigen_contact,
+                    "immunogenicity_score": c.immunogenicity_score,
                 }
                 for c in rep.backmut.candidates
             ],
@@ -309,13 +310,24 @@ def write_markdown(path: str, result: RunResult) -> None:
 
         L.append("### Back-mutation candidates (framework positions)")
         L.append("")
-        L.append("| pos | donor | human | tier | score | empirical ddG | features |")
-        L.append("|-----|-------|-------|------|-------|---------------|----------|")
+        has_immuno = any(c.immunogenicity_score is not None
+                         for c in rep.backmut.candidates)
+        if has_immuno:
+            L.append("| pos | donor | human | tier | score | empirical ddG | immuno | features |")
+            L.append("|-----|-------|-------|------|-------|---------------|--------|----------|")
+        else:
+            L.append("| pos | donor | human | tier | score | empirical ddG | features |")
+            L.append("|-----|-------|-------|------|-------|---------------|----------|")
         for c in sorted(rep.backmut.candidates, key=lambda c: -c.composite):
             tier_txt = c.tier + (" " + TIER_LABELS[c.tier][:24] if c.tier in TIER_LABELS else "")
             emp = f"{c.empirical_ddG:+.2f} (n={c.empirical_n})" if c.empirical_ddG is not None else "-"
-            L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {tier_txt} | {c.composite} | {emp} | "
-                     f"{'+'.join(c.features) or '-'} |")
+            if has_immuno:
+                imm = f"{c.immunogenicity_score:.2f}" if c.immunogenicity_score is not None else "-"
+                L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {tier_txt} | {c.composite} | {emp} | {imm} | "
+                         f"{'+'.join(c.features) or '-'} |")
+            else:
+                L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {tier_txt} | {c.composite} | {emp} | "
+                         f"{'+'.join(c.features) or '-'} |")
         L.append("")
         counts = {}
         for c in rep.backmut.candidates:

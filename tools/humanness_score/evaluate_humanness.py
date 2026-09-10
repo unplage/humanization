@@ -444,18 +444,31 @@ def main():
     sequences = {}
     if args.input:
         from .germline import _parse_fasta_text
+        from .numbering import number_heavy, number_light
         with open(args.input) as f:
             for name, seq in _parse_fasta_text(f.read()):
-                # Auto-detect chain type by name or length
-                name_upper = name.upper()
-                if "VH" in name_upper or "HEAVY" in name_upper:
-                    sequences[name] = ("H", seq)
-                elif "VL" in name_upper or "LIGHT" in name_upper or "KAPPA" in name_upper or "LAMBDA" in name_upper:
-                    sequences[name] = ("L", seq)
-                elif len(seq) > 130:
-                    sequences[name] = ("H", seq)
-                else:
-                    sequences[name] = ("L", seq)
+                # Auto-detect chain type by trying numbering
+                try:
+                    numbered = number_heavy(seq)
+                    if numbered.chain_type == "L":
+                        sequences[name] = ("L", seq)
+                    else:
+                        sequences[name] = ("H", seq)
+                except:
+                    try:
+                        numbered = number_light(seq)
+                        sequences[name] = ("L", seq)
+                    except:
+                        # Fallback to name/length heuristic
+                        name_upper = name.upper()
+                        if "VH" in name_upper or "HEAVY" in name_upper:
+                            sequences[name] = ("H", seq)
+                        elif "VL" in name_upper or "LIGHT" in name_upper or "KAPPA" in name_upper or "LAMBDA" in name_upper:
+                            sequences[name] = ("L", seq)
+                        elif len(seq) > 130:
+                            sequences[name] = ("H", seq)
+                        else:
+                            sequences[name] = ("L", seq)
     else:
         if args.vh:
             sequences["query_VH"] = ("H", args.vh)

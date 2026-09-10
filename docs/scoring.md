@@ -56,7 +56,8 @@ structural evidence is down-weighted smoothly rather than by a hard cutoff.
 ### 1.2 Immunogenicity benefit (0-1)
 
 ```
-benefit = 0.3 + 0.5 * exposure * (1 - conservation)
+benefit = 0.3 + 0.5 * exposure * (1 - conservation)            # default proxy
+benefit = 0.3 + 0.5 * (0.4 * exposure*(1-conservation) + 0.6 * epitope)   # if MHC-II supplied
 ```
 
 - exposure: 0.85 exposed / 0.15 buried (AF3); 0.5 default without structure.
@@ -69,6 +70,13 @@ benefit = 0.3 + 0.5 * exposure * (1 - conservation)
 - Positions with no structural feature are capped at 0.50 (surface
   humanization is still worth something, but low priority; capped to
   preserve conservation-based ranking without flattening the gradient).
+- **Optional MHC-II override** (`--immunogenicity-json` or `--netmhciipan`):
+  when a per-position epitope score is available it dominates the proxy
+  (weight 0.6). A donor residue inside a strong predicted T-cell epitope gets a
+  high benefit for reverting to the human germline (lower ADA risk). The score
+  is stored per candidate (`immunogenicity_score`) and shown as an `immuno`
+  column in the report. Falls back silently to the proxy when the tool/map is
+  absent.
 
 ### 1.3 Chemical / developability
 

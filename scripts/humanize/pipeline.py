@@ -53,6 +53,11 @@ class PipelineConfig:
     af3_validate_variants: bool = False  # predict each variant and compute CDR-RMSD
     design_panel: bool = False         # emit structure-guided V_opt panel
     design_panel_steps: int = 3
+    # Optional per-position immunogenicity (MHC-II epitope) refinement
+    immunogenicity_path: Optional[str] = None   # precomputed {kabat_pos: score}
+    netmhciipan_binary: Optional[str] = None    # NetMHCIIpan executable
+    netmhciipan_alleles: str = ""
+    netmhciipan_env: Optional[str] = None       # conda env for NetMHCIIpan
 
     def __post_init__(self):
         if self.cdr_scheme not in ("kabat", "chothia", "abm", "imgt"):
@@ -435,10 +440,27 @@ def _process_chain(
     if config.calibration_path and os.path.exists(config.calibration_path):
         from .learning import load_calibration
         calibration = load_calibration(config.calibration_path)
+
+    # Optional per-position immunogenicity (MHC-II epitope) refinement
+    immunogenicity = None
+    if config.immunogenicity_path and os.path.exists(config.immunogenicity_path):
+        from .immunogenicity import load_scores_json
+        immunogenicity = load_scores_json(config.immunogenicity_path)
+    elif config.netmhciipan_binary:
+        from .immunogenicity import netmhciipan_scores
+        immunogenicity = netmhciipan_scores(
+            donor, config.netmhciipan_binary,
+            alleles=config.netmhciipan_alleles or
+            ("HLA-DRB1*01:01,HLA-DRB1*04:01,HLA-DRB1*07:01,HLA-DRB1*15:01,"
+             "HLA-DRB3*01:01,HLA-DRB3*02:02,HLA-DRB4*01:01,HLA-DRB5*01:01"),
+            env=config.netmhciipan_env,
+            workdir=os.path.join(outdir, "immunogenicity", ctype),
+        )
+
     backmut = analyze_backmutations(
         donor, v_gene, is_vhh=is_vhh, structure=hints, top_germlines=top,
         calibration=calibration, indel_overrides=indel_overrides,
-        j_gene=j_gene,
+        j_gene=j_gene, immunogenicity=immunogenicity,
     )
 
     # ---- minimal-reversion & precision design ----

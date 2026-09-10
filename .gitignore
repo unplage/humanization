@@ -2,6 +2,7 @@ outputs/
 __pycache__/
 *.pyc
 data/germline/human_gl_*.fasta
+data/germline/.cache/
 data/igblast/
 data/input/
 # 含专有测试序列的临时脚本，不推送到公共仓库

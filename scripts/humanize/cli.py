@@ -66,6 +66,10 @@ def cmd_run(args):
         af3_validate_variants=getattr(args, 'af3_rmsd', False),
         design_panel=getattr(args, 'design_panel', False),
         design_panel_steps=getattr(args, 'design_panel_steps', 3),
+        immunogenicity_path=getattr(args, 'immunogenicity_json', None),
+        netmhciipan_binary=getattr(args, 'netmhciipan', None),
+        netmhciipan_alleles=getattr(args, 'netmhciipan_alleles', "") or "",
+        netmhciipan_env=getattr(args, 'netmhciipan_env', None),
     )
     
     # Determine which step is being run and create appropriate subdirectory
@@ -382,6 +386,14 @@ def main(argv=None):
                        help="emit a structure-guided V_opt panel of variants")
     p_run.add_argument("--design-panel-steps", type=int, default=3,
                        help="number of V_opt panel variants (default 3)")
+    p_run.add_argument("--immunogenicity-json", default=None,
+                       help="precomputed {kabat_position: score} MHC-II epitope map")
+    p_run.add_argument("--netmhciipan", default=None,
+                       help="NetMHCIIpan executable (per-position epitope scores)")
+    p_run.add_argument("--netmhciipan-alleles", default="",
+                       help="comma-separated HLA alleles for NetMHCIIpan")
+    p_run.add_argument("--netmhciipan-env", default=None,
+                       help="conda env holding NetMHCIIpan")
     p_run.set_defaults(func=cmd_run)
 
     # ---- compare: lightweight germline evaluation (Step 1) ----
