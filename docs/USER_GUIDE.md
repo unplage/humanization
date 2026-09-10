@@ -99,8 +99,22 @@ python3 scripts/humanize/cli.py run \
   --oasis-db <path> \                  # OASis 数据库（可选）
   --af3-mode off|local|api \           # AlphaFold3 模式
   --af3-binary <path> \                # run_alphafold.py 路径
+  --af3-rmsd \                         # 预测每个变体并算 CDR-RMSD（需 --af3-mode）
+  --design-panel \                     # 输出结构引导变体面板 V_opt
+  --design-panel-steps N \             # 面板步数（默认 3）
+  --interactive-indel \                # 交互确认 FR 插入位点
   --mpnn-mode off|local \              # ProteinMPNN 模式
   --mpnn-script <path> \               # protein_mpnn.py 路径
+
+# 独立 CDR-RMSD：比较已有变体结构 vs donor（无需重跑 pipeline/AF3）
+python3 scripts/humanize/cli.py rmsd \
+  --input <fasta> \                    # 提供 donor 序列/编号
+  --donor donor.pdb \                  # 必需：donor 参考结构（PDB/CIF）
+  --variants v0.pdb v1.pdb ... \       # 变体结构（可含任意链）
+  --chain H|L \                        # 被测链（默认 H）
+  --scheme kabat|chothia|abm|imgt \    # CDR 定义（默认 kabat）
+  --donor-chain A --variant-chain A \  # 强制链 id（可选）
+  --out rmsd.json                      # 结果 JSON（可选）
 
 # 工具与数据
 python3 scripts/humanize/cli.py setup-check          # 环境自检
@@ -193,10 +207,54 @@ python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
 
 启用后：
 - 每个框架位点获得 buriedness / CDR 接触 / 抗原接触提示 → 精化 tier 判定
+  （pLDDT 连续加权；接触保留/升级；暴露且无接触降级 T3；FR4 结构回复）
 - 产出 **Vmin**（最小回复集，set-cover 保证接触恢复）
 - 提供抗原时产出 **V_SDR**（仅移植抗原接触的 CDR 残基 + 结构支柱）
 
-### 5.2 ProteinMPNN 框架再设计
+#### 5.1.1 变体结构验证（`--af3-rmsd`）
+
+在 5.1 命令上加 `--af3-rmsd`：对每个变体预测结构并做框架叠合 CDR-RMSD：
+
+```bash
+python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
+  --af3-mode local --af3-binary /path/run_alphafold.py --af3-rmsd \
+  [--antigen <抗原序列>]
+```
+
+- **Fab 自动配对**：同后缀的 `H_V2`/`L_V2` 作为同一个真实 variant Fv 一起预测；
+  单链为单体
+- 用高置信框架 CA（pLDDT ≥ 70）做 Kabsch 叠合，再测 CDR CA-RMSD
+- 报告/JSON 的 `structure_validation` 含：CDR-RMSD（各环 + 总）、FR-RMSD、
+  CDR pLDDT、主链 clash 数
+- 阈值参考：H1/H2/L1/L2 < 1.0 Å，H3/L3 < 1.5 Å
+
+#### 5.1.2 已有变体结构时独立算 CDR-RMSD（`humanize rmsd`）
+
+不需要重跑 pipeline、也不需要 AF3 二进制；只要 **donor 参考结构**：
+
+```bash
+python3 scripts/humanize/cli.py rmsd \
+  --input seq.fasta --donor donor.pdb \
+  --variants v0.pdb v1.pdb v2.pdb \
+  --chain H [--scheme kabat] [--donor-chain A] [--variant-chain A] [--out rmsd.json]
+```
+
+- 变体文件可含任意链组成（**不要求含 donor 链**）；自动按 CA 序列匹配被测链
+- 输出：CDR1/2/3 与总 CDR-RMSD、FR-RMSD、CDR pLDDT、clash（表格 + 可选 JSON）
+
+### 5.2 结构引导变体面板（`--design-panel`）
+
+从 V2 出发，按 donor 的 framework→CDR 接触图贪心加入"恢复最多未覆盖接触"的
+候选，输出梯度面板 `V_opt1..N`（每步多一个回复突变），用于实验滴定：
+
+```bash
+python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
+  --design-panel --design-panel-steps 3
+```
+
+无结构数据时按 composite 分数排序回退。
+
+### 5.3 ProteinMPNN 框架再设计
 
 ```bash
 python3 scripts/humanize/cli.py run --input seq.fasta \
@@ -206,7 +264,7 @@ python3 scripts/humanize/cli.py run --input seq.fasta \
 锁定 CDR+界面+vernier+hallmark 后重新设计框架；按人源同源性过滤输出。
 无 MPNN 时自动回退为 top-germline 共识框架。
 
-### 5.3 可开发性优化（Step 4）
+### 5.4 可开发性优化（Step 4）
 
 当 V2 变体存在高风险可开发性位点（DD/NG/NS/DG/MW）时，Step 4 自动运行：
 
@@ -228,7 +286,7 @@ python3 scripts/humanize.cli.py run --input seq.fasta \
 - 跳过位点表（位置、motif、跳过原因）
 - 优化设计（如 MPNN 可用）
 
-### 5.3 实验数据闭环（推荐生产使用）
+### 5.5 实验数据闭环（推荐生产使用）
 
 ```json
 // experiments.json
@@ -246,7 +304,7 @@ python3 scripts/humanize/cli.py run --input new_ab.fasta --calibration calibrati
 
 效果：实测 ΔΔG 自动修正分级（如 L87 类位点实测无效应 → 自动降级 T3）。
 
-### 5.4 BioPhi/Sapiens 人源度交叉验证
+### 5.6 BioPhi/Sapiens 人源度交叉验证
 
 ```bash
 python3 scripts/humanize/cli.py run --input seq.fasta --biophi-env biophi
@@ -289,12 +347,15 @@ python3 scripts/humanize/cli.py run --input seq.fasta --biophi-env biophi
 ## 8. 验证与基准
 
 ```bash
-python3 tests/test_pipeline.py       # 单元+集成（含 4D5→曲妥珠基准）
-python3 tests/backtest.py            # 深度回测（曲妥珠/贝伐珠）
+python3 tests/test_pipeline.py       # 单元+集成（含 4D5→曲妥珠基准、FR indel、结构评分、AF3 RMSD）
+python3 tests/backtest.py            # 深度回测（曲妥珠/贝伐珠，含 compromise-aware precision + ROC-AUC）
 python3 tests/backtest_scale.py      # HumAb25：25 个真实药物亲本规模化验证
+python3 tests/backtest_large.py      # 9 策略大规模对比（需 data/benchmarks/humanized_pairs.csv，未随库分发）
 ```
 
 金标准结论（docs/backtest_report.md）：结构关键位点召回率 1.0，无关键漏报。
+`backtest_large.py` 是 `docs/scoring.md` 第 0 节策略 F1 表的来源；缺少数据文件时会
+打印提示并安全退出。
 
 ---
 

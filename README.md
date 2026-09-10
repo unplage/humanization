@@ -25,7 +25,7 @@ python3 scripts/humanize/cli.py run \
 # 3. 指定 germline 策略或强制特定基因
 python3 scripts/humanize/cli.py run \
   --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
-  --germline-strategy auto  # 默认：VH=cvi_best, VL=cdr_best
+  --germline-strategy auto  # 默认：VH=adimab_frequency, VL=current
   # 或强制特定 germline：
   # --force-germline VH=IGHV1-3*01 VL=IGKV1-39*01
 
@@ -33,6 +33,21 @@ python3 scripts/humanize/cli.py run \
 python3 scripts/humanize/cli.py run \
   --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
   --donor-structure path/to/structure.pdb
+
+# 4b. 结构验证变体（可选）：AF3 预测每个变体 → 框架叠合 CDR-RMSD + clash
+python3 scripts/humanize/cli.py run \
+  --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
+  --af3-mode local --af3-binary /path/run_alphafold.py --af3-rmsd
+
+# 4c. 结构引导变体面板（可选）：梯度 V_opt 供实验筛选
+python3 scripts/humanize/cli.py run \
+  --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
+  --design-panel --design-panel-steps 3
+
+# 4d. 已有变体结构时独立计算 CDR-RMSD（无需重跑 pipeline / AF3）
+python3 scripts/humanize/cli.py rmsd \
+  --input data/examples/mouse_4d5_fab.fasta --donor donor.pdb \
+  --variants v0.pdb v1.pdb v2.pdb --chain H
 
 # 5. 可开发性优化（可选，需要 ProteinMPNN）
 python3 scripts/humanize/cli.py run \
@@ -68,7 +83,7 @@ python3 tests/test_pipeline.py
 | `adimab_frequency` | Adimab 推荐 germline + 频率 | 治疗性抗体优化 |
 | `pioneer_frequency` | Pioneer 库 germline + 频率 | 600+ 临床阶段抗体 |
 | `composite_3axis` | 0.5*CVI + 0.3*频率 + 0.2*FR | **综合最优** |
-| `auto` | 自动：VH=cvi_best, VL=cdr_best | **默认推荐** |
+| `auto` | 自动：VH=adimab_frequency, VL=current | **默认推荐** |
 
 **CVI 同源性** = Canonical + Vernier + Interface 同源性，基于 BI 2024 研究，
 与表达量和亲和力保留显著相关。
@@ -91,9 +106,9 @@ python3 tests/test_pipeline.py
 | **多策略 Germline 选择** | 9 种策略（FR/CDR/综合/CVI/最小突变/Adimab频率/Pioneer频率/3轴/自动），基于 BI 2024 和治疗性抗体数据优化 |
 | **多套 CDR 定义** | Kabat / Chothia / AbM / IMGT 四套边界同时报告 |
 | **回复突变量化评分** | 结构（vernier/界面/canonical/接触/埋藏）+ 免疫原性 + 可开发性三维评分 → T1/T2/T3/KEEP_DONOR 分级与逐条依据 |
-| **FR 插入/缺失检测** | 自动检测 donor FR 与 germline 的长度差异，识别插入/缺失位置；V0/V1 纯移植（不含 insertion），V2/V3 默认包含 donor insertion；结构数据验证 insertion 是否 buried |
-| **变体梯度** | V0 纯移植（不含 FR insertion） → V1(T1) → **V2(T1+T2+FR insertion，推荐)** → V3(+暴露T3) → Vmin(最小回复集) → V_SDR(paratope 精确移植) |
-| **结构模式（服务器）** | AF3 预测 → buried/接触/抗原接触回注评分；CDR 环 RMSD、界面与接触保留率验收 |
+| **FR 插入/缺失检测** | 自动检测 donor FR 与 germline 的长度差异，识别插入/缺失位置；支持交互确认插入位点（`--interactive-indel`）；内部用一致的 donor↔germline 对应关系处理 graft/回复突变，避免重复残基与下游错位；V0/V1 纯移植（不含 insertion），V2/V3 默认包含 donor insertion |
+| **变体梯度** | V0 纯移植（不含 FR insertion） → V1(T1) → **V2(T1+T2+FR insertion，推荐)** → V3(+暴露T3) → Vmin(最小回复集) → V_SDR(paratope 精确移植) → **V_opt（结构引导面板，`--design-panel`）** |
+| **结构模式（服务器）** | AF3 预测 → buried/接触/抗原接触回注评分（含 pLDDT 连续加权、FR4 结构回复、暴露位点降级）；`--af3-rmsd` 对每个变体做框架叠合 CDR-RMSD + CDR pLDDT + clash；**Fab 按后缀配对预测真实 variant Fv（variant VH + variant VL）** |
 | **框架矩阵** | 备选 germline 面板 + CVI 同源性指标（Boehringer Ingelheim JBC 2024 实证） |
 | **实验数据闭环** | `humanize learn`：KD 数据 → 逐位点 ΔΔG → 自动校准分级与评分 |
 | **可开发性检查** | N-糖基化 / 脱酰胺 / 异构化 / 氧化风险自动扫描 |
@@ -186,6 +201,53 @@ python3 scripts/humanize/cli.py run --input seq.fasta --calibration calibration.
 
 ---
 
+## 结构验证与变体面板（可选）
+
+### AF3 CDR-RMSD 变体验证（`--af3-rmsd`）
+
+在有 donor AF3 结构（或能跑 AF3）时，对每个变体做结构验证：
+
+1. 预测 donor Fv 作为参考；对每个变体预测结构（**Fab 自动把同后缀的
+   `H_V2`/`L_V2` 作为同一个真实 variant Fv 一起预测**；VHH 为单体）。
+2. 按序列匹配链并映射到 Kabat 位置；用**高置信框架 CA（pLDDT ≥ 70）**
+   做 Kabsch 叠合。
+3. 报告框架叠合后的 **CDR CA-RMSD**（CDR1/2/3）、**CDR pLDDT** 与
+   **主链原子 clash 数**（< 2.0 Å），写入报告与 `humanization_result.json`
+   的 `structure_validation` 字段。
+
+```bash
+python3 scripts/humanize/cli.py run --input ab.fasta --outdir outputs \
+  --af3-mode local --af3-binary /path/run_alphafold.py --af3-rmsd [--antigen <seq>]
+```
+
+### 独立 CDR-RMSD 比较（`humanize rmsd`）
+
+已有变体结构（来自任何预测工具）时，无需重跑 pipeline：
+
+```bash
+python3 scripts/humanize/cli.py rmsd \
+  --input ab.fasta --donor donor.pdb \
+  --variants v0.pdb v1.pdb v2.pdb \
+  --chain H [--scheme kabat] [--donor-chain A] [--variant-chain A] [--out rmsd.json]
+```
+
+- 只需要 **donor 参考结构**；变体文件可含任意链组成（不要求含 donor 链）
+- 自动按 CA 序列匹配/重新编号被测链，输出 CDR1/2/3 与总 CDR-RMSD、FR-RMSD、
+  CDR pLDDT、clash
+- 阈值参考（docs/validation.md）：H1/H2/L1/L2 < 1.0 Å，H3/L3 < 1.5 Å
+
+### 结构引导变体面板（`--design-panel`）
+
+从 V2 出发，按 donor 的 framework→CDR 接触图贪心加入"恢复最多未覆盖接触"
+的候选，输出梯度面板 `V_opt1..N`，用于实验滴定：
+
+```bash
+python3 scripts/humanize/cli.py run --input ab.fasta --outdir outputs \
+  --design-panel --design-panel-steps 3
+```
+
+---
+
 ## 回复突变设计逻辑（核心）
 
 对每个框架位点（供体 ≠ 人源 germline）：
@@ -233,12 +295,13 @@ scripts/humanize/
 ├── germline.py        # germline 加载/选择（NCBI FASTA 优先，内置后备）
 ├── graft.py           # CDR 移植（4 方案）+ 变体组装 + FR indel 处理
 ├── backmut.py         # 回复突变候选 + 三维评分 + 分级（核心）
-├── fr_indel.py        # FR 插入/缺失检测（序列比对，非位置比较）
+├── fr_indel.py        # FR 插入/缺失检测 + donor↔germline 对应关系（供 graft/回复突变）
 ├── minimal.py         # Vmin 最小回复集 / CVI / 框架矩阵 / V_SDR
-├── variants.py        # V0-V3 变体梯度（含 FR indel 处理）
+├── variants.py        # V0-V3 变体梯度 + V_opt 结构引导面板（含 FR indel 处理）
 ├── learning.py        # 实验数据闭环（ΔΔG 校准）
 ├── humanness.py       # BioPhi/Sapiens 人源度适配器
 ├── structure.py       # AlphaFold3 适配器 + 无依赖 PDB/CIF 解析 + 多模型共识
+│                      #   + Kabsch 叠合 CDR-RMSD + clash 检测
 ├── mpnn.py            # ProteinMPNN 适配器
 ├── developability.py  # 可开发性风险扫描
 ├── report.py          # Markdown/JSON/CSV/FASTA 报告（含 FR indel 分析）
@@ -252,9 +315,10 @@ scripts/humanize/
 ## 验证与基准
 
 ```bash
-python3 tests/test_pipeline.py      # 75+ 项（编号/graft/分级/VHH/闭环/适配器）
-python3 tests/backtest.py           # 深度回测（4D5→曲妥珠、A4.6.1→贝伐珠）
+python3 tests/test_pipeline.py      # 100+ 项（编号/graft/分级/VHH/闭环/FR indel/结构评分/AF3 RMSD/适配器）
+python3 tests/backtest.py           # 深度回测（4D5→曲妥珠、A4.6.1→贝伐珠，含 compromise-aware precision + ROC-AUC）
 python3 tests/backtest_scale.py     # HumAb25：25 个真实药物亲本全过
+python3 tests/backtest_large.py     # 大规模 9 策略对比（需 data/benchmarks/humanized_pairs.csv，未随库分发）
 ```
 
 - 结构关键位点召回率 **1.0**（无关键漏报），过回复均为保守方向的低风险差异
