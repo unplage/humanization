@@ -832,9 +832,12 @@ def test_fr_insertion_interactive_override():
 def test_step3_structure_tier_rules():
     """Step 3: structure-driven tier adjustment is symmetric and safe.
 
-    * explicit exposure with no CDR/antigen contact -> demote T1/T2 -> T3
-    * buried -> do NOT demote (packing/core residues retained)
-    * CDR/antigen contact -> promote to T1/T2
+    * explicit exposure with no functional contact -> demote T1/T2 -> T3
+    * buried, no SIDE-CHAIN contact, near-isosteric swap -> T1 -> T2
+      (literature 'must revert' downgraded to 'recommended': backbone-only
+       CDR proximity is fixed beta-sheet geometry)
+    * buried + side-chain CDR contact -> T1 retained
+    * CDR-contact evidence -> promote to T1/T2
     """
     print("Step 3 structure tier rules")
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
@@ -853,7 +856,23 @@ def test_step3_structure_tier_rules():
     buried = analyze_backmutations(
         ch, vg, structure=StructureHints({"buried": {p: True for p in poslist}}))
     buried_tiers = {c.position: c.tier for c in buried.candidates}
-    check("buried H78 is retained (T1)", buried_tiers.get("H78") == "T1")
+    # buried but no side-chain paratope contact: an isosteric swap (H27 Y->F)
+    # is downgraded from "must revert" (T1) to "recommended" (T2)...
+    check("buried + isosteric + no side-chain contact downgrades H27 to T2",
+          buried_tiers.get("H27") == "T2")
+    # ...whereas a large buried volume change (H78 A->L, dV ~78 A^3) is a real
+    # packing perturbation and keeps the T1 pillar.
+    check("buried + large volume change keeps H78 T1",
+          buried_tiers.get("H78") == "T1")
+
+    # a genuine side-chain contact to the CDR keeps the T1 pillar
+    sc = analyze_backmutations(
+        ch, vg, structure=StructureHints({
+            "buried": {p: True for p in poslist},
+            "cdr_contact_sc": {p: True for p in poslist},
+        }))
+    sc_tiers = {c.position: c.tier for c in sc.candidates}
+    check("buried + side-chain CDR contact keeps H27 T1", sc_tiers.get("H27") == "T1")
 
     contact = analyze_backmutations(
         ch, vg, structure=StructureHints({"cdr_contact": {p: True for p in poslist}}))

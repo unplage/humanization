@@ -334,8 +334,10 @@ def compute_hints(
             buried[pos] = contacts >= 45
 
     cdr_contact: Dict[str, bool] = {}
+    cdr_contact_sc: Dict[str, bool] = {}
     ag_contact: Dict[str, bool] = {}
     cdr_partners: Dict[str, List[str]] = {}
+    cdr_partners_sc: Dict[str, List[str]] = {}
     for (ch, resseq), atoms in by_res.items():
         if ch != chain_label:
             continue
@@ -344,16 +346,29 @@ def compute_hints(
             continue
         # CDR contact: any heavy atom within 4.5 A of any CDR heavy atom.
         # All atoms of the residue are tested (not just the first one), so a
-        # side-chain-mediated contact is not missed.
+        # side-chain-mediated contact is not missed. We additionally record
+        # whether the contact involves the framework SIDE CHAIN: contacts
+        # mediated only by backbone atoms (N/CA/C/O) are fixed beta-sheet
+        # geometry and are unchanged by a side-chain substitution, so they
+        # must not be treated as functional CDR contacts during Step 3.
+        backbone = {"N", "CA", "C", "O"}
+        sidechain = [(n1, a1) for (n1, a1) in atoms if n1 not in backbone]
         partners = set()
+        partners_sc = set()
         for (r2, _n2, a2) in cdr_atoms:
+            ppos = resseq_to_pos.get(r2[1])
+            if not ppos:
+                continue
             if any(_dist(a2, a1) < 4.5 for (_n1, a1) in atoms):
-                ppos = resseq_to_pos.get(r2[1])
-                if ppos:
-                    partners.add(ppos)
+                partners.add(ppos)
+            if sidechain and any(_dist(a2, a1) < 4.5 for (_n1, a1) in sidechain):
+                partners_sc.add(ppos)
         cdr_contact[pos] = bool(partners)
         if partners:
             cdr_partners[pos] = sorted(partners)
+        cdr_contact_sc[pos] = bool(partners_sc)
+        if partners_sc:
+            cdr_partners_sc[pos] = sorted(partners_sc)
         if ag_atoms:
             ag_contact[pos] = any(
                 _dist(a2, a1) < 4.5
@@ -369,6 +384,9 @@ def compute_hints(
         for pos in list(cdr_contact.keys()):
             if pos not in literature_positions:
                 del cdr_contact[pos]
+        for pos in list(cdr_contact_sc.keys()):
+            if pos not in literature_positions:
+                del cdr_contact_sc[pos]
         for pos in list(ag_contact.keys()):
             if pos not in literature_positions:
                 del ag_contact[pos]
@@ -376,8 +394,10 @@ def compute_hints(
     return StructureHints({
         "buried": buried,
         "cdr_contact": cdr_contact,
+        "cdr_contact_sc": cdr_contact_sc,
         "antigen_contact": ag_contact,
         "cdr_partners": cdr_partners,
+        "cdr_partners_sc": cdr_partners_sc,
         "plddt": plddt_by_pos,
         "rel_sasa": rel_sasa,
     })
@@ -417,8 +437,10 @@ def compute_multi_model_consensus(
 
     buried_votes: Dict[str, List[bool]] = {}
     cdr_votes: Dict[str, List[bool]] = {}
+    cdr_sc_votes: Dict[str, List[bool]] = {}
     ag_votes: Dict[str, List[bool]] = {}
     partners_all: Dict[str, set] = {}
+    partners_sc_all: Dict[str, set] = {}
     plddt_vals: Dict[str, List[float]] = {}
     sasa_vals: Dict[str, List[float]] = {}
     n_models = 0
@@ -439,10 +461,14 @@ def compute_multi_model_consensus(
                 buried_votes.setdefault(pos, []).append(v)
         for pos, v in (hints.data.get("cdr_contact") or {}).items():
             cdr_votes.setdefault(pos, []).append(bool(v))
+        for pos, v in (hints.data.get("cdr_contact_sc") or {}).items():
+            cdr_sc_votes.setdefault(pos, []).append(bool(v))
         for pos, v in (hints.data.get("antigen_contact") or {}).items():
             ag_votes.setdefault(pos, []).append(bool(v))
         for pos, ps in (hints.data.get("cdr_partners") or {}).items():
             partners_all.setdefault(pos, set()).update(ps)
+        for pos, ps in (hints.data.get("cdr_partners_sc") or {}).items():
+            partners_sc_all.setdefault(pos, set()).update(ps)
         for pos, v in (hints.data.get("plddt") or {}).items():
             plddt_vals.setdefault(pos, []).append(v)
         for pos, v in (hints.data.get("rel_sasa") or {}).items():
@@ -463,6 +489,10 @@ def compute_multi_model_consensus(
         pos: sum(1 for v in vs if v) >= thr
         for pos, vs in cdr_votes.items() if len(vs) >= thr
     }
+    consensus_cdr_sc = {
+        pos: sum(1 for v in vs if v) >= thr
+        for pos, vs in cdr_sc_votes.items() if len(vs) >= thr
+    }
     consensus_ag = {
         pos: sum(1 for v in vs if v) >= thr
         for pos, vs in ag_votes.items() if len(vs) >= thr
@@ -470,14 +500,19 @@ def compute_multi_model_consensus(
     consensus_partners = {
         pos: sorted(ps) for pos, ps in partners_all.items() if ps
     }
+    consensus_partners_sc = {
+        pos: sorted(ps) for pos, ps in partners_sc_all.items() if ps
+    }
     avg_plddt = {p: sum(v) / len(v) for p, v in plddt_vals.items() if v}
     avg_sasa = {p: sum(v) / len(v) for p, v in sasa_vals.items() if v}
 
     return StructureHints({
         "buried": consensus_buried,
         "cdr_contact": consensus_cdr,
+        "cdr_contact_sc": consensus_cdr_sc,
         "antigen_contact": consensus_ag,
         "cdr_partners": consensus_partners,
+        "cdr_partners_sc": consensus_partners_sc,
         "plddt": avg_plddt,
         "rel_sasa": avg_sasa,
     })

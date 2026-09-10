@@ -37,6 +37,31 @@ from .numbering import NumberedChain
 FR_REGIONS = ("FR1", "FR2", "FR3")
 J_ANCHOR = {"H": 103, "L": 98}
 
+# Backbone atom names (used to separate side-chain-mediated contacts from
+# trivial main-chain contacts in the Ig beta-sandwich).
+BACKBONE_ATOMS = {"N", "CA", "C", "O"}
+
+# Residue side-chain volume (Zamyatnin 1972, A^3). Used to flag buried
+# substitutions whose volume change is large enough to strain core packing.
+RESIDUE_VOLUME = {
+    "G": 60.1, "A": 88.6, "S": 89.0, "C": 108.5, "T": 116.1, "P": 122.7,
+    "V": 140.0, "D": 111.1, "E": 138.4, "N": 114.1, "Q": 143.8, "M": 162.9,
+    "L": 166.7, "I": 166.7, "K": 168.6, "R": 173.4, "H": 153.2, "F": 189.9,
+    "Y": 193.6, "W": 227.8,
+}
+# A buried donor<->human substitution changing side-chain volume by this much
+# (A^3) is treated as a genuine packing perturbation and keeps its tier.
+VOLUME_STRAIN_THRESHOLD = 40.0
+
+
+def _volume_strain(donor_aa: str, human_aa: str) -> Optional[float]:
+    """Absolute side-chain volume change for a donor->human substitution."""
+    vd = RESIDUE_VOLUME.get(donor_aa)
+    vh = RESIDUE_VOLUME.get(human_aa)
+    if vd is None or vh is None:
+        return None
+    return abs(vh - vd)
+
 
 def _pos_num(pos: str) -> int:
     return int("".join(c for c in pos if c.isdigit()))
@@ -144,9 +169,13 @@ class StructureHints:
     data keys:
       buried          {pos: Optional[bool]}  None = uncertain (relSASA 0.15-0.25)
       cdr_contact     {pos: bool}      framework residue contacts any CDR
+      cdr_contact_sc  {pos: bool}      framework SIDE CHAIN contacts any CDR
+                       (backbone-mediated contacts excluded: they are fixed
+                       beta-sheet geometry, unchanged by side-chain swaps)
       antigen_contact {pos: bool}      framework/CDR residue contacts antigen
       cdr_partners    {fr_pos: [cdr_pos, ...]}  which CDR residues a
                        framework residue contacts (heavy atom < 4.5 A)
+      cdr_partners_sc {fr_pos: [cdr_pos, ...]}  side-chain-mediated subset
       plddt           {pos: float}     AF3 confidence score (B-factor)
       rel_sasa        {pos: float}     relative SASA (0-1)
     """
@@ -162,12 +191,23 @@ class StructureHints:
         d = self.data.get("cdr_contact")
         return d.get(pos) if d else None
 
+    def cdr_contact_sc(self, chain: str, pos: str) -> Optional[bool]:
+        """Side-chain-mediated CDR contact. None when the structure hints
+        predate side-chain attribution (caller should fall back)."""
+        d = self.data.get("cdr_contact_sc")
+        return d.get(pos) if d else None
+
     def antigen_contact(self, chain: str, pos: str) -> Optional[bool]:
         d = self.data.get("antigen_contact")
         return d.get(pos) if d else None
 
     def cdr_partners(self, pos: str) -> set:
         d = self.data.get("cdr_partners") or {}
+        v = d.get(pos) or []
+        return set(v)
+
+    def cdr_partners_sc(self, pos: str) -> set:
+        d = self.data.get("cdr_partners_sc") or {}
         v = d.get(pos) or []
         return set(v)
 
@@ -456,27 +496,50 @@ def analyze_backmutations(
         tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
 
         # ---- Step 3 structure-driven tier adjustment ----
-        # Only demote on *positive* exposure evidence (AF3 says the residue is
-        # surface-exposed) combined with *absence* of any functional contact
-        # (CDR / antigen) and a reliable pLDDT. An exposed, non-contacting
-        # framework residue has no structural reason to stay donor and is the
-        # one that carries real immunogenicity risk, so it goes to T3.
+        # Two distinct refinements, both gated on reliable structure:
         #
-        # Buried positions are NOT demoted: packing/core residues can still
-        # support the fold, and reverting the (buried) donor residue is
-        # immunologically silent. Interface-core positions are also protected
-        # because the contact detector may miss their packing partners.
+        # (A) "Must-revert" pillars (T1) require *functional* evidence: a
+        #     SIDE-CHAIN contact to a CDR/antigen, or a substitution large
+        #     enough to strain buried packing. A buried Vernier/canonical/
+        #     interface-core residue whose only CDR proximity is main-chain
+        #     mediated, and whose donor->human swap is near-isosteric, is a
+        #     literature heuristic rather than a structural necessity: it is
+        #     downgraded T1 -> T2 (still recommended, no longer mandatory).
+        #
+        # (B) An exposed, non-contacting framework residue has no structural
+        #     reason to stay donor and carries real immunogenicity risk: it
+        #     goes to T3.
+        #
+        # Backbone-only CDR "contacts" are pervasive in the Ig beta-sandwich
+        # and are unchanged by a side-chain swap, so they never block (A).
+        # Interface-core positions are still protected from (B) because the
+        # contact detector cannot see the VH/VL partner chain.
         structural_demoted = False
+        soft_demoted = False
         if structure.data and tier in ("T1", "T2"):
-            partners = structure.cdr_partners(pos)
-            has_contact = (
-                cdr_contact is True or ag_contact is True
-                or bool(partners) or "interface_core" in features
+            sc_contact = structure.cdr_contact_sc(chain_type, pos)
+            if sc_contact is None:
+                sc_contact = cdr_contact  # structure hints predate sc attribution
+            sc_partners = structure.cdr_partners_sc(pos)
+            functional_contact = (
+                sc_contact is True or ag_contact is True
+                or bool(sc_partners)
             )
+            strain = _volume_strain(donor_aa, human_aa)
+            strained = strain is not None and strain >= VOLUME_STRAIN_THRESHOLD
             plddt_ok = (plddt_val is None or plddt_val >= 50)
-            if buried is False and not has_contact and plddt_ok:
-                tier = "T3"
-                structural_demoted = True
+            if plddt_ok and not functional_contact:
+                if buried is False and "interface_core" not in features:
+                    # exposed, no functional contact: no reason to stay donor
+                    # (immunogenicity dominates; volume strain irrelevant)
+                    tier = "T3"
+                    structural_demoted = True
+                elif tier == "T1" and not strained:
+                    # buried core/interface pillar whose side chain does not
+                    # touch the paratope and whose human swap is near-isosteric:
+                    # recommended, but not structurally mandatory
+                    tier = "T2"
+                    soft_demoted = True
 
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
@@ -489,6 +552,9 @@ def analyze_backmutations(
 
         if structural_demoted:
             composite = min(composite, 40.0)
+        elif soft_demoted:
+            # keep it a strong T2 but below genuine functional T1s
+            composite = min(composite, 65.0)
 
         # Gold-standard demotion: positions empirically shown to tolerate the
         # human residue (docs/backtest_report.md) are demoted to T3 UNLESS
@@ -540,6 +606,11 @@ def analyze_backmutations(
         if structural_demoted:
             rationale.append("structural: exposed and no CDR/antigen contact; "
                             "demoted from T1/T2 to T3")
+        if soft_demoted:
+            rationale.append(
+                "structural: buried with no side-chain CDR/antigen contact "
+                "and near-isosteric substitution; literature pillar downgraded "
+                "from T1 (must revert) to T2 (recommended)")
         if empirical_note:
             rationale.append(empirical_note)
         if demoted_note:
