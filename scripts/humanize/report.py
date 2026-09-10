@@ -108,6 +108,7 @@ def write_json(path: str, result: RunResult) -> None:
                 for e in rep.matrix
             ],
             "human_likeness": rep.human_likeness,
+            "structure_validation": rep.structure_validation,
             "backmutations": [
                 {
                     "position": c.position,
@@ -280,6 +281,29 @@ def write_markdown(path: str, result: RunResult) -> None:
             for e in rep.matrix:
                 L.append(f"| {e.germline.gene_id} | {e.cvi:.3f} | "
                          f"{len(e.backmut.revert_positions(('T1', 'T2')))} |")
+            L.append("")
+        if rep.structure_validation:
+            L.append("")
+            L.append("### Structure validation (AF3 CDR-RMSD vs donor, framework-superposed)")
+            L.append("")
+            L.append("CDR loops are compared after superposing each variant on the "
+                     "donor framework; lower is better (a rigid framework change "
+                     "does not inflate the value).")
+            L.append("")
+            L.append("| variant | CDR-RMSD (A) | FR-RMSD (A) | CDR1 | CDR2 | CDR3 | CDR pLDDT | n_cdr | clashes | worst (A) |")
+            L.append("|---------|-------------|------------|------|------|------|-----------|-------|--------|-----------|")
+
+            def _f(x):
+                return f"{x:.2f}" if isinstance(x, (int, float)) else "-"
+
+            for name, r in rep.structure_validation.items():
+                per = r.get("per_cdr") or {}
+                L.append(
+                    f"| {name} | {_f(r.get('cdr_rmsd'))} | {_f(r.get('fr_rmsd'))} | "
+                    f"{_f(per.get('CDR1'))} | {_f(per.get('CDR2'))} | "
+                    f"{_f(per.get('CDR3'))} | {_f(r.get('cdr_plddt'))} | "
+                    f"{r.get('n_cdr', 0)} | "
+                    f"{r.get('n_clashes', '-')} | {_f(r.get('worst_clash'))} |")
             L.append("")
         L.append("")
 

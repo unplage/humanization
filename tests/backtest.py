@@ -95,6 +95,23 @@ def number_pair(vh_seq, vl_seq):
     return vh, vl
 
 
+def _roc_auc(score_label):
+    """ROC-AUC via the Mann-Whitney U statistic (ties handled)."""
+    pos = [s for s, y in score_label if y == 1]
+    neg = [s for s, y in score_label if y == 0]
+    if not pos or not neg:
+        return None
+    pairs = len(pos) * len(neg)
+    wins = 0.0
+    for p in pos:
+        for n in neg:
+            if p > n:
+                wins += 1.0
+            elif p == n:
+                wins += 0.5
+    return round(wins / pairs, 3)
+
+
 def analyze_case(case, db, force_germline=False):
     from humanize.backmut import StructureHints
     from humanize.minimal import cvi_homology
@@ -134,6 +151,9 @@ def analyze_case(case, db, force_germline=False):
         dmap, amap = parent.posmap(), actual.posmap()
         gmap = v_gene.numbered.posmap()
         tp = fp = fn = tn = 0
+        fp_germline = 0          # over-reversions vs an ACTUAL germline residue
+        score_label = []         # (composite, label) for ROC-AUC
+        candidate_score = {c.position: c.composite for c in bm.candidates}
         actual_bm, compromise = set(), set()
         details = []
         for pos in sorted(set(dmap) & set(gmap), key=lambda p: (p[0], int("".join(c for c in p if c.isdigit())))):
@@ -177,8 +197,14 @@ def analyze_case(case, db, force_germline=False):
                 fn += 1
             elif not is_bm and rec:
                 fp += 1
+                if kind == "germline":
+                    fp_germline += 1
             else:
                 tn += 1
+            # ROC-AUC input: exclude engineered compromises (ambiguous labels)
+            if kind in ("donor", "germline"):
+                score_label.append(
+                    (candidate_score.get(pos, 0.0), 1 if is_bm else 0))
             details.append((pos, dmap[pos], gmap[pos], actual_aa, kind, rec))
 
         # CDR identity between graft and actual
@@ -200,6 +226,9 @@ def analyze_case(case, db, force_germline=False):
             "our_T1T2": sorted(t12, key=lambda p: (p[0], int("".join(c for c in p if c.isdigit())))),
             "tp": tp, "fp": fp, "fn": fn, "tn": tn,
             "precision": round(tp / (tp + fp), 3) if tp + fp else None,
+            "precision_compromise_aware": (
+                round(tp / (tp + fp_germline), 3) if tp + fp_germline else None),
+            "roc_auc": _roc_auc(score_label),
             "recall": round(tp / (tp + fn), 3) if tp + fn else None,
             "minimality": f"{len(t12)} recommended vs {len(actual_bm)} actual",
             "cdr_differences": cdr_diff,
@@ -232,7 +261,9 @@ def print_case(case, db, force=False):
         print(f"    actual compromise positions: "
               f"{', '.join(r['compromise_positions']) or '(none)'}")
         print(f"    our T1+T2 reversion : {', '.join(r['our_T1T2']) or '(none)'}")
-        print(f"    precision {r['precision']} | recall {r['recall']} | {r['minimality']}")
+        print(f"    precision {r['precision']} | recall {r['recall']} | "
+              f"precision(compromise-aware) {r['precision_compromise_aware']} | "
+              f"AUC {r['roc_auc']} | {r['minimality']}")
         print(f"    human-likeness of ACTUAL vs chosen germline: {r['hl_vs_actual']}%")
         if r["cdr_differences"]:
             print(f"    CDR diffs graft-vs-actual: "

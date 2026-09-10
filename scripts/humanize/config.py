@@ -41,6 +41,15 @@ CANONICAL = {
     "L": {2, 25, 33, 34, 36, 37, 45, 46, 48, 49, 58, 64, 71, 90, 94, 97, 98},
 }
 
+# CVI (canonical + vernier + interface) residue set. Single source of truth
+# for the BI 2024 CVI homology metric (see docs/improvement_roadmap.md).
+CVI = {
+    "H": (CANONICAL["H"] | VERNIER_ZONE["H"]
+          | INTERFACE_CORE["H"] | INTERFACE_EXTENDED["H"]),
+    "L": (CANONICAL["L"] | VERNIER_ZONE["L"]
+          | INTERFACE_CORE["L"] | INTERFACE_EXTENDED["L"]),
+}
+
 # Camelid VHH hallmark (Kabat): positions that must stay donor to keep the
 # single-domain fold (hydrophilic FR2 patch, no VL partner).
 VHH_HALLMARK = {37, 44, 45, 47}
@@ -105,6 +114,38 @@ WEIGHTS = {
     },
     "blend": (0.55, 0.30, 0.15),    # structural, immunogenicity, chemical
 }
+
+# ---------------------------------------------------------------------------
+# Chemical liability motifs (developability)
+# ---------------------------------------------------------------------------
+# Positive weight = penalty magnitude for a liability motif present in a
+# sequence. The back-mutation chemical term is the *difference* between the
+# liability of the human state and the donor state at a candidate position:
+#
+#     chem = risk(human residue at pos) - risk(donor residue at pos)
+#
+# so a positive value means reverting to the donor REMOVES a liability (a
+# reward) and a negative value means reverting INTRODUCES one (a penalty).
+# The old `removes_*` / `introduces_nglycan` keys encoded the same idea but
+# with inconsistent signs and only for N-glycan; they are superseded by this
+# single table.
+LIABILITY_MOTIFS = {
+    "N-glycan": (r"N[^P][ST]", 0.80),
+    "deamidation (NG)": (r"NG", 0.55),
+    "deamidation (NS)": (r"NS", 0.50),
+    "deamidation (NH)": (r"NH", 0.40),
+    "deamidation (ND)": (r"ND", 0.35),
+    "isomerization (DG)": (r"DG", 0.50),
+    "isomerization (DS)": (r"DS", 0.40),
+    "isomerization (DT)": (r"DT", 0.40),
+    "isomerization (DH)": (r"DH", 0.35),
+    "acid hydrolysis (DD)": (r"DD", 0.55),
+    "acid hydrolysis (D-X)": (r"D[AVLIP]", 0.45),
+    "oxidation (M/W)": (r"[MW]", 0.30),
+    "base hydrolysis (K-X)": (r"K[DE]", 0.25),
+    "met-lyscleavage (MK)": (r"MK", 0.25),
+}
+
 
 # ---------------------------------------------------------------------------
 # Empirically no-effect positions (from gold-standard backtests)

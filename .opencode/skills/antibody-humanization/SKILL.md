@@ -41,8 +41,10 @@ FR2 hallmark (Kabat 37/44/45/47) plus single-chain status.
 2. **Germline selection** — NCBI IgBLAST human germline (server download via
    `humanize setup-germline`) or the bundled human IMGT-derived set
    (373 V + 28 J genes, `data/germline/human_germline_kabat.json`).
-   Strategy: rank by framework identity, then pick the top-FR gene with the
-   highest CDR1+2 identity (hybrid approach, Olimpieri et al. 2015).
+   Nine strategies (`humanize compare`): fr_best / cdr_best / composite /
+   cvi_best / min_backmutations (T1+T2) / current (top-30% FR, max CDR) /
+   adimab_frequency / pioneer_frequency / composite_3axis. Default `auto` =
+   VH `adimab_frequency`, VL `current` (see docs/scoring.md).
 3. **CDR grafting** — per scheme (kabat/chothia/abm/imgt), all four are
    reported; the variant ladder uses the scheme chosen with `--scheme`.
    VHH: the FR2 hallmark residues 37/44/45/47 are ALWAYS kept from the donor.
@@ -58,11 +60,13 @@ FR2 hallmark (Kabat 37/44/45/47) plus single-chain status.
      KEEP_DONOR (VHH hallmark, Cys — never revert)
 5. **Variant ladder** — V0 pure graft, V1 (T1), V2 (T1+T2), V3 (T1+T2+exposed
    T3). All written to `outputs/variants.fasta`.
-6. **Structure validation (server, optional)** — AF3 prediction of donor,
-   variants and (optionally) complex with antigen; computes CDR loop RMSD,
-   interface contacts, buriedness → refines back-mutation scores.
-   ProteinMPNN: framework re-design with fixed CDRs/interface as an
-   alternative design source, filtered by human-likeness.
+6. **Structure validation (server, optional)** — AF3 prediction of the donor
+   Fv (and, with `--antigen`, the complex); computes per-residue buriedness
+   (FreeSASA/proxy), framework→CDR and framework→antigen contacts, and pLDDT,
+   which refine the back-mutation tiers (contacts keep/raise, exposed
+   non-contacting positions are demoted). ProteinMPNN: framework re-design with
+   fixed CDRs/interface as an alternative design source, filtered by
+   human-likeness.
 7. **Experimental SOP** — docs/experimental_SOP.md: gene synthesis, expression,
    affinity (BLI/SPR), developability panel, Go/No-Go criteria.
 

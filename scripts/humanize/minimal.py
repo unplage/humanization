@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .backmut import BackMutationResult, StructureHints
-from .config import CANONICAL, INTERFACE_CORE, INTERFACE_EXTENDED, VERNIER_ZONE
+from .config import CVI
 from .germline import GermlineGene
 from .graft import GraftResult, graft_chain, graft_variant
 from .numbering import NumberedChain
@@ -39,12 +39,7 @@ def _pos_num(pos: str) -> int:
     return int("".join(c for c in pos if c.isdigit()))
 
 
-CVI_SETS = {
-    "H": (CANONICAL["H"] | VERNIER_ZONE["H"]
-          | INTERFACE_CORE["H"] | INTERFACE_EXTENDED["H"]),
-    "L": (CANONICAL["L"] | VERNIER_ZONE["L"]
-          | INTERFACE_CORE["L"] | INTERFACE_EXTENDED["L"]),
-}
+CVI_SETS = CVI
 
 
 def cvi_homology(donor: NumberedChain, germline: GermlineGene) -> float:
