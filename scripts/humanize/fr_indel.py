@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .germline import GermlineGene
 from .numbering import NumberedChain
@@ -72,6 +72,21 @@ def _group_positions_by_region(
 
 
 @dataclass
+class FRIndelCandidate:
+    """A single candidate insertion/deletion position."""
+    position: str          # Kabat position (e.g. 'H4', 'H6A')
+    donor_aa: str          # amino acid at this position in donor
+    confidence: float      # confidence score 0-1
+    alignment_score: int   # alignment score
+    context_match: float   # context match percentage (0-1)
+    is_recommended: bool = False  # recommended by algorithm
+
+    def __str__(self) -> str:
+        rec = " ← 推荐" if self.is_recommended else ""
+        return f"{self.position}({self.donor_aa}) 置信度={self.confidence:.2f} 上下文={self.context_match:.0%}{rec}"
+
+
+@dataclass
 class FRIndel:
     """A detected insertion or deletion in a FR region."""
     chain_type: str          # 'H' or 'L'
@@ -83,6 +98,8 @@ class FRIndel:
     donor_count: int         # number of residues in donor FR region
     germline_count: int      # number of residues in germline FR region
     nearby_positions: List[str] = field(default_factory=list)
+    candidates: List[FRIndelCandidate] = field(default_factory=list)  # all candidates
+    selected_candidate: Optional[str] = None  # user-selected position
 
     def __str__(self) -> str:
         if self.indel_type == "insertion":
@@ -104,7 +121,8 @@ def detect_fr_indels(
     exact insertion/deletion point. When donor FR has more residues than
     germline, we align the sequences to find where the extra residue is.
 
-    Returns a list of FRIndel objects, one per detected indel.
+    Returns a list of FRIndel objects, one per detected indel. Each FRIndel
+    contains a list of candidates with confidence scores for interactive selection.
     """
     if v_gene.numbered is None:
         return []
@@ -135,36 +153,41 @@ def detect_fr_indels(
         g_aas = [g_posset[p] for p in g_positions]
 
         if d_count > g_count:
-            # Donor has more residues → find insertion point by alignment
-            ins_pos, ins_aa = _find_insertion_point(d_aas, g_aas, d_positions, g_positions)
-            if ins_pos is not None:
-                nearby = _find_nearby(ins_pos, set(d_positions), set(g_positions), chain_type)
+            # Donor has more residues → find all insertion candidates
+            candidates = _find_all_insertion_candidates(d_aas, g_aas, d_positions, g_positions)
+            if candidates:
+                # Use the best candidate as default
+                best = candidates[0]
+                nearby = _find_nearby(best.position, set(d_positions), set(g_positions), chain_type)
                 indels.append(FRIndel(
                     chain_type=chain_type,
                     indel_type="insertion",
                     fr_region=region,
-                    position=ins_pos,
-                    donor_aa=ins_aa,
+                    position=best.position,
+                    donor_aa=best.donor_aa,
                     germline_aa="-",
                     donor_count=d_count,
                     germline_count=g_count,
                     nearby_positions=nearby,
+                    candidates=candidates,
                 ))
         else:
             # Germline has more residues → find deletion point
-            del_pos, del_aa = _find_insertion_point(g_aas, d_aas, g_positions, d_positions)
-            if del_pos is not None:
-                nearby = _find_nearby(del_pos, set(d_positions), set(g_positions), chain_type)
+            del_candidates = _find_all_insertion_candidates(g_aas, d_aas, g_positions, d_positions)
+            if del_candidates:
+                best = del_candidates[0]
+                nearby = _find_nearby(best.position, set(d_positions), set(g_positions), chain_type)
                 indels.append(FRIndel(
                     chain_type=chain_type,
                     indel_type="deletion",
                     fr_region=region,
-                    position=del_pos,
+                    position=best.position,
                     donor_aa="-",
-                    germline_aa=del_aa,
+                    germline_aa=best.donor_aa,
                     donor_count=d_count,
                     germline_count=g_count,
                     nearby_positions=nearby,
+                    candidates=del_candidates,
                 ))
 
     return indels
@@ -272,3 +295,222 @@ def _find_nearby(
         if abs(num - target_num) <= window and pos != target:
             nearby.append(pos)
     return nearby[:5]
+
+
+def select_insertion_interactive(indel: FRIndel) -> Optional[str]:
+    """Interactive mode: let user select the correct insertion position.
+    
+    Args:
+        indel: FRIndel object with candidates list
+    
+    Returns:
+        Selected position string, or None if user skips
+    """
+    if not indel.candidates or len(indel.candidates) <= 1:
+        return indel.position if indel.candidates else None
+    
+    print(f"\n{'='*60}")
+    print(f"检测到 {indel.fr_region} {indel.indel_type}")
+    print(f"供体 {indel.donor_count} 残基 vs 种系 {indel.germline_count} 残基")
+    print(f"{'='*60}")
+    print(f"\n{'#':<4} {'位置':<8} {'残基':<6} {'置信度':<10} {'上下文匹配':<12} {'备注':<8}")
+    print("-" * 60)
+    
+    for i, c in enumerate(indel.candidates):
+        rec = "← 推荐" if c.is_recommended else ""
+        print(f"{i+1:<4} {c.position:<8} {c.donor_aa:<6} {c.confidence:<10.2f} {c.context_match:<12.0%} {rec}")
+    
+    # Get user input
+    default_idx = 0  # recommended candidate
+    for i, c in enumerate(indel.candidates):
+        if c.is_recommended:
+            default_idx = i
+            break
+    
+    while True:
+        try:
+            user_input = input(f"\n请选择插入位置 (1-{len(indel.candidates)}) [默认: {default_idx + 1}]: ").strip()
+            if not user_input:
+                selected_idx = default_idx
+                break
+            selected_idx = int(user_input) - 1
+            if 0 <= selected_idx < len(indel.candidates):
+                break
+            print(f"请输入 1-{len(indel.candidates)} 之间的数字")
+        except ValueError:
+            print("请输入有效的数字")
+        except EOFError:
+            # Non-interactive mode, use default
+            selected_idx = default_idx
+            break
+    
+    selected = indel.candidates[selected_idx]
+    print(f"已选择: {selected.position} ({selected.donor_aa})")
+    
+    return selected.position
+
+
+def update_indel_selection(indel: FRIndel, selected_position: str) -> FRIndel:
+    """Update FRIndel with user-selected position.
+    
+    Args:
+        indel: Original FRIndel object
+        selected_position: User-selected position string
+    
+    Returns:
+        Updated FRIndel with new position and selected_candidate set
+    """
+    # Find the candidate with matching position
+    selected_candidate = None
+    for c in indel.candidates:
+        if c.position == selected_position:
+            selected_candidate = c
+            break
+    
+    if selected_candidate is None:
+        # Position not in candidates, return original
+        return indel
+    
+    # Create new FRIndel with updated position
+    return FRIndel(
+        chain_type=indel.chain_type,
+        indel_type=indel.indel_type,
+        fr_region=indel.fr_region,
+        position=selected_candidate.position,
+        donor_aa=selected_candidate.donor_aa if indel.indel_type == "insertion" else indel.donor_aa,
+        germline_aa=indel.germline_aa if indel.indel_type == "insertion" else selected_candidate.donor_aa,
+        donor_count=indel.donor_count,
+        germline_count=indel.germline_count,
+        nearby_positions=indel.nearby_positions,
+        candidates=indel.candidates,
+        selected_candidate=selected_candidate.position,
+    )
+
+
+def _score_insertion_context(
+    pos_index: int,
+    long_aas: List[str],
+    short_aas: List[str],
+    window: int = 3,
+) -> float:
+    """Score how well the context around an insertion point matches.
+    
+    This function evaluates how well the surrounding residues match when we
+    assume the insertion is at pos_index. The key insight is that after the
+    insertion, the downstream residues in the long sequence should match the
+    downstream residues in the short sequence (shifted by 1).
+    
+    We give higher weight to downstream context (0.6) than upstream (0.4)
+    because downstream matches are more informative about the insertion point.
+    
+    Args:
+        pos_index: Index in long_aas where the insertion is located
+        long_aas: Full amino acid list of longer sequence
+        short_aas: Full amino acid list of shorter sequence
+        window: Number of residues to check on each side
+    
+    Returns:
+        Context match score (0-1)
+    """
+    # Check upstream context (before the insertion point)
+    # Upstream residues should match directly (no shift)
+    up_matches = 0
+    up_total = 0
+    for i in range(1, window + 1):
+        long_idx = pos_index - i
+        short_idx = pos_index - i
+        if long_idx >= 0 and short_idx >= 0 and short_idx < len(short_aas):
+            up_total += 1
+            if long_aas[long_idx] == short_aas[short_idx]:
+                up_matches += 1
+    
+    # Check downstream context (after the insertion point)
+    # Downstream residues should match with a shift of 1
+    down_matches = 0
+    down_total = 0
+    for i in range(1, window + 1):
+        long_idx = pos_index + i
+        short_idx = pos_index + i - 1  # -1 because insertion shifts downstream
+        if long_idx < len(long_aas) and short_idx < len(short_aas):
+            down_total += 1
+            if long_aas[long_idx] == short_aas[short_idx]:
+                down_matches += 1
+    
+    up_rate = up_matches / up_total if up_total > 0 else 0.0
+    down_rate = down_matches / down_total if down_total > 0 else 0.0
+    
+    # Weighted combination: downstream is more informative
+    return 0.4 * up_rate + 0.6 * down_rate
+
+
+def _find_all_insertion_candidates(
+    long_aas: List[str],
+    short_aas: List[str],
+    long_positions: List[str],
+    short_positions: List[str],
+) -> List[FRIndelCandidate]:
+    """Find all candidate insertion positions with confidence scores.
+    
+    This function evaluates all possible insertion positions in the longer
+    sequence, not just the gaps found by Needleman-Wunsch. For each position,
+    it calculates a confidence score based on how well the context matches
+    when we assume the insertion is at that position.
+    
+    Positions with Kabat insertion codes (e.g. H6A, H100B) receive a bonus
+    because the numbering algorithm already identified them as insertions.
+    
+    Returns a list of FRIndelCandidate objects sorted by confidence (highest first).
+    """
+    if len(long_aas) <= len(short_aas):
+        return []
+    
+    candidates = []
+    
+    # Evaluate each position in the longer sequence as a potential insertion point
+    for i in range(len(long_aas)):
+        pos_label = long_positions[i] if i < len(long_positions) else None
+        if not pos_label:
+            continue
+        
+        # Calculate context match for this position
+        context_match = _score_insertion_context(i, long_aas, short_aas)
+        
+        # Calculate how many residues match when we assume insertion at position i
+        matches = 0
+        total = 0
+        
+        # Upstream: long[0:i] should match short[0:i]
+        for j in range(i):
+            if j < len(short_aas):
+                total += 1
+                if long_aas[j] == short_aas[j]:
+                    matches += 1
+        
+        # Downstream: long[i+1:] should match short[i:] (shifted by 1)
+        for j in range(i + 1, len(long_aas)):
+            short_idx = j - 1
+            if short_idx < len(short_aas):
+                total += 1
+                if long_aas[j] == short_aas[short_idx]:
+                    matches += 1
+        
+        # Calculate confidence
+        alignment_ratio = matches / total if total > 0 else 0
+        confidence = 0.4 * alignment_ratio + 0.6 * context_match
+        
+        candidates.append(FRIndelCandidate(
+            position=pos_label,
+            donor_aa=long_aas[i],
+            confidence=confidence,
+            alignment_score=matches,
+            context_match=context_match,
+        ))
+    
+    # Sort by confidence (highest first)
+    candidates.sort(key=lambda c: (-c.confidence, -c.context_match))
+    
+    # Mark the best candidate as recommended
+    if candidates:
+        candidates[0].is_recommended = True
+    
+    return candidates

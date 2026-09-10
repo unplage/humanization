@@ -237,8 +237,13 @@ def analyze_backmutations(
     structure: Optional[StructureHints] = None,
     top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
     calibration: Optional[Dict[str, dict]] = None,
+    indel_overrides: Optional[Dict[str, str]] = None,
 ) -> BackMutationResult:
-    """Score all framework positions where donor != chosen germline."""
+    """Score all framework positions where donor != chosen germline.
+    
+    indel_overrides: dict mapping FR region to user-selected insertion position
+                     (e.g. {"FR1": "H6A"})
+    """
     chain_type = donor.chain_type
     if v_gene.numbered is None:
         raise ValueError(f"[{chain_type}] germline gene without numbering")
@@ -418,6 +423,18 @@ def analyze_backmutations(
         # ---- tier ----
         tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
 
+        # Step 3 structural demotion: positions buried but with no CDR/antigen
+        # contact are demoted from T1/T2 to T3. Literature features (Vernier,
+        # Canonical, Interface core) alone are not sufficient -- structure must
+        # show functional relevance (CDR/antigen contact) to retain high tier.
+        structural_demoted = False
+        if structure and structure.data and tier in ("T1", "T2"):
+            if buried is True and cdr_contact is not True and ag_contact is not True:
+                partners = structure.cdr_partners(pos)
+                if not partners:
+                    tier = "T3"
+                    structural_demoted = True
+
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
             + WEIGHTS["blend"][1] * benefit
@@ -426,6 +443,9 @@ def analyze_backmutations(
             # otherwise the penalty would silently vanish (regression-tested)
             + WEIGHTS["blend"][2] * min(1, chem)
         ), 1)
+
+        if structural_demoted:
+            composite = min(composite, 40.0)
 
         # Gold-standard demotion: positions empirically shown to tolerate the
         # human residue (docs/backtest_report.md) are demoted to T3 UNLESS
@@ -469,6 +489,9 @@ def analyze_backmutations(
 
         rationale = _rationale(features, tier, buried, cdr_contact, ag_contact,
                                exposure, conservation_val, donor_aa, human_aa)
+        if structural_demoted:
+            rationale.append("structural: buried but no CDR/antigen contact; "
+                            "demoted from T1/T2 to T3")
         if empirical_note:
             rationale.append(empirical_note)
         if demoted_note:
@@ -493,8 +516,15 @@ def analyze_backmutations(
         ))
 
     # ---- FR indel candidates ----
-    from .fr_indel import detect_fr_indels
+    from .fr_indel import detect_fr_indels, update_indel_selection
     fr_indels = detect_fr_indels(donor, v_gene)
+    
+    # Apply user overrides if provided
+    if indel_overrides:
+        for i, indel in enumerate(fr_indels):
+            if indel.fr_region in indel_overrides:
+                selected_pos = indel_overrides[indel.fr_region]
+                fr_indels[i] = update_indel_selection(indel, selected_pos)
 
     for indel in fr_indels:
         if indel.indel_type == "insertion":

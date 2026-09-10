@@ -49,6 +49,7 @@ class PipelineConfig:
     biophi_env: Optional[str] = None        # conda env with biophi (server)
     oasis_db: Optional[str] = None          # OASis 9-mer DB path (server)
     mock_structures: bool = True       # run without AF3/MPNN
+    interactive_indel: bool = False    # enable interactive indel selection
 
     def __post_init__(self):
         if self.cdr_scheme not in ("kabat", "chothia", "abm", "imgt"):
@@ -352,6 +353,22 @@ def _process_chain(
                 # Single model
                 hints = _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains, pdb_path=structure_path)
 
+    # ---- FR indel detection and interactive selection ----
+    from .fr_indel import detect_fr_indels, select_insertion_interactive, update_indel_selection
+    
+    fr_indels = detect_fr_indels(donor, v_gene)
+    indel_overrides: Dict[str, str] = {}  # region -> selected position
+    
+    if config.interactive_indel and fr_indels:
+        for indel in fr_indels:
+            if indel.candidates and len(indel.candidates) > 1:
+                selected_pos = select_insertion_interactive(indel)
+                if selected_pos and selected_pos != indel.position:
+                    indel_overrides[indel.fr_region] = selected_pos
+                    # Update the indel object
+                    indel = update_indel_selection(indel, selected_pos)
+                    print(f"[{ctype}] 已更新 {indel.fr_region} 插入位置: {selected_pos}")
+
     # ---- back-mutation analysis ----
     # Conservation reference: top-N homologous germlines (unbiased panel),
     # not the per-strategy winners (which can repeat the same gene).
@@ -362,7 +379,7 @@ def _process_chain(
         calibration = load_calibration(config.calibration_path)
     backmut = analyze_backmutations(
         donor, v_gene, is_vhh=is_vhh, structure=hints, top_germlines=top,
-        calibration=calibration,
+        calibration=calibration, indel_overrides=indel_overrides,
     )
 
     # ---- minimal-reversion & precision design ----

@@ -728,11 +728,14 @@ def test_fr_indel_detection():
     # Detect indels
     indels = detect_fr_indels(vh_chain, vh_gene)
     check("AMG110 VH has 1 FR insertion", len(indels) == 1)
+    # The algorithm identifies H6 as the insertion point based on context matching
     check("AMG110 VH insertion at H6", indels[0].position == "H6")
     check("AMG110 VH insertion is FR1", indels[0].fr_region == "FR1")
     check("AMG110 VH insertion donor aa is E", indels[0].donor_aa == "E")
     check("AMG110 VH donor FR1 count = 31", indels[0].donor_count == 31)
     check("AMG110 VH germline FR1 count = 30", indels[0].germline_count == 30)
+    # Check that candidates are available for interactive selection
+    check("AMG110 VH has multiple candidates", len(indels[0].candidates) > 1)
 
     # Graft should include indel info
     graft = graft_chain(vh_chain, vh_gene, j_gene, "kabat")
