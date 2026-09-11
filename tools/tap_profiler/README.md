@@ -6,7 +6,7 @@ Calculate 5 developability metrics based on TAP guidelines to assess antibody de
 
 TAP (Therapeutic Antibody Profiler) compares antibody properties against clinical-stage therapeutics (CSTs) to identify potential developability issues. This tool implements the 5 key TAP metrics:
 
-1. **Total CDR Length (Ltot)** - Sum of all 6 CDR lengths
+1. **Total CDR Length (Ltot)** - Sum of all 6 CDR lengths (IMGT numbering via ANARCI)
 2. **Patches of Surface Hydrophobicity (PSH)** - Hydrophobic patches on CDR vicinity
 3. **Patches of Positive Charge (PPC)** - Positive charge patches
 4. **Patches of Negative Charge (PNC)** - Negative charge patches
@@ -14,8 +14,10 @@ TAP (Therapeutic Antibody Profiler) compares antibody properties against clinica
 
 ## Features
 
-- **Structure-based analysis**: Uses FreeSASA for accurate surface accessibility calculations
-- **Sequence-only mode**: Approximate analysis when structure is unavailable
+- **ANARCI IMGT numbering**: Uses HMM-based alignment for accurate CDR boundary detection
+- **MSMS support**: Uses MSMS for molecular surface calculation (preferred)
+- **FreeSASA fallback**: Falls back to FreeSASA if MSMS is not available
+- **Sequence-only mode**: Analysis when structure is unavailable (Ltot only)
 - **Multiple output formats**: Text, JSON, Markdown, and Word reports
 - **Batch processing**: Analyze single files or entire directories
 - **TAP2 thresholds**: Updated thresholds from 2025 TAP2 guidelines
@@ -23,11 +25,25 @@ TAP (Therapeutic Antibody Profiler) compares antibody properties against clinica
 ## Requirements
 
 ```bash
-pip install freesasa
-pip install python-docx  # Optional, for Word reports
+# Required for IMGT numbering
+pip install ANARCI
+
+# For molecular surface calculation (choose one):
+conda install bioconda::msms  # MSMS (preferred, Linux/macOS only)
+pip install freesasa  # FreeSASA (fallback, cross-platform)
+
+# Optional
+pip install python-docx  # For Word reports
 ```
 
 ## Usage
+
+### Check Available Tools
+
+```bash
+# Check which tools are available
+python3 tools/tap_profiler/tap_analyzer.py --check
+```
 
 ### Structure-based Analysis (Recommended)
 
@@ -58,10 +74,10 @@ python3 tools/tap_profiler/tap_analyzer.py \
     --output outputs/tap/
 ```
 
-### Sequence-only Analysis (Approximation)
+### Sequence-only Analysis
 
 ```bash
-# When structure is unavailable
+# Uses ANARCI for IMGT-based CDR length calculation
 python3 tools/tap_profiler/tap_analyzer.py \
     --vh <VH_SEQUENCE> \
     --vl <VL_SEQUENCE> \
@@ -87,6 +103,20 @@ python3 tools/tap_profiler/tap_analyzer.py \
 | PPC | 0-1.33 | 1.34-4.20 | >4.20 |
 | PNC | 0-1.98 | 1.99-4.43 | >4.43 |
 | SFvCSP | >-6.00 | -30.60 to -6.00 | <-30.60 |
+
+## Important: PSH/PPC/PNC Calculation Differences
+
+**Our implementation uses patch counting, NOT surface area calculation:**
+
+- **Official TAP**: Uses MSMS to calculate molecular surface area (Å²)
+- **Our tool**: Counts contiguous patches of 3+ residues with same property
+
+This means:
+- PSH/PPC/PNC values are **NOT directly comparable** to official TAP values
+- Our values represent **patch counts** (small integers), not surface area
+- For accurate PSH/PPC/PNC, use the official TAP webserver or FlashTAP
+
+**Ltot (CDR length) is accurate** and uses the same IMGT numbering as official TAP.
 
 ## Risk Assessment
 
@@ -115,6 +145,8 @@ D (-1), E (-1)
 ================================================================================
 
   Name: C45H4_coVL_rank_1
+  Numbering: ANARCI IMGT
+  Surface: MSMS
   VH length: 120 residues
   VL length: 107 residues
 
@@ -131,15 +163,15 @@ D (-1), E (-1)
   SFvCSP          -8.45        ⚠ AMBER        >-6.00
 
 ================================================================================
-  CDR LENGTHS
+  CDR LENGTHS (IMGT)
 ================================================================================
 
   CDR         VH       VL
   ---------- -------- --------
-  CDR1        6        11
-  CDR2        17       7
-  CDR3        12       9
-  Total       35       27
+  CDR1        8        12
+  CDR2        8        3
+  CDR3        13       11
+  Total       29       26
 
 ================================================================================
   RISK ASSESSMENT

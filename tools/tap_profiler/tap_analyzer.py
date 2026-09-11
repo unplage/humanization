@@ -2,7 +2,7 @@
 """TAP (Therapeutic Antibody Profiler) Analysis Tool
 
 Calculates 5 developability metrics based on TAP guidelines:
-1. Total CDR Length (Ltot) - Sum of all 6 CDR lengths
+1. Total CDR Length (Ltot) - Sum of all 6 CDR lengths (IMGT numbering via ANARCI)
 2. Patches of Surface Hydrophobicity (PSH) - Hydrophobic patches on CDR vicinity
 3. Patches of Positive Charge (PPC) - Positive charge patches  
 4. Patches of Negative Charge (PNC) - Negative charge patches
@@ -14,7 +14,8 @@ Usage:
     python3 tools/tap_profiler/tap_analyzer.py --pdb-dir <af3_dir>
 
 Requirements:
-    - freesasa (pip install freesasa)
+    - freesasa (pip install freesasa) OR msms (conda install bioconda::msms)
+    - ANARCI (pip install ANARCI) for IMGT numbering
     - python-docx (optional, for Word reports)
 """
 
@@ -29,11 +30,31 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import subprocess
+
+# FreeSASA (fallback)
 try:
     import freesasa
+    HAS_FREESASA = True
 except ImportError:
-    print("ERROR: freesasa not installed. Run: pip install freesasa", file=sys.stderr)
-    sys.exit(1)
+    HAS_FREESASA = False
+
+# MSMS (preferred)
+try:
+    # Check if msms is available in PATH
+    result = subprocess.run(['which', 'msms'], capture_output=True, text=True)
+    HAS_MSMS = result.returncode == 0
+except Exception:
+    HAS_MSMS = False
+
+# ANARCI for IMGT numbering
+try:
+    from anarci import anarci
+    HAS_ANARCI = True
+except ImportError:
+    HAS_ANARCI = False
+    print("WARNING: ANARCI not installed. Using Kabat numbering for CDR lengths.", file=sys.stderr)
+    print("  Install with: pip install ANARCI", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +205,117 @@ def get_chain_sequence(atoms: Dict[str, Dict[int, List[dict]]]) -> Dict[str, str
 
 
 def calculate_sasa(pdb_path: str) -> Dict[str, Dict[int, float]]:
-    """Calculate per-residue SASA using FreeSASA."""
-    structure = freesasa.Structure(pdb_path)
-    result = freesasa.calc(structure)
+    """Calculate per-residue SASA using MSMS (preferred) or FreeSASA (fallback)."""
+    if HAS_MSMS:
+        return calculate_sasa_msms(pdb_path)
+    elif HAS_FREESASA:
+        return calculate_sasa_freesasa(pdb_path)
+    else:
+        raise RuntimeError(
+            "No SASA calculation method available. Install MSMS or FreeSASA:\n"
+            "  conda install bioconda::msms  (MSMS, preferred)\n"
+            "  pip install freesasa  (FreeSASA, fallback)"
+        )
+
+
+def calculate_sasa_msms(pdb_path: str) -> Dict[str, Dict[int, float]]:
+    """Calculate per-residue SASA using MSMS (Michel Sanner's Molecular Surface)."""
+    import tempfile
+    import numpy as np
+    
+    # Parse PDB to get atom coordinates
+    atoms = parse_pdb(pdb_path)
+    
+    # Prepare MSMS input
+    xyz = []
+    radii = []
+    atom_info = []  # (chain, res_num)
+    
+    # Van der Waals radii (approximation)
+    VDW_RADII = {
+        'C': 1.7, 'N': 1.55, 'O': 1.52, 'S': 1.8, 'H': 1.2,
+        'FE': 2.0, 'ZN': 1.39, 'CA': 1.98, 'MG': 1.73, 'MN': 1.98,
+    }
+    
+    for chain, residues in atoms.items():
+        for res_num, atoms_list in residues.items():
+            for atom in atoms_list:
+                atom_name = atom['name']
+                element = atom_name[0]  # First letter is element
+                
+                # Get coordinates
+                x, y, z = atom['x'], atom['y'], atom['z']
+                xyz.append([x, y, z])
+                
+                # Get radius
+                radius = VDW_RADII.get(element, 1.7)
+                radii.append(radius)
+                
+                atom_info.append((chain, res_num))
+    
+    xyz = np.array(xyz)
+    radii = np.array(radii)
+    
+    # Run MSMS
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_file = os.path.join(tmpdir, 'input.xyzr')
+        output_base = os.path.join(tmpdir, 'output')
+        
+        # Write input
+        with open(input_file, 'w') as f:
+            for i in range(len(xyz)):
+                f.write(f"{xyz[i,0]:.3f} {xyz[i,1]:.3f} {xyz[i,2]:.3f} {radii[i]:.3f}\n")
+        
+        # Run MSMS
+        cmd = [
+            'msms',
+            '-if', input_file,
+            '-of', output_base,
+            '-probe_radius', '1.5',
+            '-density', '3.0'
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"MSMS failed: {result.stderr}")
+        
+        # Read SASA from MSMS output
+        # MSMS outputs .area file with per-atom SASA
+        area_file = output_base + '.area'
+        if not os.path.exists(area_file):
+            raise RuntimeError(f"MSMS area file not found: {area_file}")
+        
+        # Parse area file
+        sasa_by_residue = defaultdict(lambda: defaultdict(float))
+        
+        with open(area_file) as f:
+            lines = f.readlines()
+            
+        # Find the line with "ASA" header
+        for i, line in enumerate(lines):
+            if line.startswith('ATOM') or line.startswith('HETATM'):
+                # Parse area value
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        area = float(parts[-1])
+                        if i - 3 < len(atom_info):
+                            chain, res_num = atom_info[i - 3]
+                            sasa_by_residue[chain][res_num] += area
+                    except (ValueError, IndexError):
+                        continue
+    
+    return dict(sasa_by_residue)
+
+
+def calculate_sasa_freesasa(pdb_path: str) -> Dict[str, Dict[int, float]]:
+    """Calculate per-residue SASA using FreeSASA (fallback)."""
+    if not HAS_FREESASA:
+        raise RuntimeError("FreeSASA not installed. Run: pip install freesasa")
+    
+    import freesasa as _freesasa
+    structure = _freesasa.Structure(pdb_path)
+    result = _freesasa.calc(structure)
     
     sasa_by_residue = defaultdict(lambda: defaultdict(float))
     n = structure.nAtoms()
@@ -198,6 +327,195 @@ def calculate_sasa(pdb_path: str) -> Dict[str, Dict[int, float]]:
         sasa_by_residue[chain][res_num] += area
     
     return dict(sasa_by_residue)
+
+
+# ---------------------------------------------------------------------------
+# IMGT CDR Definitions
+# ---------------------------------------------------------------------------
+
+# IMGT CDR definitions (unique positions in IMGT numbering)
+IMGT_CDRS = {
+    "H": {
+        "CDR1": (27, 38),   # IMGT 27-38 (12 positions)
+        "CDR2": (56, 65),   # IMGT 56-65 (10 positions)
+        "CDR3": (105, 117), # IMGT 105-117 (13 positions)
+    },
+    "K": {  # Kappa light chain
+        "CDR1": (27, 38),   # IMGT 27-38
+        "CDR2": (56, 65),   # IMGT 56-65
+        "CDR3": (105, 117), # IMGT 105-117
+    },
+    "L": {  # Lambda light chain
+        "CDR1": (27, 38),   # IMGT 27-38
+        "CDR2": (56, 65),   # IMGT 56-65
+        "CDR3": (105, 117), # IMGT 105-117
+    },
+}
+
+
+def calculate_cdr_lengths_anarci(sequence: str, chain_type: str) -> Dict[str, int]:
+    """Calculate CDR lengths using ANARCI with IMGT numbering.
+    
+    This is the preferred method as it uses HMM-based alignment for accurate
+    CDR boundary detection, matching the official TAP methodology.
+    
+    Args:
+        sequence: Amino acid sequence (single chain)
+        chain_type: "H" for heavy chain, "K" or "L" for light chain
+    
+    Returns:
+        Dictionary with CDR1, CDR2, CDR3 lengths
+    """
+    if not HAS_ANARCI:
+        # Fallback to Kabat numbering
+        return calculate_cdr_length_kabat(sequence, chain_type)
+    
+    try:
+        from anarci import anarci as _anarci
+        
+        # ANARCI expects sequences as list of tuples (id, sequence)
+        seq_id = f"temp_{chain_type}"
+        seqs = [(seq_id, sequence)]
+        
+        # Run ANARCI with IMGT scheme
+        result = _anarci(
+            seqs,
+            scheme="imgt",
+            output=False,
+            allowed_species=["human", "mouse", "rat", "rabbit", "alpaca", "llama"]
+        )
+        
+        if not result or not result[0]:
+            # ANARCI failed, fallback to Kabat
+            return calculate_cdr_length_kabat(sequence, chain_type)
+        
+        # Parse ANARCI output
+        # result is a tuple: (numbered_sequences, header_info, species_info)
+        # result[0] is a list of numbered sequences
+        numbered = result[0]
+        
+        if not numbered or len(numbered) == 0:
+            return calculate_cdr_length_kabat(sequence, chain_type)
+        
+        # Get the numbering for this sequence
+        # result[0] is a list of sequences, each sequence is [numbering_list, chain_score, region_score]
+        # numbering_list is a list of ((position, insertion_code), amino_acid)
+        sequence_data = numbered[0]
+        
+        if not sequence_data:
+            return calculate_cdr_length_kabat(sequence, chain_type)
+        
+        # sequence_data might be a list containing a tuple, or just a tuple
+        if isinstance(sequence_data, list) and len(sequence_data) > 0:
+            # sequence_data is a list, first element is the tuple
+            numbering_tuple = sequence_data[0]
+        elif isinstance(sequence_data, tuple):
+            # sequence_data is already a tuple
+            numbering_tuple = sequence_data
+        else:
+            return calculate_cdr_length_kabat(sequence, chain_type)
+        
+        # numbering_tuple is (pairs_list, start_index, end_index)
+        if isinstance(numbering_tuple, tuple) and len(numbering_tuple) >= 1:
+            numbering_list = numbering_tuple[0]  # First element is the actual list of pairs
+        else:
+            numbering_list = numbering_tuple
+        
+        if not numbering_list:
+            return calculate_cdr_length_kabat(sequence, chain_type)
+        
+        # Determine the correct chain type from ANARCI detection
+        # ANARCI may detect chain type differently than our input
+        detected_type = chain_type
+        if chain_type in ("K", "L"):
+            detected_type = "K"  # Default to kappa for light chains
+        
+        # Count residues in each CDR region
+        cdr_lengths = {}
+        
+        # numbering_list is a tuple: (list_of_pairs, start_index, end_index)
+        # list_of_pairs is a list of ((position, insertion_code), amino_acid) tuples
+        if isinstance(numbering_list, tuple) and len(numbering_list) >= 1:
+            actual_pairs = numbering_list[0]  # First element is the actual list of pairs
+        else:
+            actual_pairs = numbering_list
+        
+        for cdr_name, (start, end) in IMGT_CDRS[detected_type].items():
+            count = 0
+            for item in actual_pairs:
+                # item is ((position, insertion_code), amino_acid)
+                if isinstance(item, tuple) and len(item) == 2:
+                    pos_tuple, aa = item
+                    # pos_tuple is (position_number, insertion_code)
+                    if isinstance(pos_tuple, tuple) and len(pos_tuple) == 2:
+                        pos_num, insertion = pos_tuple
+                    else:
+                        try:
+                            pos_num = int(pos_tuple)
+                        except (ValueError, TypeError):
+                            continue
+                    
+                    # Only count non-gap residues in the CDR region
+                    if start <= pos_num <= end and aa != '-' and aa != ' ':
+                        count += 1
+            
+            cdr_lengths[cdr_name] = max(count, 1)  # Minimum 1
+        
+        return cdr_lengths
+        
+    except Exception as e:
+        # ANARCI failed, fallback to Kabat
+        print(f"  WARNING: ANARCI failed ({e}), using Kabat numbering", file=sys.stderr)
+        return calculate_cdr_length_kabat(sequence, chain_type)
+
+
+def calculate_cdr_length_kabat(sequence: str, chain_type: str) -> Dict[str, int]:
+    """Calculate CDR lengths using Kabat numbering (fallback).
+    
+    This is a simple approximation based on typical CDR length ranges.
+    """
+    cdr_lengths = {}
+    
+    if chain_type == "H":
+        # VH is approximately 120 residues
+        seq_len = len(sequence)
+        if seq_len >= 110:
+            cdr_lengths["CDR1"] = 6  # Typical
+            cdr_lengths["CDR2"] = 17  # Typical
+            cdr_lengths["CDR3"] = min(max(seq_len - 95, 6), 20)  # Variable
+        else:
+            cdr_lengths["CDR1"] = 5
+            cdr_lengths["CDR2"] = 16
+            cdr_lengths["CDR3"] = 8
+    else:  # VL
+        # VL is approximately 107 residues
+        seq_len = len(sequence)
+        if seq_len >= 100:
+            cdr_lengths["CDR1"] = 11  # Typical kappa
+            cdr_lengths["CDR2"] = 7   # Typical
+            cdr_lengths["CDR3"] = 9   # Typical
+        else:
+            cdr_lengths["CDR1"] = 10
+            cdr_lengths["CDR2"] = 6
+            cdr_lengths["CDR3"] = 8
+    
+    return cdr_lengths
+
+
+def calculate_Ltot_anarci(vh_sequence: str, vl_sequence: str) -> Tuple[int, Dict[str, int]]:
+    """Calculate total CDR length using ANARCI IMGT numbering."""
+    vh_cdrs = calculate_cdr_lengths_anarci(vh_sequence, "H")
+    vl_cdrs = calculate_cdr_lengths_anarci(vl_sequence, "K")  # Default to kappa
+    
+    all_cdrs = {}
+    for cdr_name, length in vh_cdrs.items():
+        all_cdrs[f"{cdr_name}_H"] = length
+    for cdr_name, length in vl_cdrs.items():
+        all_cdrs[f"{cdr_name}_L"] = length
+    
+    Ltot = sum(vh_cdrs.values()) + sum(vl_cdrs.values())
+    
+    return Ltot, all_cdrs
 
 
 # ---------------------------------------------------------------------------
@@ -259,13 +577,18 @@ def calculate_Ltot_sequence(vh_sequence: str, vl_sequence: str) -> Tuple[int, Di
 # ---------------------------------------------------------------------------
 
 def calculate_cdr_lengths_from_structure(atoms: Dict[str, Dict[int, List[dict]]]) -> Dict[str, Dict[str, int]]:
-    """Calculate CDR lengths from structure using Kabat numbering.
+    """Calculate CDR lengths from structure.
+    
+    Uses ANARCI IMGT numbering if available, otherwise falls back to Kabat.
     
     Determines chain type based on:
     1. Chain name (H = heavy, L = light, A/B = first/second chain)
     2. Residue count (VH ~120, VL ~107)
     """
     cdr_lengths = {}
+    
+    # Extract sequences from structure
+    sequences = get_chain_sequence(atoms)
     
     # Sort chains by residue count to identify VH vs VL
     chain_info = []
@@ -276,7 +599,7 @@ def calculate_cdr_lengths_from_structure(atoms: Dict[str, Dict[int, List[dict]]]
     # Sort by residue count (VH is typically longer)
     chain_info.sort(key=lambda x: x[1], reverse=True)
     
-    # Assign chain types
+    # Assign chain types and calculate CDR lengths
     for i, (chain, n_residues, residues) in enumerate(chain_info):
         # Direct chain name mapping
         if chain in ("H", "H1", "H2"):
@@ -294,11 +617,16 @@ def calculate_cdr_lengths_from_structure(atoms: Dict[str, Dict[int, List[dict]]]
         else:
             chain_type = "L"
         
-        cdr_lengths[chain] = {}
-        for cdr_name, (start, end) in KABAT_CDRS[chain_type].items():
-            # Count residues in CDR region
-            count = sum(1 for res_num in residues.keys() if start <= res_num <= end)
-            cdr_lengths[chain][cdr_name] = max(count, 1)  # Minimum 1
+        # Use ANARCI if available, otherwise Kabat
+        seq = sequences.get(chain, "")
+        if HAS_ANARCI and seq:
+            cdr_lengths[chain] = calculate_cdr_lengths_anarci(seq, chain_type)
+        else:
+            # Kabat fallback
+            cdr_lengths[chain] = {}
+            for cdr_name, (start, end) in KABAT_CDRS[chain_type].items():
+                count = sum(1 for res_num in residues.keys() if start <= res_num <= end)
+                cdr_lengths[chain][cdr_name] = max(count, 1)
     
     return cdr_lengths
 
@@ -573,6 +901,8 @@ def analyze_tap(pdb_path: str, name: str = "") -> TAPResult:
     # Detailed information
     details = {
         "pdb_file": pdb_path,
+        "numbering_method": "ANARCI IMGT" if HAS_ANARCI else "Kabat (fallback)",
+        "sasa_method": "MSMS" if HAS_MSMS else "FreeSASA",
         "vh_sequence": sequences.get("H", ""),
         "vl_sequence": sequences.get("L", ""),
         "vh_length": len(sequences.get("H", "")),
@@ -597,9 +927,16 @@ def analyze_tap(pdb_path: str, name: str = "") -> TAPResult:
 
 def analyze_tap_from_sequences(vh_sequence: str, vl_sequence: str, 
                                 name: str = "sequence") -> TAPResult:
-    """Perform TAP analysis from sequences only (approximation)."""
-    # Calculate Ltot from sequences
-    Ltot, cdr_details = calculate_Ltot_sequence(vh_sequence, vl_sequence)
+    """Perform TAP analysis from sequences only.
+    
+    Uses ANARCI for accurate IMGT-based CDR length calculation.
+    PSH/PPC/PNC/SFvCSP require structural analysis.
+    """
+    # Calculate Ltot using ANARCI (preferred) or Kabat fallback
+    if HAS_ANARCI:
+        Ltot, cdr_details = calculate_Ltot_anarci(vh_sequence, vl_sequence)
+    else:
+        Ltot, cdr_details = calculate_Ltot_sequence(vh_sequence, vl_sequence)
     
     # For sequence-only analysis, we cannot calculate PSH/PPC/PNC/SFvCSP
     # These require structural information
@@ -615,12 +952,12 @@ def analyze_tap_from_sequences(vh_sequence: str, vl_sequence: str,
         PPC=ppc,
         PNC=pnc,
         SFvCSP=sfdcsp,
-        cdr1_h_len=cdr_details.get("CDR1", 0),
-        cdr2_h_len=cdr_details.get("CDR2", 0),
-        cdr3_h_len=cdr_details.get("CDR3", 0),
-        cdr1_l_len=cdr_details.get("CDR1", 0),
-        cdr2_l_len=cdr_details.get("CDR2", 0),
-        cdr3_l_len=cdr_details.get("CDR3", 0),
+        cdr1_h_len=cdr_details.get("CDR1_H", cdr_details.get("CDR1", 0)),
+        cdr2_h_len=cdr_details.get("CDR2_H", cdr_details.get("CDR2", 0)),
+        cdr3_h_len=cdr_details.get("CDR3_H", cdr_details.get("CDR3", 0)),
+        cdr1_l_len=cdr_details.get("CDR1_L", cdr_details.get("CDR1", 0)),
+        cdr2_l_len=cdr_details.get("CDR2_L", cdr_details.get("CDR2", 0)),
+        cdr3_l_len=cdr_details.get("CDR3_L", cdr_details.get("CDR3", 0)),
     )
     
     # Calculate flags (only Ltot is available for sequence-only)
@@ -638,6 +975,7 @@ def analyze_tap_from_sequences(vh_sequence: str, vl_sequence: str,
     # Detailed information
     details = {
         "analysis_type": "sequence_only",
+        "numbering_method": "ANARCI IMGT" if HAS_ANARCI else "Kabat (fallback)",
         "vh_sequence": vh_sequence,
         "vl_sequence": vl_sequence,
         "vh_length": len(vh_sequence),
@@ -680,6 +1018,14 @@ def format_text_report(result: TAPResult, title: str = "TAP Analysis") -> str:
     lines.append(f"  {title}")
     lines.append("=" * 80)
     lines.append(f"\n  Name: {result.name}")
+    
+    # Show method information if available
+    if hasattr(result, 'details'):
+        if 'numbering_method' in result.details:
+            lines.append(f"  Numbering: {result.details['numbering_method']}")
+        if 'sasa_method' in result.details:
+            lines.append(f"  Surface: {result.details['sasa_method']}")
+    
     lines.append(f"  VH length: {len(result.vh_sequence)} residues")
     lines.append(f"  VL length: {len(result.vl_sequence)} residues")
     
@@ -937,22 +1283,61 @@ def save_word_report(result: TAPResult, output_path: str, title: str = "TAP Anal
 # CLI
 # ---------------------------------------------------------------------------
 
+def check_tools():
+    """Check which tools are available."""
+    print("\n" + "="*60)
+    print("  TAP Analyzer - Tool Availability Check")
+    print("="*60)
+    
+    print("\n  Numbering:")
+    print(f"    ANARCI IMGT:  {'✓ Available' if HAS_ANARCI else '✗ Not installed (using Kabat fallback)'}")
+    
+    print("\n  Surface Calculation:")
+    print(f"    MSMS:         {'✓ Available' if HAS_MSMS else '✗ Not installed'}")
+    print(f"    FreeSASA:     {'✓ Available' if HAS_FREESASA else '✗ Not installed'}")
+    
+    print("\n  Optional:")
+    try:
+        import docx
+        print(f"    python-docx:  ✓ Available")
+    except ImportError:
+        print(f"    python-docx:  ✗ Not installed (Word reports unavailable)")
+    
+    print("\n  Recommendations:")
+    if not HAS_ANARCI:
+        print("    → Install ANARCI for accurate IMGT CDR numbering:")
+        print("      pip install ANARCI")
+    if not HAS_MSMS and not HAS_FREESASA:
+        print("    → Install MSMS or FreeSASA for surface analysis:")
+        print("      conda install bioconda::msms  (MSMS, preferred)")
+        print("      pip install freesasa  (FreeSASA, fallback)")
+    elif not HAS_MSMS:
+        print("    → Install MSMS for more accurate surface calculation:")
+        print("      conda install bioconda::msms")
+    
+    print("")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="TAP (Therapeutic Antibody Profiler) Analysis",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Check available tools
+  python3 tools/tap_profiler/tap_analyzer.py --check
+
   # Analyze structure
   python3 tools/tap_profiler/tap_analyzer.py --pdb af3/C45H4_coVL/Structure\\ Prediction\\ \\(Boltz-2\\)/rank_1.pdb
 
-  # Analyze sequences only (approximation)
+  # Analyze sequences (uses ANARCI IMGT numbering)
   python3 tools/tap_profiler/tap_analyzer.py --vh <VH_SEQUENCE> --vl <VL_SEQUENCE>
 
   # Batch analysis
   python3 tools/tap_profiler/tap_analyzer.py --pdb-dir af3/ --output outputs/tap/
         """
     )
+    parser.add_argument("--check", action="store_true", help="Check available tools")
     parser.add_argument("--pdb", help="Path to PDB/CIF structure file")
     parser.add_argument("--pdb-dir", help="Directory containing PDB files (recursive)")
     parser.add_argument("--vh", help="VH amino acid sequence")
@@ -968,8 +1353,12 @@ Examples:
     
     args = parser.parse_args()
     
+    if args.check:
+        check_tools()
+        return
+    
     if not args.pdb and not args.pdb_dir and not args.vh:
-        parser.error("Either --pdb, --pdb-dir, or --vh/--vl must be specified")
+        parser.error("Either --check, --pdb, --pdb-dir, or --vh/--vl must be specified")
     
     # Create output directory
     os.makedirs(args.output, exist_ok=True)

@@ -3,6 +3,10 @@
 Antibody humanization pipeline (CDR grafting + back-mutation/回复突变 scoring, Fab and VHH).
 Portable core is **pure Python stdlib** — do not add third-party deps for core paths.
 
+## 重要原则
+
+- **不要自作主张提交GitHub**: 只有在用户明确命令时才执行 `git commit` 和 `git push`。代码修改完成后，等待用户确认再提交。
+
 ## Commands
 
 Run from repo root:
