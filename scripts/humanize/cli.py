@@ -9,6 +9,8 @@ Usage:
                   [--antigen SEQ] [--donor-structure PDB]
   humanize setup-germline [--dir DIR]      # download NCBI IgBLAST germline
   humanize setup-check                     # report tool availability
+  humanize stability --pdb FILE            # predict ΔG stability
+  humanize stability --wt FILE --mutant FILE  # predict ΔΔG
 """
 
 from __future__ import annotations
@@ -260,6 +262,97 @@ def cmd_learn(args):
     return 0
 
 
+def cmd_stability(args):
+    """Predict protein stability (ΔG/ΔΔG) for antibody structures."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    
+    from stability_predictor.stability_analyzer import (
+        predict_dg_esm3dg, predict_dg_saprodg, predict_ddg, analyze_batch,
+        format_result_text, format_batch_text, format_result_json, format_batch_json,
+        check_esm3dg_available, check_saprodg_available
+    )
+    
+    # Check model availability
+    print("[stability] Checking model availability...")
+    esm3d_available = check_esm3dg_available()
+    saprodg_available = check_saprodg_available()
+    
+    print(f"  ESM3dG: {'available' if esm3d_available else 'NOT INSTALLED'}")
+    print(f"  SaProtΔG: {'available' if saprodg_available else 'NOT INSTALLED'}")
+    
+    if not esm3d_available and not saprodg_available:
+        print("\n[stability] ERROR: No prediction models available!")
+        print("  Install ESM3dG (recommended):")
+        print("    pip install git+https://github.com/yehlincho/absolute-stability-predictor.git")
+        return 1
+    
+    # Determine model
+    model = args.model
+    if model == "ESM3dG" and not esm3d_available:
+        if saprodg_available:
+            print("[stability] ESM3dG not available, using SaProtΔG")
+            model = "SaProtΔG"
+        else:
+            print("[stability] ERROR: No models available")
+            return 1
+    elif model == "SaProtΔG" and not saprodg_available:
+        if esm3d_available:
+            print("[stability] SaProtΔG not available, using ESM3dG")
+            model = "ESM3dG"
+        else:
+            print("[stability] ERROR: No models available")
+            return 1
+    
+    # Run analysis
+    if args.wt and args.mutant:
+        print(f"\n[stability] Predicting ΔΔG: {os.path.basename(args.wt)} -> {os.path.basename(args.mutant)}")
+        result = predict_ddg(args.wt, args.mutant, model)
+        if args.json:
+            print(json.dumps(format_result_json(result), indent=2))
+        else:
+            print(format_result_text(result))
+    elif args.pdb:
+        print(f"\n[stability] Analyzing: {os.path.basename(args.pdb)}")
+        if model == "ESM3dG":
+            result = predict_dg_esm3dg(args.pdb, args.chain)
+        else:
+            result = predict_dg_saprodg(args.pdb, args.chain)
+        if args.json:
+            print(json.dumps(format_result_json(result), indent=2))
+        else:
+            print(format_result_text(result))
+    elif args.pdb_dir:
+        print(f"\n[stability] Batch analyzing: {args.pdb_dir}")
+        batch_result = analyze_batch(args.pdb_dir, model)
+        if args.json:
+            print(json.dumps(format_batch_json(batch_result), indent=2))
+        else:
+            print(format_batch_text(batch_result))
+    
+    # Save results
+    if args.output:
+        os.makedirs(args.output, exist_ok=True)
+        if args.pdb:
+            result = predict_dg_esm3dg(args.pdb, args.chain) if model == "ESM3dG" else predict_dg_saprodg(args.pdb, args.chain)
+            data = format_result_json(result)
+            output_file = os.path.join(args.output, "stability_result.json")
+        elif args.wt and args.mutant:
+            result = predict_ddg(args.wt, args.mutant, model)
+            data = format_result_json(result)
+            output_file = os.path.join(args.output, "stability_result.json")
+        else:
+            batch_result = analyze_batch(args.pdb_dir, model)
+            data = format_batch_json(batch_result)
+            output_file = os.path.join(args.output, "stability_batch_results.json")
+        
+        with open(output_file, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"\n[stability] Results saved to: {output_file}")
+    
+    return 0
+
+
 def cmd_setup_check(args):
     checks = [
         ("python3", sys.executable),
@@ -439,6 +532,20 @@ def main(argv=None):
                      help="output calibration file")
     p_l.add_argument("--germline-dir", default="")
     p_l.set_defaults(func=cmd_learn)
+
+    # ---- stability: predict ΔG/ΔΔG for antibody structures ----
+    p_stab = sub.add_parser(
+        "stability", help="predict protein stability (ΔG/ΔΔG)")
+    p_stab.add_argument("--pdb", help="single PDB file to analyze (ΔG)")
+    p_stab.add_argument("--pdb-dir", help="directory of PDB files for batch analysis")
+    p_stab.add_argument("--wt", help="wildtype PDB file (for ΔΔG)")
+    p_stab.add_argument("--mutant", help="mutant PDB file (for ΔΔG)")
+    p_stab.add_argument("--model", default="ESM3dG", choices=["ESM3dG", "SaProtΔG"],
+                        help="prediction model (default: ESM3dG)")
+    p_stab.add_argument("--chain", default="A", help="chain ID (default: A)")
+    p_stab.add_argument("--output", help="output directory for results")
+    p_stab.add_argument("--json", action="store_true", help="output JSON format")
+    p_stab.set_defaults(func=cmd_stability)
 
     args = ap.parse_args(argv)
     try:

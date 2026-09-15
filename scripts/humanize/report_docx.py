@@ -266,14 +266,39 @@ def build_docx(result: RunResult, out_path: str) -> str:
         c = rep.input_chain
         h3(f"{c.name}")
         v0 = rep.variants[0]
+        # Build position -> candidate mapping for donor_aa/human_aa lookup
+        bm_map = {b.position: b for b in rep.backmut.candidates}
         for v in rep.variants:
             para(f"{v.name} - {v.description}", bold=True, size=10.5)
             seq_para("Sequence", v.sequence, size=8.5)
+            # Use origin differences to show actual sequence changes
+            # (includes donor insertions that are part of the grafted sequence)
             diffs = [p for p in v.graft.origin
                      if v.graft.origin[p] != v0.graft.origin.get(p)]
             if diffs:
-                para("Changes vs V0: " + ", ".join(sorted(diffs, key=_pos_key)),
-                     size=8.5)
+                # Format: position + human_aa + donor_aa (e.g., H5VL)
+                # Donor insertion: pos:donor_aa (e.g., H6:E)
+                diff_parts = []
+                for p in sorted(diffs, key=_pos_key):
+                    if p in bm_map:
+                        b = bm_map[p]
+                        if b.human_aa and b.human_aa != '-':
+                            diff_parts.append(f"{p}{b.human_aa}{b.donor_aa}")
+                        elif b.donor_aa and b.donor_aa != '-':
+                            # Donor insertion
+                            diff_parts.append(f"{p}:{b.donor_aa}")
+                        else:
+                            diff_parts.append(p)
+                    else:
+                        diff_parts.append(p)
+                # Create paragraph with red highlighted mutations
+                p = doc.add_paragraph()
+                p.paragraph_format.space_after = Pt(4)
+                r = p.add_run("Changes vs V0: ")
+                r.font.size = Pt(8.5)
+                r2 = p.add_run(", ".join(diff_parts))
+                r2.font.size = Pt(8.5)
+                r2.font.color.rgb = RGBColor(255, 0, 0)  # Red color
 
     # ============================ 8. MINIMAL + MATRIX ============================
     h1("8. Minimal Reversion and Framework Matrix (最小回复集与框架矩阵)")

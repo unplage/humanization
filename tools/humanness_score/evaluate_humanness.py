@@ -20,11 +20,19 @@ from typing import Dict
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+# Import from scripts.humanize (absolute imports)
+from scripts.humanize.numbering import number_heavy, number_light
+from scripts.humanize.germline import load_germline_db, compare_to_germline
+from scripts.humanize.imgt_numbering import (
+    number_with_abrsa_imgt, load_imgt_germline, compare_imgt_posmaps_direct,
+    kabat_posmap_to_imgt_posmap, format_imgt_region_alignment
+)
+
 
 def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
     """Evaluate a single chain against human germline."""
-    from .numbering import number_heavy, number_light
-    from .germline import load_germline_db, compare_to_germline
+    from scripts.humanize.numbering import number_heavy, number_light
+    from scripts.humanize.germline import load_germline_db, compare_to_germline
 
     # Number the sequence
     if chain_type == "H":
@@ -58,9 +66,7 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
     Uses AbRSA with IMGT scheme to number the query sequence directly,
     then loads IMGT germline database for comparison.
     """
-    from .imgt_numbering import (
-        number_with_abrsa_imgt, load_imgt_germline, compare_imgt_posmaps_direct
-    )
+    pass
 
     # Number the sequence using AbRSA with IMGT scheme
     numbered = number_with_abrsa_imgt(sequence, chain_type)
@@ -70,8 +76,8 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
         query_imgt = numbered.posmap()
     else:
         # AbRSA failed - fallback to Kabat numbering + conversion
-        from .numbering import number_heavy, number_light
-        from .imgt_numbering import kabat_posmap_to_imgt_posmap
+        from scripts.humanize.numbering import number_heavy, number_light
+        from scripts.humanize.imgt_numbering import kabat_posmap_to_imgt_posmap
 
         if chain_type == "H":
             numbered_kabat = number_heavy(sequence)
@@ -86,8 +92,8 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
 
     if not imgt_genes:
         # Fallback: use Kabat germline with conversion
-        from .germline import load_germline_db
-        from .imgt_numbering import kabat_posmap_to_imgt_posmap
+        from scripts.humanize.germline import load_germline_db
+        from scripts.humanize.imgt_numbering import kabat_posmap_to_imgt_posmap
 
         if not db_dir:
             db_dir = os.path.join(
@@ -351,7 +357,7 @@ def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int 
 
 def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, top_n: int = 10):
     """Format IMGT-based results for display."""
-    from .imgt_numbering import format_imgt_region_alignment
+    from scripts.humanize.imgt_numbering import format_imgt_region_alignment
 
     lines = []
     lines.append(f"\n{'='*70}")
@@ -443,8 +449,8 @@ def main():
     # Load sequences
     sequences = {}
     if args.input:
-        from .germline import _parse_fasta_text
-        from .numbering import number_heavy, number_light
+        from scripts.humanize.germline import _parse_fasta_text
+        from scripts.humanize.numbering import number_heavy, number_light
         with open(args.input) as f:
             for name, seq in _parse_fasta_text(f.read()):
                 # Auto-detect chain type by trying numbering

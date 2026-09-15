@@ -492,6 +492,15 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
     except Exception as e:
         paths.setdefault("_errors", []).append(f"docx: {e}")
 
+    # Patent example report (专利实施例报告)
+    try:
+        from .report_patent import build_patent_example_report
+        patent_path = os.path.join(outdir, "patent_example_report.docx")
+        build_patent_example_report(result, patent_path)
+        paths["patent_docx"] = patent_path
+    except Exception as e:
+        paths.setdefault("_errors", []).append(f"patent docx: {e}")
+
     # FASTA of all variants
     fasta = os.path.join(outdir, "variants.fasta")
     with open(fasta, "w") as fh:

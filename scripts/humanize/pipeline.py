@@ -462,6 +462,12 @@ def _process_chain(
         calibration=calibration, indel_overrides=indel_overrides,
         j_gene=j_gene, immunogenicity=immunogenicity,
     )
+    
+    # P1: Annotate with functional conservation scores
+    from .backmut import _annotate_with_functional_conservation
+    backmut = _annotate_with_functional_conservation(
+        backmut, db, donor, structure_data=hints
+    )
 
     # ---- minimal-reversion & precision design ----
     from .minimal import (

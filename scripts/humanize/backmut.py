@@ -129,11 +129,13 @@ class BackMutationCandidate:
     rationale: List[str] = field(default_factory=list)
     buried: Optional[bool] = None
     cdr_contact: Optional[bool] = None
+    side_chain_contact: Optional[bool] = None  # P0: side-chain mediated CDR contact
     antigen_contact: Optional[bool] = None
     empirical_ddG: Optional[float] = None   # kcal/mol from experiments
     empirical_n: int = 0
     empirical_note: str = ""
     immunogenicity_score: Optional[float] = None  # optional MHC-II epitope proxy
+    dev_risk_score: Optional[float] = None  # P0: developability risk score (0-1)
 
 
 @dataclass
@@ -435,6 +437,10 @@ def analyze_backmutations(
         buried = structure.buried(chain_type, pos)
         cdr_contact = structure.cdr_contact(chain_type, pos)
         ag_contact = structure.antigen_contact(chain_type, pos)
+        # P0: side-chain mediated CDR contact (higher priority than backbone)
+        sc_contact = structure.cdr_contact_sc(chain_type, pos)
+        if sc_contact is None:
+            sc_contact = cdr_contact  # fallback if structure hints predate sc attribution
         if buried:
             features.append("buried")
         if cdr_contact:
@@ -493,7 +499,16 @@ def analyze_backmutations(
         chem = _liability_score(human_state) - _liability_score(seq)
 
         # ---- tier ----
-        tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
+        # P0: Use structure-aware tier assignment
+        strain = _volume_strain(donor_aa, human_aa)
+        tier = _assign_tier_with_structure(
+            features, buried, is_vhh, donor_aa, pos,
+            side_chain_contact=sc_contact,
+            cdr_contact=cdr_contact,
+            antigen_contact=ag_contact,
+            volume_strain=strain,
+            dev_risk_score=None  # Will be calculated later
+        )
 
         # ---- Step 3 structure-driven tier adjustment ----
         # Two distinct refinements, both gated on reliable structure:
@@ -516,16 +531,17 @@ def analyze_backmutations(
         # contact detector cannot see the VH/VL partner chain.
         structural_demoted = False
         soft_demoted = False
+        
+        # P0: Calculate developability risk score
+        # Based on sequence motifs that affect developability
+        dev_risk_score = _calculate_dev_risk_score(donor_aa, pos, donor, chain_type)
+        
         if structure.data and tier in ("T1", "T2"):
-            sc_contact = structure.cdr_contact_sc(chain_type, pos)
-            if sc_contact is None:
-                sc_contact = cdr_contact  # structure hints predate sc attribution
             sc_partners = structure.cdr_partners_sc(pos)
             functional_contact = (
                 sc_contact is True or ag_contact is True
                 or bool(sc_partners)
             )
-            strain = _volume_strain(donor_aa, human_aa)
             strained = strain is not None and strain >= VOLUME_STRAIN_THRESHOLD
             plddt_ok = (plddt_val is None or plddt_val >= 50)
             if plddt_ok and not functional_contact:
@@ -540,6 +556,14 @@ def analyze_backmutations(
                     # recommended, but not structurally mandatory
                     tier = "T2"
                     soft_demoted = True
+            
+            # P0: Developability risk filtering for exposed positions
+            # Exposed positions with high developability risk should be demoted
+            if buried is False and dev_risk_score > 0.7 and tier in ("T1", "T2"):
+                tier = "T3"
+                structural_demoted = True
+                rationale_item = f"dev_risk: high developability risk ({dev_risk_score:.2f})"
+                # Will be added to rationale later
 
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
@@ -601,8 +625,9 @@ def analyze_backmutations(
                 elif adj == "neutral" and empirical_n >= 2:
                     empirical_note = f"empirical: no effect (ddG {empirical_ddG:+.2f}, n={empirical_n})"
 
-        rationale = _rationale(features, tier, buried, cdr_contact, ag_contact,
-                               exposure, conservation_val, donor_aa, human_aa)
+        rationale = _rationale_with_structure(features, tier, buried, cdr_contact, ag_contact,
+                               exposure, conservation_val, donor_aa, human_aa,
+                               side_chain_contact=sc_contact, dev_risk_score=dev_risk_score)
         if structural_demoted:
             rationale.append("structural: exposed and no CDR/antigen contact; "
                             "demoted from T1/T2 to T3")
@@ -633,10 +658,12 @@ def analyze_backmutations(
             rationale=rationale,
             buried=buried,
             cdr_contact=cdr_contact,
+            side_chain_contact=sc_contact,  # P0: side-chain mediated CDR contact
             antigen_contact=ag_contact,
             empirical_ddG=empirical_ddG,
             empirical_n=empirical_n,
             immunogenicity_score=epitope,
+            dev_risk_score=dev_risk_score,  # P0: developability risk score
         ))
 
     # ---- FR4 structural reversion (only with J gene + structure data) ----
@@ -734,7 +761,53 @@ def analyze_backmutations(
     )
 
 
+def _annotate_with_functional_conservation(
+    result: BackMutationResult,
+    germline_db,
+    donor,
+    structure_data=None,
+) -> BackMutationResult:
+    """P1: Annotate candidates with functional conservation scores.
+    
+    Adds functional conservation, evolutionary rate, and structural constraint
+    scores to each candidate's rationale.
+    """
+    from .conservation import calculate_functional_conservation
+    
+    for candidate in result.candidates:
+        scores = calculate_functional_conservation(
+            candidate.position,
+            result.chain_type,
+            germline_db,
+            donor,
+            structure_data,
+        )
+        
+        # Store scores in candidate (add new fields if needed)
+        # For now, add to rationale
+        if scores["functional_conservation"] > 0.8:
+            candidate.rationale.append(
+                f"functional conservation: {scores['functional_conservation']:.2f} "
+                f"(germline: {scores['germline_conservation']:.2f}, "
+                f"evolution: {scores['evolutionary_rate']:.2f}, "
+                f"struct: {scores['structural_constraint']:.2f})"
+            )
+        elif scores["functional_conservation"] < 0.3:
+            candidate.rationale.append(
+                f"low functional conservation ({scores['functional_conservation']:.2f})"
+            )
+    
+    return result
+
+
 def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
+    """Assign tier based on structural features (pre-structure adjustment).
+    
+    P0 improvement: This is the initial tier assignment.
+    Step 3 structure adjustment will further refine based on:
+    - side_chain_contact (P0: higher priority than backbone contact)
+    - dev_risk_score (P0: developability risk filtering)
+    """
     if "vhh_hallmark" in features:
         return "KEEP_DONOR"
     if "disulfide_cys" in features:
@@ -756,6 +829,125 @@ def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
     if "interface_extended" in features:
         return "T2"
     return "T3"
+
+
+def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
+                                 side_chain_contact=None, cdr_contact=None,
+                                 antigen_contact=None, volume_strain=None,
+                                 dev_risk_score=None) -> str:
+    """P0 improvement: Assign tier with structure and developability context.
+    
+    Priority order:
+    1. KEEP_DONOR (VHH hallmark, disulfide)
+    2. T1: side_chain_contact + buried (highest structural priority)
+    3. T1: interface_core + buried OR vernier + buried
+    4. T2: side_chain_contact + exposed OR backbone_contact + buried
+    5. T2: other structural features
+    6. T3: exposed + high dev_risk OR no structural support
+    """
+    if "vhh_hallmark" in features:
+        return "KEEP_DONOR"
+    if "disulfide_cys" in features:
+        return "KEEP_DONOR"
+    
+    # P0: side-chain contact takes highest priority
+    if side_chain_contact is True:
+        if buried is True:
+            return "T1"  # Side-chain contact + buried = highest priority
+        elif buried is False:
+            # Exposed but side-chain contacts CDR: still important
+            return "T2"
+    elif side_chain_contact is False and (cdr_contact is True or antigen_contact is True):
+        # P0: backbone contact only (no side-chain contact)
+        # Lower priority than side-chain contact
+        if buried is True:
+            return "T2"  # Backbone contact + buried = T2
+        elif buried is False:
+            # Exposed + backbone contact: check dev_risk first
+            if dev_risk_score is not None and dev_risk_score > 0.7:
+                return "T3"  # High dev_risk overrides backbone contact
+            return "T2"
+    
+    # P0: Developability risk filtering (check early for exposed positions)
+    # Exposed positions with high dev risk should be demoted to T3
+    if buried is False and dev_risk_score is not None and dev_risk_score > 0.7:
+        return "T3"
+    
+    # Interface core (VH/VL packing)
+    if "interface_core" in features:
+        if buried is False:
+            return "T2"
+        return "T1"
+    
+    # Vernier zone (supports CDR conformation)
+    if "vernier" in features:
+        if buried is True or "canonical" in features:
+            return "T1"
+        return "T2"
+    
+    # Canonical structure
+    if "canonical" in features:
+        return "T2"
+    
+    # CDR contact (backbone-mediated, lower priority)
+    if cdr_contact is True or antigen_contact is True:
+        return "T2"
+    
+    # Buried in core
+    if buried is True:
+        return "T2"
+    
+    # Extended interface
+    if "interface_extended" in features:
+        return "T2"
+    
+    return "T3"
+
+
+def _calculate_dev_risk_score(donor_aa: str, pos: str, donor, chain_type: str) -> float:
+    """P0: Calculate developability risk score for a position.
+    
+    Scores based on sequence motifs that affect developability:
+    - N-glycosylation (N-X-S/T)
+    - Deamidation (N-G, N-S, N-H)
+    - Isomerization (D-G, D-S, D-T)
+    - Oxidation (M, W)
+    - Acid hydrolysis (D-X)
+    
+    Returns: 0.0 (low risk) to 1.0 (high risk)
+    """
+    from .config import RISK_MOTIFS
+    import re
+    
+    risk_score = 0.0
+    
+    # Get the residue and surrounding context
+    seq = donor.sequence
+    idx = seq.find(donor_aa) if donor_aa else -1
+    if idx < 0:
+        return 0.0
+    
+    # Check each risk motif
+    for motif_name, pattern in RISK_MOTIFS.items():
+        # Check if this position is part of a risk motif
+        for match in re.finditer(pattern, seq):
+            if match.start() <= idx < match.end():
+                # This position is in a risk motif
+                if "N-glycan" in motif_name:
+                    risk_score = max(risk_score, 0.9)
+                elif "NG" in motif_name:
+                    risk_score = max(risk_score, 0.8)
+                elif "NS" in motif_name:
+                    risk_score = max(risk_score, 0.7)
+                elif "DG" in motif_name:
+                    risk_score = max(risk_score, 0.8)
+                elif "M" in motif_name and len(match.group()) == 1:
+                    risk_score = max(risk_score, 0.5)
+                else:
+                    risk_score = max(risk_score, 0.6)
+                break
+    
+    return risk_score
 
 
 def _rationale(features, tier, buried, cdr_contact, ag_contact,
@@ -784,4 +976,22 @@ def _rationale(features, tier, buried, cdr_contact, ag_contact,
         out.append("Surface-exposed: direct immunogenicity risk")
     if conservation <= 0.2:
         out.append(f"Donor {donor_aa} rare in human germlines (conservation {conservation:.0%})")
+    return out
+
+
+def _rationale_with_structure(features, tier, buried, cdr_contact, ag_contact,
+                               exposure, conservation, donor_aa, human_aa,
+                               side_chain_contact=None, dev_risk_score=None) -> List[str]:
+    """P0: Enhanced rationale with structure and developability context."""
+    out = _rationale(features, tier, buried, cdr_contact, ag_contact,
+                     exposure, conservation, donor_aa, human_aa)
+    
+    # P0: Add side-chain contact rationale
+    if side_chain_contact is True:
+        out.append("Side-chain mediated CDR contact (<4.5 A, structure)")
+    
+    # P0: Add developability risk rationale
+    if dev_risk_score is not None and dev_risk_score > 0.7:
+        out.append(f"High developability risk (score {dev_risk_score:.2f})")
+    
     return out

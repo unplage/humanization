@@ -654,11 +654,105 @@ def number_sequence_imgt(sequence: str, chain_type: str) -> Dict[str, str]:
                 result[f"H{pos}"] = seq[idx]
 
     else:
-        # VL numbering (similar to VH but with different anchor positions)
-        # For simplicity, use sequential numbering for VL
-        for i, aa in enumerate(seq):
-            if i < 128:
-                result[f"L{i+1}"] = aa
+        # VL numbering using anchor-based approach (similar to VH)
+        # Find 1st-CYS (Cys at position 23 for kappa/lambda)
+        first_cys = None
+        for i in range(15, min(30, len(seq))):
+            if seq[i] == 'C':
+                first_cys = i
+                break
+
+        if first_cys is None:
+            # Fallback: simple sequential numbering
+            for i, aa in enumerate(seq):
+                if i < 128:
+                    result[f"L{i+1}"] = aa
+            return result
+
+        # Find CONSERVED-TRP (Trp after 1st-CYS, around position 41)
+        conserved_trp = None
+        for i in range(first_cys + 5, min(first_cys + 25, len(seq))):
+            if seq[i] == 'W':
+                conserved_trp = i
+                break
+
+        if conserved_trp is None:
+            # Fallback: simple sequential numbering
+            for i, aa in enumerate(seq):
+                if i < 128:
+                    result[f"L{i+1}"] = aa
+            return result
+
+        # Find 2nd-CYS (Cys at position 104 for kappa, or 106 for lambda)
+        second_cys = None
+        for i in range(conserved_trp + 50, min(conserved_trp + 70, len(seq))):
+            if seq[i] == 'C':
+                second_cys = i
+                break
+
+        # Assign positions based on anchors
+        # FR1: 1-26 (26 positions)
+        for i in range(min(26, len(seq))):
+            result[f"L{i+1}"] = seq[i]
+
+        # CDR1: 27-38 (12 positions)
+        cdr1_start = first_cys + 1
+        for i in range(12):
+            pos = 27 + i
+            idx = cdr1_start + i
+            if idx < len(seq):
+                result[f"L{pos}"] = seq[idx]
+
+        # FR2: 39-55 (17 positions)
+        fr2_start = cdr1_start + 12
+        for i in range(17):
+            pos = 39 + i
+            idx = fr2_start + i
+            if idx < len(seq):
+                result[f"L{pos}"] = seq[idx]
+
+        # CDR2: 56-65 (10 positions)
+        cdr2_start = fr2_start + 17
+        for i in range(10):
+            pos = 56 + i
+            idx = cdr2_start + i
+            if idx < len(seq):
+                result[f"L{pos}"] = seq[idx]
+
+        # FR3: 66-104 (39 positions)
+        fr3_start = cdr2_start + 10
+        for i in range(39):
+            pos = 66 + i
+            idx = fr3_start + i
+            if idx < len(seq):
+                result[f"L{pos}"] = seq[idx]
+
+        # CDR3: 105-117+ (variable)
+        cdr3_start = second_cys + 1 if second_cys else fr3_start + 39
+        # Find FR4 start (J region motif: FGxG or similar)
+        fr4_start = None
+        for i in range(cdr3_start, min(cdr3_start + 30, len(seq))):
+            # Look for FGXG motif typical of J region
+            if i + 3 < len(seq) and seq[i:i+2] == 'FG' and seq[i+3] == 'G':
+                fr4_start = i
+                break
+
+        if fr4_start is None:
+            fr4_start = len(seq)
+
+        # CDR3 residues
+        for i in range(max(0, fr4_start - cdr3_start)):
+            pos = 105 + i
+            idx = cdr3_start + i
+            if idx < len(seq) and pos <= 117:
+                result[f"L{pos}"] = seq[idx]
+
+        # FR4: 118-128 (11 positions)
+        for i in range(min(11, len(seq) - fr4_start)):
+            pos = 118 + i
+            idx = fr4_start + i
+            if idx < len(seq):
+                result[f"L{pos}"] = seq[idx]
 
     return result
 
