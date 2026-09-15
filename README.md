@@ -163,6 +163,7 @@ python3 -c "from anarci import anarci; print('ANARCI available')"
 |------|------|
 | `humanization_report.md` | 完整报告：执行摘要、编号、germline 选择、回复突变表、变体序列 |
 | `humanization_report.docx` | **Word 专业版**：封面 + 12 章 + 2 附录（含全部完整序列与逐位点对照表） |
+| `patent_example_report.docx` | **专利实施例报告**（中英双语）：回复突变设计表、变体序列（SEQ ID NO）、CDR 分析表 |
 | `enhanced_report.md` | **增强报告**（借鉴 WeMol 格式）：Template Score、Mutation Score、回复突变摘要、Hotspot 摘要、人源化序列 |
 | `humanization_result.json` | 机器可读完整结果 |
 | `backmutations_<链>.csv` | 逐位点评分明细（含实验 ddG 列） |

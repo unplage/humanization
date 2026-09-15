@@ -65,6 +65,30 @@ def assemble_variants(
     # FR4 structural reversions (structure mode only; sanctioned exception)
     t_fr4 = backmut.revert_positions(("T_FR4",))
 
+    # T2 sub-categorization by structural importance
+    # T2a: buried + cdr_contact (highest priority - directly contacts CDR)
+    # T2b: buried + (canonical/vernier/interface) OR exposed + cdr_contact
+    # T2c: other T2 (buried only, low priority)
+    t2a_positions = []
+    t2b_positions = []
+    t2c_positions = []
+    
+    for c in backmut.candidates:
+        if c.tier != "T2":
+            continue
+        if c.buried is True and c.cdr_contact is True:
+            # Highest priority: buried + CDR contact
+            t2a_positions.append(c.position)
+        elif c.buried is True and any(f in (c.features or "") for f in ["canonical", "vernier", "interface"]):
+            # Medium priority: buried + structural feature
+            t2b_positions.append(c.position)
+        elif c.buried is False and c.cdr_contact is True:
+            # Medium priority: exposed but contacts CDR
+            t2b_positions.append(c.position)
+        else:
+            # Low priority: buried only or other
+            t2c_positions.append(c.position)
+
     variants = []
     # V0: pure graft — no back-mutations, no indel positions
     # (germline lacks insertion positions, so they are absent from V0)
@@ -79,7 +103,25 @@ def assemble_variants(
         f"{chain_type}_V1",
         "V0 + Tier-1 back-mutations (structural pillars)",
         t1, exclude_indel=True))
-    # V2: T1 + T2 + all donor FR insertions + FR4 structural (default include)
+    
+    # V2a: T1 + T2a (buried + CDR contact) - minimal functional set
+    v2a_positions = _dedupe(t1 + t2a_positions)
+    v2a_desc = f"V0 + T1 + T2a ({len(t2a_positions)} buried+CDR contact)"
+    if indel_ins:
+        v2a_desc += " + %d FR insertion(s)" % len(indel_ins)
+    variants.append(build(
+        f"{chain_type}_V2a", v2a_desc, v2a_positions))
+    
+    # V2b: T1 + T2a + T2b (buried + canonical/vernier/interface)
+    v2b_positions = _dedupe(t1 + t2a_positions + t2b_positions)
+    v2b_desc = f"V0 + T1 + T2a/T2b ({len(t2a_positions)}+{len(t2b_positions)} structural)"
+    if indel_ins:
+        v2b_desc += " + %d FR insertion(s)" % len(indel_ins)
+    variants.append(build(
+        f"{chain_type}_V2b", v2b_desc, v2b_positions))
+    
+    # V2: T1 + T2a + T2b + T2c + all donor FR insertions + FR4 structural (default include)
+    # This is the current V2 logic (all T1+T2)
     t2 = backmut.revert_positions(("T1", "T2"))
     v2_positions = _dedupe(t2 + indel_ins + t_fr4)
     v2_desc = "V0 + Tier-1/2 back-mutations"
@@ -89,6 +131,7 @@ def assemble_variants(
         v2_desc += " + %d FR4 structural reversion(s)" % len(t_fr4)
     variants.append(build(
         f"{chain_type}_V2", v2_desc, v2_positions))
+    
     # Tier 3: only exposed positions (immunogenicity drivers), capped
     t3_exposed = [
         c.position for c in sorted(

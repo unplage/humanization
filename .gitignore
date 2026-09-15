@@ -15,3 +15,6 @@ inputs/
 data/AbRSA/
 data/ncbi-igblast-1.22.0/
 data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx
+
+# IgFold AntiBERTy weights (downloaded from HuggingFace)
+tools/igfold/antiberty_weights/

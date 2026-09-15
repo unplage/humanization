@@ -3,6 +3,10 @@
 
 import sys
 import os
+
+# Add repo root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Add current directory to path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from docx import Document
@@ -11,7 +15,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 
-from scripts.humanize.evaluate_humanness import (
+# Local import from current directory
+from evaluate_humanness import (
     evaluate_sequence, evaluate_sequence_imgt
 )
 from scripts.humanize.imgt_numbering import (
