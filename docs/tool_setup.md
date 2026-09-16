@@ -88,6 +88,37 @@ is produced as a sanity check instead.
 - IgBLAST `-humanize` mode: built-in "closest human germline" search for
   cross-validation of the germline selection.
 
+## 6. Immunogenicity analysis (post-humanization)
+
+Standalone module at `tools/immunogenicity/` for MHC-II T-cell epitope
+prediction. Backend: HLAIIPred (Apache-2.0, recommended) or heuristic fallback.
+
+```bash
+# Install HLAIIPred (recommended, ~410 MB)
+conda create -n hlapred python=3.11
+conda activate hlapred
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install scipy numpy pandas tqdm biopython pyyaml
+git clone https://github.com/pfizer-opensource/HLAIIPred.git
+cd HLAIIPred && pip install -e . && cd ..
+cp -r HLAIIPred/models tools/immunogenicity/models
+
+# Check backend availability
+python3 tools/immunogenicity/immunogenicity_analyzer.py --check
+
+# Analyze pipeline output (auto-discovers variants.fasta)
+python3 tools/immunogenicity/immunogenicity_analyzer.py \
+    --outdir outputs/amg110_step3/step3 \
+    --donor data/examples/mouse_4d5_fab.fasta \
+    --all-formats
+
+# Heuristic fallback (no external deps)
+python3 tools/immunogenicity/immunogenicity_analyzer.py \
+    --input variants.fasta --backend heuristic --all-formats
+```
+
+See `tools/immunogenicity/README.md` for full installation and license details.
+
 ## Quick start on a fresh server
 
 ```bash

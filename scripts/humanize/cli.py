@@ -186,7 +186,7 @@ def cmd_rmsd(args):
             continue
         vpos = pdb_chain_pos_map(vmodel, vlabel, vnum)
         res = structure_rmsd(
-            dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework)
+            dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework, ctype)
         clashes = count_clashes(vmodel)
         res["n_clashes"] = clashes["n_clashes"]
         res["worst_clash"] = clashes["worst"]
@@ -210,11 +210,15 @@ def cmd_rmsd(args):
     print(f"[humanize] CDR-RMSD vs donor {os.path.basename(args.donor)} "
           f"(chain {dlabel}, {args.scheme}, framework-superposed)")
     print(f"{'variant':<28} {'CDR-RMSD':>9} {'FR-RMSD':>8} "
+          f"{'FR1':>6} {'FR2':>6} {'FR3':>6} {'FR4':>6} "
           f"{'CDR1':>6} {'CDR2':>6} {'CDR3':>6} {'CDR pLDDT':>10} "
           f"{'n_cdr':>6} {'clashes':>8} {'worst':>6}")
     for name, r in results.items():
         per = r.get("per_cdr") or {}
+        per_fr = r.get("per_fr") or {}
         print(f"{name:<28} {_f(r.get('cdr_rmsd')):>9} {_f(r.get('fr_rmsd')):>8} "
+              f"{_f(per_fr.get('FR1')):>6} {_f(per_fr.get('FR2')):>6} "
+              f"{_f(per_fr.get('FR3')):>6} {_f(per_fr.get('FR4')):>6} "
               f"{_f(per.get('CDR1')):>6} {_f(per.get('CDR2')):>6} "
               f"{_f(per.get('CDR3')):>6} {_f(r.get('cdr_plddt')):>10} "
               f"{r.get('n_cdr', 0):>6} "

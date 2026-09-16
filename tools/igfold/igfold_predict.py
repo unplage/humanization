@@ -446,25 +446,33 @@ Requirements:
         action="store_true",
         help="Use Python API instead of CLI (experimental)",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip network connectivity check (use when weights are already downloaded)",
+    )
     
     args = parser.parse_args()
     
     # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
     
-    # Check network connectivity for first-time setup
-    print("[IgFold] Checking network connectivity...")
-    if not check_network_connectivity():
-        print("[WARNING] Network is unreachable. IgFold requires internet for first-time setup", file=sys.stderr)
-        print("          to download AntiBERTy weights (~100MB) from Hugging Face.", file=sys.stderr)
-        print()
-        print("Options:", file=sys.stderr)
-        print("  1. Run on a machine with internet access", file=sys.stderr)
-        print("  2. Set ANTIbertY_WEIGHTS_DIR to a local copy of the weights", file=sys.stderr)
-        print("  3. Manually download weights from: https://huggingface.co/jeffruffolo/AntiBERTy", file=sys.stderr)
-        print()
-        print("After downloading weights, you can run this script with --offline flag.", file=sys.stderr)
-        sys.exit(1)
+    # Check network connectivity for first-time setup (unless --offline)
+    if not args.offline:
+        print("[IgFold] Checking network connectivity...")
+        if not check_network_connectivity():
+            print("[WARNING] Network is unreachable. IgFold requires internet for first-time setup", file=sys.stderr)
+            print("          to download AntiBERTy weights (~100MB) from Hugging Face.", file=sys.stderr)
+            print()
+            print("Options:", file=sys.stderr)
+            print("  1. Run on a machine with internet access", file=sys.stderr)
+            print("  2. Set ANTIbertY_WEIGHTS_DIR to a local copy of the weights", file=sys.stderr)
+            print("  3. Manually download weights from: https://huggingface.co/jeffruffolo/AntiBERTy", file=sys.stderr)
+            print("  4. Use --offline flag if weights are already downloaded", file=sys.stderr)
+            print()
+            sys.exit(1)
+    else:
+        print("[IgFold] Offline mode - skipping network check")
     
     # Run prediction
     if args.input:
