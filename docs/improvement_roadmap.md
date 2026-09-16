@@ -175,7 +175,7 @@
 | **P1** | VH/VL 不对称权重 | germline 选择加权（VL 驱动亲和力、VH 驱动可开发性） | 无 |
 | **P1** | VHH FR2 分步人源化面板 | VHH 专属变体（37/44/45/47 单点尝试） | 无 |
 | **P2** | 组合变体筛选面板（20–50 个） | 筛选库 + 排序 | 计算资源 |
-| **P2** | netMHCIIpan / SITA 集成 | T 细胞表位分 | 服务器 |
+| **P2（已交付）** | netMHCIIpan / SITA 集成 → 独立免疫原性分析模块 | `tools/immunogenicity/` HLAIIPred MHC-II 表位预测 + heuristic fallback | HLAIIPred (Apache-2.0) |
 | **P2** | 生成式人源化（HuAbDiffusion/语言模型） | 替代路线候选 | 模型部署 |
 
 ---

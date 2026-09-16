@@ -660,6 +660,45 @@ def _pos_key(pos: str):
     return (int("".join(c for c in pos if c.isdigit())), pos)
 
 
+def _get_fr_region(pos: str, chain_type: str) -> str:
+    """Get FR region (FR1/FR2/FR3/FR4) from Kabat position string.
+    
+    VH: FR1 1-30, CDR1 31-35, FR2 36-49, CDR2 50-65, FR3 66-94, CDR3 95-102, FR4 103-113
+    VL: FR1 1-23, CDR1 24-34, FR2 35-49, CDR2 50-56, FR3 57-88, CDR3 89-97, FR4 98-107
+    """
+    # Extract numeric position from strings like "H31", "H100A", "L27E"
+    num_str = ""
+    for c in pos[1:]:  # Skip chain letter
+        if c.isdigit():
+            num_str += c
+        elif num_str:  # Stop at first non-digit after digits
+            break
+    
+    if not num_str:
+        return "FR4"  # Default for unknown positions
+    
+    num = int(num_str)
+    
+    if chain_type == "H":
+        if num <= 30:
+            return "FR1"
+        elif num <= 49:
+            return "FR2"
+        elif num <= 94:
+            return "FR3"
+        else:
+            return "FR4"
+    else:  # L chain
+        if num <= 23:
+            return "FR1"
+        elif num <= 49:
+            return "FR2"
+        elif num <= 88:
+            return "FR3"
+        else:
+            return "FR4"
+
+
 def structure_rmsd(
     donor_model: PDBModel,
     donor_chain: str,
@@ -669,11 +708,12 @@ def structure_rmsd(
     variant_pos_to_resseq: Dict[str, int],
     cdr_sets: Dict[str, set],
     framework_positions: set,
+    chain_type: str = "H",
 ) -> Dict:
     """Superpose a variant on the donor framework, then measure CDR CA-RMSD.
 
     ``*_pos_to_resseq`` are {Kabat pos: PDB residue number} maps. Returns
-    ``{cdr_rmsd, fr_rmsd, n_cdr, n_fr, per_cdr}`` (RMSD in Angstrom, None when
+    ``{cdr_rmsd, fr_rmsd, n_cdr, n_fr, per_cdr, per_fr}`` (RMSD in Angstrom, None when
     there is not enough aligned structure).
     """
     dca = ca_map(donor_model, donor_chain)
@@ -693,12 +733,12 @@ def structure_rmsd(
                  if p in dxyz and p in vxyz]
     if len(fr_common) < 3:
         return {"cdr_rmsd": None, "fr_rmsd": None, "n_cdr": 0,
-                "n_fr": len(fr_common), "per_cdr": {}}
+                "n_fr": len(fr_common), "per_cdr": {}, "per_fr": {}}
     fit = kabsch_superpose([dxyz[p] for p in fr_common],
                            [vxyz[p] for p in fr_common])
     if fit is None:
         return {"cdr_rmsd": None, "fr_rmsd": None, "n_cdr": 0,
-                "n_fr": len(fr_common), "per_cdr": {}}
+                "n_fr": len(fr_common), "per_cdr": {}, "per_fr": {}}
     fr_rmsd, R, t = fit
 
     per_cdr: Dict[str, Optional[float]] = {}
@@ -716,12 +756,28 @@ def structure_rmsd(
 
     cdr_rmsd = (round(math.sqrt(sum(d * d for d in all_pairs) / len(all_pairs)), 3)
                 if all_pairs else None)
+    
+    # Calculate per-FR RMSD (FR1, FR2, FR3, FR4)
+    per_fr: Dict[str, Optional[float]] = {}
+    fr_regions = {"FR1": [], "FR2": [], "FR3": [], "FR4": []}
+    for p in fr_common:
+        region = _get_fr_region(p, chain_type)
+        fr_regions[region].append(p)
+    
+    for region, positions in fr_regions.items():
+        if not positions:
+            per_fr[region] = None
+            continue
+        ss = sum(_dist(_apply(R, t, dxyz[p]), vxyz[p]) ** 2 for p in positions)
+        per_fr[region] = round(math.sqrt(ss / len(positions)), 3)
+    
     return {
         "cdr_rmsd": cdr_rmsd,
         "fr_rmsd": round(fr_rmsd, 3),
         "n_cdr": len(all_pairs),
         "n_fr": len(fr_common),
         "per_cdr": per_cdr,
+        "per_fr": per_fr,
     }
 
 
