@@ -202,6 +202,129 @@ python3 scripts/humanize/cli.py run --input seq.fasta --calibration calibration.
 
 ---
 
+## 免疫原性分析模块安装（可选但推荐）
+
+用于预测抗体变体的 MHC-II T-cell 表位负荷，评估免疫原性风险。
+
+### 快速安装（推荐）
+
+```bash
+# 1. 创建 conda 环境（Python 3.11）
+conda create -n hlapred python=3.11 -y
+conda activate hlapred
+
+# 2. 安装 PyTorch CPU 版本
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# 3. 安装 HLAIIPred 依赖
+pip install scipy numpy pandas tqdm biopython pyyaml
+
+# 4. 克隆并安装 HLAIIPred（Apache-2.0 许可证）
+git clone https://github.com/pfizer-opensource/HLAIIPred.git /tmp/HLAIIPred
+cd /tmp/HLAIIPred && pip install -e .
+
+# 5. 复制模型文件到项目目录
+mkdir -p tools/immunogenicity/models
+cp /tmp/HLAIIPred/models/epT_0.pt tools/immunogenicity/models/
+cp /tmp/HLAIIPred/models/epT_1.pt tools/immunogenicity/models/
+
+# 6. 安装结构风险评估依赖
+pip install freesasa python-docx
+
+# 7. 清理
+rm -rf /tmp/HLAIIPred
+
+# 8. 验证安装
+python3 tools/immunogenicity/immunogenicity_analyzer.py --check
+```
+
+### 验证安装成功
+
+```bash
+# 激活环境
+conda activate hlapred
+
+# 检查后端可用性
+python3 tools/immunogenicity/immunogenicity_analyzer.py --check
+# 输出应显示：
+#   HLAIIPred: ✓ (Apache-2.0)
+#   Heuristic: ✓ (MIT)
+#   FreeSASA: ✓
+
+# 运行快速测试
+python3 tools/immunogenicity/immunogenicity_analyzer.py \
+    --input data/examples/mouse_4d5_fab.fasta \
+    --backend hlaiipred \
+    --all-formats
+```
+
+### Windows 安装注意事项
+
+```bash
+# Windows 用户可能需要安装 Visual C++ Redistributable
+# 下载地址：https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
+
+# 如果 freesasa 安装失败，可以跳过（功能降级但仍可用）
+pip install python-docx
+```
+
+### 依赖说明
+
+| 依赖 | 版本 | 用途 | 必需？ |
+|------|------|------|--------|
+| Python | ≥ 3.9 | 运行环境 | 是 |
+| conda | ≥ 4.10 | 环境管理 | 推荐 |
+| PyTorch | ≥ 2.0 | HLAIIPred 推理 | 是（如使用 HLAIIPred） |
+| scipy | ≥ 1.7 | HLAIIPred 依赖 | 是 |
+| numpy | ≥ 1.21 | 数值计算 | 是 |
+| pandas | ≥ 1.3 | 数据处理 | 是 |
+| tqdm | ≥ 4.60 | 进度条 | 否 |
+| biopython | ≥ 1.79 | 序列处理 | 是 |
+| pyyaml | ≥ 5.4 | 配置文件解析 | 是 |
+| freesasa | ≥ 2.0 | SASA 计算（结构风险评估） | 否（降级） |
+| python-docx | ≥ 0.8 | Word 报告生成 | 否（降级） |
+
+### 复现完整分析流程
+
+在另一台电脑上复现分析：
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/用户名/humanization.git
+cd humanization
+
+# 2. 安装免疫原性分析模块
+conda create -n hlapred python=3.11 -y
+conda activate hlapred
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install scipy numpy pandas tqdm biopython pyyaml
+git clone https://github.com/pfizer-opensource/HLAIIPred.git /tmp/HLAIIPred
+cd /tmp/HLAIIPred && pip install -e .
+mkdir -p tools/immunogenicity/models
+cp /tmp/HLAIIPred/models/epT_0.pt tools/immunogenicity/models/
+cp /tmp/HLAIIPred/models/epT_1.pt tools/immunogenicity/models/
+pip install freesasa python-docx
+cd ../..
+
+# 3. 验证安装
+python3 tools/immunogenicity/immunogenicity_analyzer.py --check
+
+# 4. 运行分析（使用已有的 pipeline 输出）
+python3 tools/immunogenicity/immunogenicity_analyzer.py \
+    --outdir outputs/amg110_step3/step3 \
+    --all-formats
+
+# 5. 运行结构风险评估（如有变体结构）
+python3 tools/immunogenicity/structural_risk.py \
+    --immunogenicity-json outputs/immunogenicity/variants_immunogenicity.json \
+    --structure-dir af3/amg110_variants \
+    --backmutation-dir outputs/amg110_step3/step3 \
+    --output-dir outputs/immunogenicity \
+    --verbose
+```
+
+---
+
 ## 结构验证与变体面板（可选）
 
 ### AF3 CDR-RMSD 变体验证（`--af3-rmsd`）
