@@ -116,6 +116,47 @@ WEIGHTS = {
 }
 
 # ---------------------------------------------------------------------------
+# Structure-adaptive weighting (Step-3 / structure mode only)
+# ---------------------------------------------------------------------------
+# The structural evidence is combined with noisy-OR (independent features
+# accumulate), then modulated by the *per-antibody* geometry rather than the
+# literature tables alone:
+#   * side-chain-mediated CDR contacts are functional (a side-chain swap can
+#     break them); backbone-only contacts are fixed beta-sandwich geometry that
+#     a side-chain substitution cannot change, so they weigh far less;
+#   * buriedness is applied continuously from the measured relSASA, so the same
+#     literature position scores differently across antibodies whose local
+#     packing differs.
+STRUCTURAL_CONTACT_WEIGHTS = {
+    "cdr_contact_sc": 0.85,   # side-chain-mediated CDR contact (functional)
+    "cdr_contact_bb": 0.30,   # backbone-only CDR contact (beta-sheet geometry)
+}
+
+# Multiplier applied to the noisy-OR structural evidence as a function of
+# solvent exposure: a side-chain swap at a buried position perturbs packing
+# (boost), while an exposed one usually does not (down-weight). `unknown`
+# (no structure) is exactly 1.0 so the portable/no-structure path is unchanged.
+STRUCTURAL_EXPOSURE_FACTOR = {
+    "deep_buried": 1.15,      # relSASA < 0.05
+    "exposed": 0.70,          # relSASA > 0.40
+    "buried_bool": 1.10,      # binary hint: buried True
+    "exposed_bool": 0.85,     # binary hint: buried False
+    "unknown": 1.00,          # no structure
+}
+
+# Chemical liabilities (deamidation / isomerization / oxidation ...) are
+# surface chemistry: a buried liability is far less reactive than an exposed
+# one. The chemical term (human liability - donor liability) is scaled by the
+# substituted position's solvent exposure. `unknown` is 1.0 (conservative:
+# without structure keep the sequence-only value).
+CHEMICAL_EXPOSURE_WEIGHT = {
+    "exposed": 1.00,          # relSASA >= 0.50
+    "intermediate": 0.60,     # 0.20 <= relSASA < 0.50
+    "buried": 0.25,           # relSASA < 0.20
+    "unknown": 1.00,          # no structure
+}
+
+# ---------------------------------------------------------------------------
 # Chemical liability motifs (developability)
 # ---------------------------------------------------------------------------
 # Positive weight = penalty magnitude for a liability motif present in a

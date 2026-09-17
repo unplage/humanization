@@ -20,12 +20,15 @@ from typing import Dict, List, Optional, Tuple
 
 from .config import (
     CANONICAL,
+    CHEMICAL_EXPOSURE_WEIGHT,
     EMPIRICAL_NO_EFFECT,
     EMPIRICAL_NO_EFFECT_NOTE,
     FR4_STRUCTURAL_WEIGHTS,
     FR4_REVERSION_THRESHOLD,
     INTERFACE_CORE,
     INTERFACE_EXTENDED,
+    STRUCTURAL_CONTACT_WEIGHTS,
+    STRUCTURAL_EXPOSURE_FACTOR,
     VERNIER_ZONE,
     VHH_HALLMARK,
     WEIGHTS,
@@ -86,6 +89,61 @@ def _plddt_factor(plddt: Optional[float]) -> float:
     frac = (float(plddt) - 50.0) / 40.0
     frac = max(0.0, min(1.0, frac))
     return 0.2 + 0.8 * frac
+
+
+def _exposure_class(rel_sasa: Optional[float],
+                    buried: Optional[bool]) -> str:
+    """Bucket a position's solvent exposure for structure-adaptive weighting.
+
+    Prefers the measured relSASA (continuous, per-antibody); falls back to the
+    binary ``buried`` hint; ``unknown`` when neither is available.
+    """
+    if rel_sasa is not None:
+        if rel_sasa < 0.20:
+            return "buried"
+        if rel_sasa < 0.50:
+            return "intermediate"
+        return "exposed"
+    if buried is True:
+        return "buried"
+    if buried is False:
+        return "exposed"
+    return "unknown"
+
+
+def _contact_evidence_weight(sc_contact: Optional[bool]) -> float:
+    """Structural weight for a CDR contact.
+
+    Side-chain-mediated contacts are functional (a side-chain swap can break
+    them); backbone-only contacts are fixed beta-sandwich geometry that a
+    side-chain substitution cannot change, so they weigh far less.
+    """
+    return STRUCTURAL_CONTACT_WEIGHTS[
+        "cdr_contact_sc" if sc_contact else "cdr_contact_bb"]
+
+
+def _structural_exposure_factor(rel_sasa: Optional[float],
+                                buried: Optional[bool]) -> float:
+    """Multiplier for the noisy-OR structural evidence vs. exposure.
+
+    A side-chain swap perturbs buried packing more than an exposed surface
+    residue, so deeply buried positions are boosted and exposed ones
+    down-weighted. Continuous in relSASA when available; binary fallback;
+    exactly 1.0 with no structure (portable path unchanged).
+    """
+    if rel_sasa is not None:
+        deep = STRUCTURAL_EXPOSURE_FACTOR["deep_buried"]
+        exp = STRUCTURAL_EXPOSURE_FACTOR["exposed"]
+        if rel_sasa <= 0.05:
+            return deep
+        if rel_sasa >= 0.40:
+            return exp
+        return deep + (exp - deep) * (rel_sasa - 0.05) / 0.35
+    if buried is True:
+        return STRUCTURAL_EXPOSURE_FACTOR["buried_bool"]
+    if buried is False:
+        return STRUCTURAL_EXPOSURE_FACTOR["exposed_bool"]
+    return STRUCTURAL_EXPOSURE_FACTOR["unknown"]
 
 
 _LIABILITY_PATTERNS: Optional[List[Tuple[re.Pattern, float]]] = None
@@ -452,12 +510,29 @@ def analyze_backmutations(
         # Noisy-OR combination: independent pieces of structural evidence
         # accumulate (multiple weak features reinforce each other) instead of
         # being collapsed to the single strongest feature by max().
+        # Fractional-contact weighting is per-antibody geometry: a
+        # side-chain-mediated CDR contact is functional (a side-chain swap can
+        # break it), whereas a backbone-only contact is fixed beta-sandwich
+        # geometry that no side-chain substitution can change.
         w = WEIGHTS["structural"]
-        structural = _noisy_or([w[f] for f in features if f in w])
-        if features and buried is True:
-            structural = max(structural, 0.7)
-        if features and buried is False:
-            structural = structural * 0.85
+        rel_sasa = structure.rel_sasa(pos)
+        evidence: List[float] = []
+        for f in features:
+            if f == "cdr_contact":
+                evidence.append(_contact_evidence_weight(sc_contact))
+            elif f in w:
+                evidence.append(w[f])
+        structural = _noisy_or(evidence)
+
+        # Structure-adaptive exposure modulation. A functional contact is
+        # important regardless of exposure, so it is left untouched; otherwise
+        # the same literature position is re-weighted by its actual packing in
+        # THIS antibody (continuous relSASA when available, binary fallback,
+        # exactly 1.0 without structure so the portable path is unchanged).
+        functional_contact = (sc_contact is True) or (ag_contact is True)
+        if not functional_contact:
+            structural = min(
+                1.0, structural * _structural_exposure_factor(rel_sasa, buried))
 
         # pLDDT: continuous confidence weighting (not a hard threshold). The
         # structure evidence is scaled smoothly from 0.2 at pLDDT <= 50 to 1.0
@@ -489,14 +564,18 @@ def analyze_backmutations(
         #               human (graft) state carries  -> reward reversion
         #   chem < 0 -> reverting INTRODUCES / retains a donor liability
         #               -> penalise reversion
-        # This is a pure sequence-pattern scan (exposure-agnostic): buried
-        # liabilities are less risky in practice, but the term stays
-        # conservative. Conserved disulfide Cys are not in the motif table.
+        # Developability liabilities are surface chemistry: a buried NG/DG/M
+        # is far less reactive than an exposed one, so the delta is scaled by
+        # the substituted position's solvent exposure (relSASA when available,
+        # else the binary buried hint; 1.0 without structure, so the
+        # sequence-only path is unchanged). Conserved disulfide Cys are not in
+        # the motif table.
         d_res = donor.residue(pos)
         ridx = d_res.index if d_res is not None else max(0, donor.sequence.find(donor_aa))
         seq = donor.sequence
         human_state = seq[:ridx] + human_aa + seq[ridx + 1:]
-        chem = _liability_score(human_state) - _liability_score(seq)
+        chem = (_liability_score(human_state) - _liability_score(seq)) \
+            * CHEMICAL_EXPOSURE_WEIGHT[_exposure_class(rel_sasa, buried)]
 
         # ---- tier ----
         # P0: Use structure-aware tier assignment
