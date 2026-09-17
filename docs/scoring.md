@@ -40,18 +40,33 @@ practical range of the composite is therefore ~9-92 rather than the full
 | canonical | 0.80 | Chothia & Lesk 1987 |
 | interface_extended | 0.65 | Vargas-Madrazo 2003 |
 | buried | 0.70 | AF3 structure (relSASA < 0.20) |
-| cdr_contact | 0.85 | AF3 structure (heavy atom < 4.5 A) |
+| cdr_contact_sc | 0.85 | AF3 structure: **side-chain** heavy atom < 4.5 A to CDR |
+| cdr_contact_bb | 0.30 | AF3 structure: backbone-only contact (β-sandwich geometry) |
 | antigen_contact | 0.60 | AF3 complex structure |
 | vhh_hallmark | 1.00 | keep-donor, never revert |
 | disulfide_cys | 1.00 | keep-donor, never revert |
 
 The structural score combines the present features with a **noisy-OR**
 (`1 - Π(1 - w_i)`), so independent pieces of evidence reinforce each other
-instead of collapsing to the single strongest feature. A confirmed buried
-position raises it to at least 0.70; a confirmed exposed position scales it by
-0.85. The result is then multiplied by a **continuous pLDDT factor**
-(`0.2 + 0.8·clip((pLDDT-50)/40, 0, 1)`, unknown pLDDT = 1.0), so low-confidence
-structural evidence is down-weighted smoothly rather than by a hard cutoff.
+instead of collapsing to the single strongest feature. It is then made
+**structure-adaptive** (per antibody) in three ways:
+
+1. **Fractional contacts.** A CDR contact is weighted by how it is formed:
+   side-chain-mediated (`cdr_contact_sc` = 0.85) is functional — a side-chain
+   swap can break it — while a backbone-only contact (`cdr_contact_bb` = 0.30)
+   is fixed β-sandwich geometry that no side-chain substitution changes.
+2. **Exposure modulation** (`config.STRUCTURAL_EXPOSURE_FACTOR`, applied only
+   to *non-functional* positions): deeply buried positions are boosted (1.15)
+   and exposed ones down-weighted (0.70), continuously in relSASA when
+   available, else from the binary buried hint. The same literature position
+   therefore scores differently across antibodies whose local packing differs.
+   Positions with a functional contact are left untouched.
+3. **pLDDT factor**: continuous confidence weighting
+   (`0.2 + 0.8·clip((pLDDT-50)/40, 0, 1)`, unknown pLDDT = 1.0), so
+   low-confidence structural evidence is down-weighted smoothly.
+
+Without structure all three reduce to identity, so the portable path is
+unchanged.
 
 ### 1.2 Immunogenicity benefit (0-1)
 
@@ -84,12 +99,20 @@ The chemical term is a **symmetric liability delta** computed on the sequence
 pattern of the donor vs the human (graft) state at the candidate position:
 
 ```
-chem = liability(human residue at pos) - liability(donor residue at pos)
+chem = (liability(human residue at pos) - liability(donor residue at pos))
+       * CHEMICAL_EXPOSURE_WEIGHT[exposure_class(pos)]
 ```
 
 - `chem > 0` → reverting to the donor **removes** a liability the graft would
   carry (reward);
 - `chem < 0` → reverting **introduces / retains** a donor liability (penalty).
+- **Exposure scaling** (`config.CHEMICAL_EXPOSURE_WEIGHT`): developability
+  liabilities are surface chemistry, so the delta magnitude is scaled by the
+  substituted position's solvent exposure — exposed 1.00, intermediate 0.60,
+  buried 0.25. A buried NG/DG/M is far less reactive than an exposed one, so a
+  buried liability no longer scores as if it were surface-exposed. Without
+  structure the class is `unknown` (weight 1.0), keeping the sequence-only
+  value unchanged.
 
 Liability motifs and weights (`config.LIABILITY_MOTIFS`):
 
@@ -189,6 +212,13 @@ Analysis"), so a no-reversion outcome is explicit rather than silent.
 
 - Without AF3, buriedness/contact hints are absent: tiering relies on the
   literature position sets only (still the industry baseline).
+- Structure-adaptive weighting modulates the literature weights by measured
+  exposure and contact type; it is **not** an energy calculation (no
+  Rosetta/FoldX ΔΔG). Exposure is applied at the substituted residue, which is
+  an approximation for liability motifs spanning the adjacent residue.
+- Removing an N-glycan (or introducing one) is still reported at full motif
+  weight through the liability scan even when buried; only the composite's
+  chemical term is exposure-scaled.
 - The Kabat insertion lettering of the portable engine is approximate for
   exotic loop lengths; run ANARCI mode on the server before synthesis
   (see validation.md).

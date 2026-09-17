@@ -173,6 +173,76 @@ def test_chemical_liability_delta():
           str([(c.position, c.chemical_score) for c in bm2.candidates]))
 
 
+def test_structure_adaptive_scoring():
+    """Structure-adaptive weighting: exposure-aware chemical score, continuous
+    buriedness factor, and side-chain vs backbone CDR-contact weighting. The
+    no-structure path must stay exactly unchanged."""
+    print("structure-adaptive scoring")
+    from humanize.backmut import (
+        StructureHints, _contact_evidence_weight, _exposure_class,
+        _structural_exposure_factor,
+    )
+    from humanize.config import CHEMICAL_EXPOSURE_WEIGHT, STRUCTURAL_CONTACT_WEIGHTS
+
+    # exposure bucketing
+    check("exposure class: relSASA buried", _exposure_class(0.10, None) == "buried")
+    check("exposure class: relSASA exposed", _exposure_class(0.90, None) == "exposed")
+    check("exposure class: binary buried fallback", _exposure_class(None, True) == "buried")
+    check("exposure class: unknown", _exposure_class(None, None) == "unknown")
+
+    # structural exposure factor: no structure -> identity; buried > exposed
+    check("structural exposure factor unknown == 1.0",
+          _structural_exposure_factor(None, None) == 1.0)
+    f_deep = _structural_exposure_factor(0.02, None)
+    f_exp = _structural_exposure_factor(0.90, None)
+    check("buried boosts, exposed down-weights", f_deep > 1.0 > f_exp,
+          f"{f_deep} vs {f_exp}")
+    check("structural exposure factor decreases with exposure",
+          _structural_exposure_factor(0.10, None)
+          > _structural_exposure_factor(0.20, None))
+
+    # side-chain contact weighs far more than backbone-only
+    check("side-chain CDR contact >> backbone contact",
+          _contact_evidence_weight(True) >= 2 * _contact_evidence_weight(False)
+          and _contact_evidence_weight(False)
+          == STRUCTURAL_CONTACT_WEIGHTS["cdr_contact_bb"],
+          f"{_contact_evidence_weight(True)} vs {_contact_evidence_weight(False)}")
+
+    # integration: a buried N-glycan liability is worth less to remove than an
+    # exposed one (same sequence, exposure from the actual structure)
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    g = [x for x in db.v_genes if x.gene_id == "IGHV1-8*01"][0]
+    seq = g.numbered.sequence
+    r72 = g.numbered.residue("H72")
+    donor = number_heavy(seq[:r72.index] + "A" + seq[r72.index + 1:])
+
+    def chem_at(rel: float, buried: bool):
+        hints = StructureHints({"buried": {"H72": buried}, "rel_sasa": {"H72": rel}})
+        bm = analyze_backmutations(donor, g, structure=hints)
+        c = next((x for x in bm.candidates
+                  if x.position == "H72" and x.human_aa == "N"), None)
+        return c
+
+    c_exp = chem_at(0.90, False)
+    c_bur = chem_at(0.10, True)
+    check("exposed N-glycan removal rewarded",
+          c_exp is not None and c_exp.chemical_score >= 0.5,
+          str(c_exp.chemical_score if c_exp else None))
+    check("buried N-glycan removal scaled down",
+          c_bur is not None and 0 < c_bur.chemical_score < c_exp.chemical_score,
+          f"{c_bur.chemical_score if c_bur else None} vs "
+          f"{c_exp.chemical_score if c_exp else None}")
+    check("buried/exposed chemical ratio ~= CHEMICAL_EXPOSURE_WEIGHT",
+          c_bur is not None
+          and abs(c_bur.chemical_score
+                  - c_exp.chemical_score * CHEMICAL_EXPOSURE_WEIGHT["buried"]) <= 0.02,
+          f"{c_bur.chemical_score if c_bur else None}")
+    # structural evidence also adapts to exposure for a non-functional position
+    check("buried position scores higher structurally than exposed",
+          c_bur.structural_score > c_exp.structural_score,
+          f"{c_bur.structural_score} vs {c_exp.structural_score}")
+
+
 def test_structure_hint_chain_filtering():
     """Regression: the CDR/antigen atom pools must be filtered by chain id,
     not by resseq alone. AF3 writes every chain starting at residue 1, so
@@ -1415,6 +1485,7 @@ def test_end_to_end():
 def main():
     test_numbering()
     test_chemical_liability_delta()
+    test_structure_adaptive_scoring()
     test_vl_cdr3_insertion_numbering()
     test_structure_hint_chain_filtering()
     test_learning_fab_vl_positions()
