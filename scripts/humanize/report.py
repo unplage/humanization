@@ -20,6 +20,11 @@ def _num(v, nd=2):
     return f"{v:.{nd}f}"
 
 
+def _num_key(pos: str):
+    """Sort key for Kabat position labels (chain, numeric part, raw)."""
+    return (pos[0], int("".join(c for c in pos if c.isdigit())), pos)
+
+
 def write_csv(path: str, backmut: BackMutationResult) -> None:
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
@@ -335,22 +340,63 @@ def write_markdown(path: str, result: RunResult) -> None:
         L.append("**Tier summary:** " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) + "")
         L.append("")
 
-        # FR4 Structural Analysis (Step3 only - requires structure data)
-        fr4_candidates = [c for c in rep.backmut.candidates if c.tier == "T_FR4"]
-        if fr4_candidates:
-            L.append("### FR4 Structural Analysis (Step3 only)")
+        # FR4 / J-region analysis. FR4 is human by construction (human J gene),
+        # so it is normally NOT back-mutated. The one sanctioned exception is a
+        # structure-confirmed CDR3/antigen contact (T_FR4). This section is
+        # always emitted when a J gene exists, so the FR4 decision is visible
+        # even when no reversion is needed.
+        _jg = rep.germline.j_gene
+        if _jg is not None and _jg.numbered is not None:
+            from .config import J_ANCHOR
+            jmap = _jg.numbered.posmap()
+            _donor_num = rep.input_chain.numbered
+            dmap = _donor_num.posmap() if _donor_num is not None else {}
+            anchor = J_ANCHOR[rep.backmut.chain_type]
+
+            fr4_candidates = {c.position: c for c in rep.backmut.candidates
+                              if c.tier == "T_FR4"}
+            has_structure = any(
+                c.buried is not None or c.cdr_contact is not None
+                for c in rep.backmut.candidates)
+
+            mismatches = []
+            for pos in sorted(jmap, key=lambda p: _num_key(p)):
+                if int("".join(c for c in pos if c.isdigit())) < anchor:
+                    continue
+                d_aa, h_aa = dmap.get(pos, ""), jmap.get(pos, "")
+                if d_aa and h_aa and d_aa != h_aa:
+                    mismatches.append((pos, d_aa, h_aa))
+
+            L.append("### FR4 / J-region Analysis")
             L.append("")
-            L.append("*FR4 positions with structural importance (CDR3/antogen contact):*")
+            L.append(f"**Human J gene:** `{_jg.gene_id}` — FR4 is human by "
+                     f"construction and is not back-mutated, except when "
+                     f"structure data confirms a CDR3/antigen contact.")
             L.append("")
-            L.append("| Position | Donor | Human | Score | Features | Recommendation |")
-            L.append("|----------|-------|-------|-------|----------|----------------|")
-            for c in sorted(fr4_candidates, key=lambda x: -x.composite):
-                L.append(f"| {c.position} | {c.donor_aa} | {c.human_aa} | {c.composite} | "
-                         f"{'+'.join(c.features)} | **Revert to donor ({c.donor_aa})** |")
+            if not mismatches:
+                L.append("*FR4 is identical to the donor; no reversion needed.*")
+            else:
+                L.append("| Position | Donor | Human J | Structure | Recommendation |")
+                L.append("|----------|-------|---------|-----------|----------------|")
+                for pos, d_aa, h_aa in mismatches:
+                    cand = fr4_candidates.get(pos)
+                    if cand is not None:
+                        struct = "+".join(cand.features) or "-"
+                        rec = f"**Revert to donor ({pos} {d_aa}>{h_aa})**"
+                    else:
+                        if has_structure:
+                            struct = "no CDR3/antigen contact"
+                            rec = f"Keep human ({pos} {d_aa}>{h_aa})"
+                        else:
+                            struct = "not evaluated (no structure)"
+                            rec = (f"Keep human ({pos} {d_aa}>{h_aa}); run "
+                                   f"Step3 with `--donor-structure` to evaluate")
+                    L.append(f"| {pos} | {d_aa} | {h_aa} | {struct} | {rec} |")
             L.append("")
-            L.append("**Note:** FR4 typically comes from human J gene. These positions are recommended for reversion")
-            L.append("only because structure data shows critical CDR3/antigen contacts.")
-            L.append("")
+            if fr4_candidates:
+                L.append("**Note:** FR4 reversion is recommended only where "
+                         "structure data shows critical CDR3/antigen contacts.")
+                L.append("")
 
         # FR Indel Analysis
         if rep.backmut.fr_indels:
@@ -508,4 +554,19 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
             for v in rep.variants:
                 fh.write(f">{rep.input_chain.name}|{v.name}|{v.description}\n{v.sequence}\n")
     paths["fasta"] = fasta
+
+    # Per-variant Kabat position labels, aligned to each variant sequence.
+    # Consumed by the standalone tools (e.g. tools/immunogenicity/structural_risk.py)
+    # so back-mutation/FR4 positions can be matched exactly instead of by
+    # sequence index (which diverges from Kabat wherever insertions exist).
+    numbering: Dict[str, List[str]] = {}
+    for rep in result.chains:
+        for v in rep.variants:
+            numbered = v.graft.numbered
+            if numbered is not None:
+                numbering[v.name] = [r.pos for r in numbered.residues]
+    num_path = os.path.join(outdir, "variants_numbering.json")
+    with open(num_path, "w") as fh:
+        json.dump(numbering, fh, indent=2)
+    paths["numbering"] = num_path
     return paths

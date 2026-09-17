@@ -77,7 +77,7 @@ python3 scripts/humanize/cli.py run --input <seq.fasta> \
 **关键注意点**：
 1. **必须使用 variant 特异性结构**：Donor 构象不充分，backmutation 改变局部 packing
 2. **CDR-RMSD 评估**：使用 Kabat 编号范围划分 FR1/FR2/FR3/FR4
-3. **FR4 为 J 区域**：不纳入框架叠合
+3. **FR4 为 J 区域**：不纳入框架叠合（fit），但叠合后单独报告 FR4 偏差（post-fit），量化 J 区替换对 CDR3 邻近骨架的影响
 4. **pLDDT 过滤**：只使用高置信度区域进行叠合
 
 ---
@@ -176,6 +176,8 @@ python3 tools/immunogenicity/structural_risk.py \
   --structure-dir <pdb_dir> \
   --backmutation-dir <csv_dir> \
   --output-dir <outdir> --method relSASA
+# 注：工具会自动读取 <csv_dir>/variants_numbering.json 以精确对齐 Kabat 位置
+# （含 FR4 与插入位点）；也可显式传 --numbering-json <path>
 ```
 
 **⚠️ 关键注意点**：
@@ -198,6 +200,13 @@ python3 tools/immunogenicity/structural_risk.py \
    - 修复：添加自动 fallback
 3. **structural_risk.py 只考虑回突变位置**
    - 修复：无回突变数据时 fallback 到所有位置
+4. **structural_risk.py 位置映射错误（Kabat vs 序列序号）**
+   - 问题：回突变 CSV 是 Kabat 编号，工具却按序列序号匹配；插入位点（FR3 82A-C、CDR 27A-/100A-K）与 FR4 会被错配，且 `int("82A")` 直接崩溃
+   - 修复：pipeline 输出 `variants_numbering.json`（每个变体的逐残基 Kabat 标签），工具自动发现并精确匹配；解析兼容插入字母
+5. **FR4 是否被各工具覆盖**
+   - `ptm_exposure`、`immunogenicity_analyzer` 序列扫描：**整链扫描，包含 FR4**
+   - `structural_risk`：**包含 FR4**（T_FR4 权重 0.9），需 `variants_numbering.json` 才能精确对齐
+   - `igfold`：只做结构预测（模型含 FR4），不做区域分析
 
 ---
 
@@ -256,7 +265,7 @@ python3 scripts/humanize/cli.py rmsd \
 
 **注意点**：
 - 使用 Kabat 编号划分 FR1/FR2/FR3/FR4
-- FR4（J 区域）不纳入框架叠合
+- FR4（J 区域）不纳入框架叠合，但会以 post-fit 方式单独报告 RMSD
 - 输出 per-FR RMSD 值
 
 ---

@@ -733,6 +733,9 @@ def main():
                         help="Directory containing backmutation CSVs (from pipeline output)")
     parser.add_argument("--structural-risk", action="store_true",
                         help="Enable structural risk adjustment (requires --structure-dir)")
+    parser.add_argument("--numbering-json",
+                        help="Per-variant Kabat labels for structural risk "
+                             "(auto-discovered in --backmutation-dir when omitted)")
     parser.add_argument("--structural-method", default="relSASA",
                         choices=["relSASA", "binary"],
                         help="Structural risk adjustment method (default: relSASA)")
@@ -781,6 +784,7 @@ def main():
                 args.output,
                 method=args.structural_method,
                 verbose=args.verbose,
+                numbering_json=args.numbering_json,
             )
             print("\n  Structural risk adjustment completed.")
         except ImportError as e:

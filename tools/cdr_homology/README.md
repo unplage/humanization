@@ -18,6 +18,23 @@ pip install pandas biopython anarci python-docx openpyxl
 
 ## Workflow
 
+### Step 0: Build a paired FASTA from pipeline output (optional)
+
+If you have a humanization `variants.fasta`, generate a paired VH/VL FASTA
+(one pair per ladder index V0, V1, V2a, ...):
+
+```bash
+python3 tools/cdr_homology/create_paired_fasta.py \
+    --input outputs/amg110_humanization_step3/step3/variants.fasta \
+    --output outputs/amg110_humanization_step3/step3/analysis_input/variants_paired.fasta \
+    --name AMG110
+```
+
+This accepts the pipeline header convention `>AMG110.H|H_V0|desc`, plain
+`>name_VH` / `>name_VL` FASTAs, and single-chain (VHH) inputs. Output records
+are named `>AMG110_V0_VH` / `>AMG110_V0_VL`, which the query tool pairs
+automatically.
+
 ### Step 1: Preprocess Database
 
 First, preprocess the TheraSAbDab Excel database to extract CDRs:

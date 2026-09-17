@@ -186,6 +186,39 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py \
     --all-formats
 ```
 
+## Position numbering (FR4 and insertion letters)
+
+`structural_risk.py` matches back-mutation positions from the pipeline CSVs,
+which are **Kabat** labels (`H5`, `H82A`, `H103`, `L100B`, ...). To do this
+exactly it needs the per-residue Kabat labels of each variant. The pipeline
+writes them automatically:
+
+```
+outputs/<run>/step3/variants_numbering.json
+{
+  "H_V0": ["H1", "H2", ..., "H113"],
+  "H_V2a": ["H1", "H2", ..., "H113"],
+  ...
+}
+```
+
+`structural_risk.py` auto-discovers this file in `--backmutation-dir`; you can
+also pass it explicitly with `--numbering-json`.
+
+Without it, the tool falls back to matching by **sequence index**, which
+diverges from Kabat wherever insertions exist (FR3 82A-C, CDR 27A-/100A-K), so
+FR4 (Kabat 103-113 / 98-107) and insertion-letter back-mutations would be
+missed. A warning is printed in verbose mode.
+
+**FR4 coverage across the tools:**
+
+| Tool | FR4 handled? |
+|------|--------------|
+| `immunogenicity_analyzer.py` (sequence) | Yes — MHC-II peptides are generated over the whole chain, FR4 included |
+| `structural_risk.py` (structure) | Yes — with `variants_numbering.json`; `T_FR4` carries weight 0.9 |
+| `../ptm_exposure/analyze_ptm.py` | Yes — PTM motifs scanned over the whole chain (e.g. `H103` W oxidation) |
+| `../igfold/igfold_predict.py` | Predicts the full chain (FR4 in the model); does no region analysis itself |
+
 ## Usage with Humanization Pipeline
 
 ### Step 1: Run humanization

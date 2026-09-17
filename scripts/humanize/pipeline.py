@@ -346,7 +346,10 @@ def _process_chain(
     from_af3 = bool(af3_pdb and os.path.exists(af3_pdb))
     structure_path = af3_pdb if from_af3 else config.donor_structure
     if structure_path and os.path.exists(structure_path):
-        from .structure import load_model, match_pdb_chain, compute_multi_model_consensus
+        from .structure import (
+            load_model, match_pdb_chain, match_pdb_chain_loose,
+            compute_multi_model_consensus,
+        )
         model = load_model(structure_path)
         if model:
             # Assign the PDB chain by sequence identity (longest common
@@ -358,63 +361,76 @@ def _process_chain(
 
             label = match_pdb_chain(pdb_chains, donor.sequence)
             if label is None:
-                # Fallback: conventional Fab chain ids
-                label = "H" if ctype == "H" else "L"
+                # Exact-run match failed (renumbered/tagged structure, or a
+                # sequence that drifted from the model). Fall back to global
+                # sequence identity; refuse to guess if it is too low, so we
+                # never annotate structural features on the wrong chain.
+                label = match_pdb_chain_loose(pdb_chains, donor.sequence)
+                if label is not None:
+                    chain.warnings.append(
+                        f"[{chain.name}] exact chain match failed; using chain "
+                        f"'{label}' by sequence identity")
+                else:
+                    chain.warnings.append(
+                        f"[{chain.name}] donor structure has no chain matching "
+                        f"the input sequence; structure hints skipped (check "
+                        f"that --donor-structure belongs to this antibody)")
 
-            # Antigen chains: every chain that is neither the target chain nor
-            # its partner. AF3 renumbers output chains (A/B/C), so a fixed
-            # chain id must never be assumed.
-            ag_chains = None
-            if antigen:
-                used = {label}
-                partner_seq = None if fmt == "vhh" else _partner_sequence(chain, all_chains)
-                if partner_seq:
-                    plabel = match_pdb_chain(pdb_chains, partner_seq)
-                    if plabel:
-                        used.add(plabel)
-                ag_chains = [c for c in pdb_chains if c not in used] or None
+            if label is not None:
+                # Antigen chains: every chain that is neither the target chain
+                # nor its partner. AF3 renumbers output chains (A/B/C), so a
+                # fixed chain id must never be assumed.
+                ag_chains = None
+                if antigen:
+                    used = {label}
+                    partner_seq = None if fmt == "vhh" else _partner_sequence(chain, all_chains)
+                    if partner_seq:
+                        plabel = match_pdb_chain(pdb_chains, partner_seq)
+                        if plabel:
+                            used.add(plabel)
+                    ag_chains = [c for c in pdb_chains if c not in used] or None
 
-            # Map donor Kabat positions to PDB residue numbers. When the PDB
-            # chain has exactly one CA per donor residue (the usual AF3 case,
-            # and tagged experimental PDBs), use the *actual* PDB numbering
-            # instead of assuming resseq == index+1.
-            ca_sorted = sorted(
-                (a.resseq, a.resname) for a in pdb_chains[label] if a.name == "CA")
-            if len(ca_sorted) == len(donor.residues):
-                all_pos = {r.pos: ca_sorted[i][0]
-                           for i, r in enumerate(donor.residues)}
-            else:
-                all_pos = {r.pos: r.index + 1 for r in donor.residues}
-                chain.warnings.append(
-                    f"[{chain.name}] structure chain has {len(ca_sorted)} CA "
-                    f"vs {len(donor.residues)} donor residues; assuming "
-                    f"sequential numbering")
-            donor_struct = (model, label, all_pos)
-            from .graft import is_cdr_loop_position
-            cdrs = {p: n for p, n in all_pos.items()
-                    if is_cdr_loop_position(ctype, int("".join(c for c in p if c.isdigit())))}
-            # B-factor is only a pLDDT score for AF3 predictions; an
-            # experimental `--donor-structure` carries a temperature factor.
-            use_plddt = from_af3
+                # Map donor Kabat positions to PDB residue numbers. When the
+                # PDB chain has exactly one CA per donor residue (the usual AF3
+                # case, and tagged experimental PDBs), use the *actual* PDB
+                # numbering instead of assuming resseq == index+1.
+                ca_sorted = sorted(
+                    (a.resseq, a.resname) for a in pdb_chains[label] if a.name == "CA")
+                if len(ca_sorted) == len(donor.residues):
+                    all_pos = {r.pos: ca_sorted[i][0]
+                               for i, r in enumerate(donor.residues)}
+                else:
+                    all_pos = {r.pos: r.index + 1 for r in donor.residues}
+                    chain.warnings.append(
+                        f"[{chain.name}] structure chain has {len(ca_sorted)} CA "
+                        f"vs {len(donor.residues)} donor residues; assuming "
+                        f"sequential numbering")
+                donor_struct = (model, label, all_pos)
+                from .graft import is_cdr_loop_position
+                cdrs = {p: n for p, n in all_pos.items()
+                        if is_cdr_loop_position(ctype, int("".join(c for c in p if c.isdigit())))}
+                # B-factor is only a pLDDT score for AF3 predictions; an
+                # experimental `--donor-structure` carries a temperature factor.
+                use_plddt = from_af3
 
-            # Multi-model consensus over sibling models if available
-            import glob
-            pdb_dir = os.path.dirname(structure_path)
-            found = set()
-            for pat in ("rank_*.pdb", "*_model*.pdb"):
-                found.update(glob.glob(os.path.join(pdb_dir, pat)))
-            all_pdbs = sorted(found)
+                # Multi-model consensus over sibling models if available
+                import glob
+                pdb_dir = os.path.dirname(structure_path)
+                found = set()
+                for pat in ("rank_*.pdb", "*_model*.pdb"):
+                    found.update(glob.glob(os.path.join(pdb_dir, pat)))
+                all_pdbs = sorted(found)
 
-            if len(all_pdbs) >= 3:
-                hints = compute_multi_model_consensus(
-                    all_pdbs, label, all_pos, cdrs, ag_chains,
-                    min_consensus=3, use_plddt=use_plddt,
-                )
-            else:
-                # Single model
-                hints = _compute_hints_with_model(
-                    model, label, all_pos, cdrs, ag_chains,
-                    pdb_path=structure_path, use_plddt=use_plddt)
+                if len(all_pdbs) >= 3:
+                    hints = compute_multi_model_consensus(
+                        all_pdbs, label, all_pos, cdrs, ag_chains,
+                        min_consensus=3, use_plddt=use_plddt,
+                    )
+                else:
+                    # Single model
+                    hints = _compute_hints_with_model(
+                        model, label, all_pos, cdrs, ag_chains,
+                        pdb_path=structure_path, use_plddt=use_plddt)
 
     # ---- FR indel detection and interactive selection ----
     from .fr_indel import detect_fr_indels, select_insertion_interactive, update_indel_selection
@@ -677,8 +693,10 @@ def _measure_variant(donor_struct, config: PipelineConfig, donor_numbered,
         high_conf = {p for p in framework if plddt.get(p, 100.0) >= 70.0}
         if len(high_conf) >= 8:
             fit_positions = high_conf
+    donor_regions = {r.pos: r.region for r in donor_numbered.residues}
     res = structure_rmsd(donor_model, donor_label, donor_pos,
-                         vmodel, vlabel, vpos, cdr_sets, fit_positions)
+                         vmodel, vlabel, vpos, cdr_sets, fit_positions,
+                         pos_regions=donor_regions)
     clashes = count_clashes(vmodel)
     res["n_clashes"] = clashes["n_clashes"]
     res["worst_clash"] = clashes["worst"]
