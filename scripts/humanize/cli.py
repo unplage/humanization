@@ -185,8 +185,10 @@ def cmd_rmsd(args):
                   file=sys.stderr)
             continue
         vpos = pdb_chain_pos_map(vmodel, vlabel, vnum)
+        donor_regions = {r.pos: r.region for r in donor.residues}
         res = structure_rmsd(
-            dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework, ctype)
+            dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework,
+            ctype, pos_regions=donor_regions)
         clashes = count_clashes(vmodel)
         res["n_clashes"] = clashes["n_clashes"]
         res["worst_clash"] = clashes["worst"]

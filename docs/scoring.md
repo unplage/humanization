@@ -171,8 +171,19 @@ required back-mutations (e.g. the trastuzumab H78 reversion).
 
 FR4 is human (J gene) by construction, but when a J-region residue contacts
 CDR3 or the antigen it may need to stay donor. This is evaluated against the
-**J gene** map (`backmut.py`, requires `j_gene`) and the resulting `T_FR4`
-candidates are included in the V2 variant.
+**J gene** map (`backmut.py`, requires `j_gene` **and** structure data) and the
+resulting `T_FR4` candidates are included in the V2 variant.
+
+Trigger: a donor/J mismatch at a J-region position whose structure-derived
+score meets `FR4_REVERSION_THRESHOLD` (0.4) — `cdr3_contact` 0.45,
+`antigen_contact` 0.35, `buried` 0.15, `interface_core` 0.05. An exposed
+mismatch with no CDR3/antigen contact is kept human (reverting it would only
+add a non-human surface residue).
+
+J gene choice itself is already identity-maximizing (highest FR4 identity, then
+frequency), so mismatches are minimized before reversion is considered. Every
+report always lists the FR4/J mismatches and their disposition ("FR4 / J-region
+Analysis"), so a no-reversion outcome is explicit rather than silent.
 
 ## 4. Known limitations
 

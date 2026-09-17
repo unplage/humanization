@@ -261,6 +261,19 @@ def test_pdb_chain_matching():
     check("unrelated sequence yields None",
           match_pdb_chain(pdb_chains, "W" * 30) is None)
 
+    # Loose (identity-based) fallback used when no long exact run exists
+    # (renumbered/tagged structures). Must still pick the right chain and
+    # refuse an unrelated one.
+    from humanize.structure import match_pdb_chain_loose, sequence_identity
+    check("sequence_identity exact match", sequence_identity(M4D5_VH, M4D5_VH) == 1.0)
+    check("sequence_identity offset tolerant",
+          sequence_identity("XX" + M4D5_VH, M4D5_VH) == 1.0)
+    check("loose match picks VHH chain",
+          match_pdb_chain_loose(pdb_chains, VHH_1BZQ) == "A",
+          str(match_pdb_chain_loose(pdb_chains, VHH_1BZQ)))
+    check("loose match refuses unrelated sequence",
+          match_pdb_chain_loose(pdb_chains, "W" * 30) is None)
+
 
 def test_lambda_chain_end_to_end():
     """Lambda (IGLV) chains were never exercised by any test (~40% of human
@@ -506,10 +519,12 @@ def test_backmut_variants():
         check(f"{donor.name} has T3 candidates", "T3" in tiers)
         variants = assemble_variants(donor.numbered, choice.v_gene, choice.j_gene,
                                      "kabat", bm, is_vhh=False)
-        check(f"{donor.name} 4 variants", len(variants) == 4)
+        # V0, V1, V2a, V2b, V2, V3 (V2 split into a/b sub-variants)
+        check(f"{donor.name} 6 variants", len(variants) == 6,
+              str([v.name for v in variants]))
         lens = {len(v.sequence) for v in variants}
         check(f"{donor.name} same length across variants", len(lens) == 1, str(lens))
-        v2 = variants[2]
+        v2 = next(v for v in variants if v.name.endswith("_V2"))
         for pos in v2.backmutations:
             check(f"{donor.name} {pos} back-mutated in V2",
                   v2.graft.origin.get(pos) == "donor", str(v2.graft.origin.get(pos)))
@@ -946,6 +961,74 @@ def test_multi_model_consensus_fields():
               cons.data.get("cdr_contact", {}).get("H6") is True)
 
 
+def test_tool_kabat_mapping():
+    """Standalone tools must map sequence index -> Kabat exactly, so
+    back-mutations at FR4 / insertion-letter positions (H82A, L27A, H103) are
+    matched instead of crashing or silently missing."""
+    print("tool Kabat position mapping")
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from immunogenicity.structural_risk import (
+        PositionBuriedness, _kabat_num, _labels_for_variant,
+        _rekey_structure_by_label, map_peptide_positions,
+    )
+
+    check("_kabat_num parses insertion letters",
+          _kabat_num("H82A") == 82 and _kabat_num("L100B") == 100
+          and _kabat_num("L27A") == 27 and _kabat_num("H103") == 103,
+          str([_kabat_num(p) for p in ("H82A", "L100B", "L27A", "H103")]))
+    check("_kabat_num returns None without digits", _kabat_num("X") is None)
+
+    # 'A|H_V2a' style keys must resolve
+    numbering = {"4D5_VH|H_V2a": ["H1", "H2", "H3", "H4", "H5"]}
+    check("labels resolved from 'name|variant' key",
+          _labels_for_variant(numbering, "H_V2a") == ["H1", "H2", "H3", "H4", "H5"])
+
+    # Re-key a sequential structure map (H1..H5) onto Kabat labels
+    seq_map = {
+        f"H{i}": PositionBuriedness(
+            position=f"H{i}", chain="H", seq_index=i - 1, resname="ALA",
+            abs_sasa=10.0, rel_sasa=0.1, buried=True, is_backmutation=False)
+        for i in range(1, 6)
+    }
+    labels = ["H1", "H2", "H3", "H82A", "H83"]  # insertion letter in the middle
+    rekeyed = _rekey_structure_by_label(seq_map, "H", labels)
+    check("re-key aligns labels including insertion letters",
+          "H82A" in rekeyed and rekeyed["H82A"].position == "H82A"
+          and rekeyed["H83"].seq_index == 4,
+          str(list(rekeyed.keys())))
+
+    # A backmutation at the insertion position must be matched (previously an
+    # int('82A') ValueError crash / silent miss).
+    bms = [{"position": "H82A", "donor_aa": "A", "human_aa": "S",
+            "tier": "T2", "buried": True, "cdr_contact": False,
+            "antigen_contact": False}]
+    pos = map_peptide_positions(
+        3, 4, "XXXXX", "H", rekeyed, bms, position_labels=labels)
+    check("backmutation at insertion position matched",
+          pos[0].position == "H82A" and pos[0].is_backmutation
+          and pos[0].tier == "T2", str(pos[0]))
+
+    # FR4 (Kabat 103) at a late sequence index must also match
+    fr4_map = {
+        f"H{i}": PositionBuriedness(
+            position=f"H{i}", chain="H", seq_index=i - 1, resname="ALA",
+            abs_sasa=10.0, rel_sasa=0.1, buried=True, is_backmutation=False)
+        for i in range(1, 12)
+    }
+    fr4_labels = [f"H{n}" for n in (95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105)]
+    fr4_rekey = _rekey_structure_by_label(fr4_map, "H", fr4_labels)
+    fr4_bms = [{"position": "H103", "donor_aa": "W", "human_aa": "W",
+                "tier": "T_FR4", "buried": True, "cdr_contact": True,
+                "antigen_contact": False}]
+    idx = fr4_labels.index("H103")
+    fr4_pos = map_peptide_positions(
+        idx, idx + 1, "X" * 11, "H", fr4_rekey, fr4_bms,
+        position_labels=fr4_labels)
+    check("FR4 T_FR4 backmutation matched",
+          fr4_pos[0].position == "H103" and fr4_pos[0].is_backmutation
+          and fr4_pos[0].tier == "T_FR4", str(fr4_pos[0]))
+
+
 def test_structure_rmsd_engine():
     """Kabsch superposition + framework-superposed CDR-RMSD."""
     print("structure RMSD engine")
@@ -981,6 +1064,34 @@ def test_structure_rmsd_engine():
           and res2["cdr_rmsd"] > 0.9, str(res2))
     check("framework RMSD stays ~0", res2["fr_rmsd"] is not None
           and res2["fr_rmsd"] < 1e-6, str(res2))
+
+    # FR4 is measured post-fit when a region map is supplied, even though it is
+    # never part of the FR1-FR3 superposition.
+    def mk_fr4(shift=0.0):
+        m = PDBModel()
+        for i in range(1, 9):       # FR1 (fit set)
+            m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, 0.0, 0.0, 90.0))
+        for i in range(9, 12):      # FR4 (not in fit set)
+            m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, shift, 0.0, 90.0))
+        for i in range(20, 23):     # CDR3
+            m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, 5.0, 0.0, 90.0))
+        return m
+
+    pos2 = {f"H{i}": i for i in list(range(1, 9)) + list(range(9, 12))
+            + list(range(20, 23))}
+    regions = {f"H{i}": "FR1" for i in range(1, 9)}
+    regions.update({f"H{i}": "FR4" for i in range(9, 12)})
+    regions.update({f"H{i}": "CDR3" for i in range(20, 23)})
+    res3 = structure_rmsd(mk_fr4(0.0), "A", pos2, mk_fr4(1.0), "A", pos2,
+                          cdrs, fw, pos_regions=regions)
+    check("fit unaffected by FR4 shift", res3["fr_rmsd"] is not None
+          and res3["fr_rmsd"] < 1e-6, str(res3["fr_rmsd"]))
+    check("FR4 deviation reported post-fit",
+          res3["per_fr"].get("FR4") is not None and 0.9 < res3["per_fr"]["FR4"] < 1.1,
+          str(res3["per_fr"]))
+    check("FR1 region reported",
+          res3["per_fr"].get("FR1") is not None and res3["per_fr"]["FR1"] < 1e-6,
+          str(res3["per_fr"]))
 
 
 def test_af3_variant_rmsd_wiring():
@@ -1295,9 +1406,10 @@ def test_end_to_end():
             check(f"E2E output exists: {os.path.basename(p)}", os.path.exists(p))
         with open(paths["fasta"]) as fh:
             n_seq = sum(1 for line in fh if line.startswith(">"))
-        # H: V0-V3 + Vmin (T1 non-empty); L: V0-V3 only (T1 empty after L87
-        # gold-standard demotion, Vmin == V0). Total = 5 + 4.
-        check("E2E fasta has 9 variants (H:5, L:4)", n_seq == 9, str(n_seq))
+        # H: V0, V1, V2a, V2b, V2, V3 + Vmin (T1 non-empty);
+        # L: V0, V1, V2a, V2b, V2, V3 only (T1 empty after L87 gold-standard
+        # demotion, Vmin == V0). Total = 7 + 6.
+        check("E2E fasta has 13 variants (H:7, L:6)", n_seq == 13, str(n_seq))
 
 
 def main():
@@ -1307,6 +1419,7 @@ def main():
     test_structure_hint_chain_filtering()
     test_learning_fab_vl_positions()
     test_pdb_chain_matching()
+    test_tool_kabat_mapping()
     test_graft_loop_conservation()
     test_vhh_humanization_gold_standard()
     test_germline_and_graft()

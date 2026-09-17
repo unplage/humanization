@@ -169,6 +169,29 @@ def longest_common_run(a: str, b: str) -> int:
     return best
 
 
+def chain_sequence(pdb_chains: Dict[str, list], chain_id: str) -> str:
+    """One-letter sequence of a PDB chain from its CA atoms (in resseq order)."""
+    cas = sorted((a.resseq, a.resname) for a in pdb_chains[chain_id]
+                 if a.name == "CA")
+    return "".join(_AA3TO1.get(rn, "X") for _, rn in cas)
+
+
+def sequence_identity(a: str, b: str, max_offset: int = 5) -> float:
+    """Best position-wise identity over the shorter sequence, allowing a small
+    terminal offset (terminal tags / truncation). O(max_offset * len)."""
+    if not a or not b:
+        return 0.0
+    best = 0.0
+    for offset in range(-max_offset, max_offset + 1):
+        i0, j0 = max(0, offset), max(0, -offset)
+        n = min(len(a) - i0, len(b) - j0)
+        if n <= 0:
+            continue
+        same = sum(1 for k in range(n) if a[i0 + k] == b[j0 + k])
+        best = max(best, same / n)
+    return best
+
+
 def match_pdb_chain(pdb_chains: Dict[str, list], donor_seq: str,
                     min_run: int = 20) -> Optional[str]:
     """Pick the PDB chain whose residue sequence shares the longest exact
@@ -176,13 +199,33 @@ def match_pdb_chain(pdb_chains: Dict[str, list], donor_seq: str,
     unrelated VH and VL chains frequently share the same N-terminal residue,
     and two heavy domains even share the QVQL.. prefix."""
     best_cid, best_run = None, 0
-    for cid, atoms in pdb_chains.items():
-        cas = sorted((a.resseq, a.resname) for a in atoms if a.name == "CA")
-        s = "".join(_AA3TO1.get(rn, "X") for _, rn in cas)
-        run = longest_common_run(donor_seq, s)
+    for cid in pdb_chains:
+        run = longest_common_run(donor_seq, chain_sequence(pdb_chains, cid))
         if run > best_run:
             best_cid, best_run = cid, run
     return best_cid if best_run >= min_run else None
+
+
+def match_pdb_chain_loose(pdb_chains: Dict[str, list], donor_seq: str,
+                          min_identity: float = 0.70) -> Optional[str]:
+    """Fallback chain match by global sequence identity.
+
+    Used when no chain shares a long exact run (renumbered/tagged structures,
+    or a sequence that differs from the model beyond the framework). Returns
+    the best chain only when its identity clears ``min_identity``; otherwise
+    None, so the caller can skip structure hints instead of annotating the
+    wrong positions.
+    """
+    best_cid, best_id = None, 0.0
+    tol = max(10, int(0.25 * len(donor_seq)))
+    for cid in pdb_chains:
+        s = chain_sequence(pdb_chains, cid)
+        if not s or abs(len(s) - len(donor_seq)) > tol:
+            continue  # wrong length for a V domain: never a valid match
+        idn = sequence_identity(donor_seq, s)
+        if idn > best_id:
+            best_cid, best_id = cid, idn
+    return best_cid if (best_cid is not None and best_id >= min_identity) else None
 
 
 # ---------------------------------------------------------------------------
@@ -709,12 +752,20 @@ def structure_rmsd(
     cdr_sets: Dict[str, set],
     framework_positions: set,
     chain_type: str = "H",
+    pos_regions: Optional[Dict[str, str]] = None,
 ) -> Dict:
     """Superpose a variant on the donor framework, then measure CDR CA-RMSD.
 
     ``*_pos_to_resseq`` are {Kabat pos: PDB residue number} maps. Returns
     ``{cdr_rmsd, fr_rmsd, n_cdr, n_fr, per_cdr, per_fr}`` (RMSD in Angstrom, None when
     there is not enough aligned structure).
+
+    ``framework_positions`` defines the FR1-FR3 fit set. ``pos_regions`` is an
+    optional {Kabat pos: region} map (from the donor NumberedChain); when given,
+    ``per_fr`` is reported over every FR position present in both structures,
+    including FR4. FR4 is deliberately *not* part of the fit (its sequence comes
+    from the human J gene, so the deviation is measured post-fit and reveals how
+    much the J-region swap perturbs the CDR3-adjacent backbone).
     """
     dca = ca_map(donor_model, donor_chain)
     vca = ca_map(variant_model, variant_chain)
@@ -757,12 +808,20 @@ def structure_rmsd(
     cdr_rmsd = (round(math.sqrt(sum(d * d for d in all_pairs) / len(all_pairs)), 3)
                 if all_pairs else None)
     
-    # Calculate per-FR RMSD (FR1, FR2, FR3, FR4)
+    # Calculate per-FR RMSD (FR1, FR2, FR3, FR4). With pos_regions, measure
+    # every FR position present in both structures (FR4 included, post-fit);
+    # otherwise fall back to the fitted FR1-FR3 positions.
     per_fr: Dict[str, Optional[float]] = {}
-    fr_regions = {"FR1": [], "FR2": [], "FR3": [], "FR4": []}
-    for p in fr_common:
-        region = _get_fr_region(p, chain_type)
-        fr_regions[region].append(p)
+    fr_regions: Dict[str, List[str]] = {"FR1": [], "FR2": [], "FR3": [], "FR4": []}
+    if pos_regions:
+        for p in (set(dxyz) & set(vxyz)):
+            region = pos_regions.get(p)
+            if region in fr_regions:
+                fr_regions[region].append(p)
+    else:
+        for p in fr_common:
+            region = _get_fr_region(p, chain_type)
+            fr_regions[region].append(p)
     
     for region, positions in fr_regions.items():
         if not positions:
