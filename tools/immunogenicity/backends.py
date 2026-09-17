@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -144,7 +145,7 @@ class HeuristicBackend(Backend):
         chain_common = common_human.get(chain_type, {})
         if aa == chain_common.get(pos_idx % len(chain_common), ""):
             return 0.1
-        return 0.5 + 0.3 * hash(f"{chain_type}{pos_idx}{aa}") % 10 / 10
+        return 0.5 + 0.3 * (zlib.crc32(f"{chain_type}{pos_idx}{aa}".encode()) % 10) / 10
 
     def _surface_exposure_proxy(self, pos_idx: int, seq_len: int) -> float:
         """Simple exposure proxy based on sequence position."""
@@ -276,10 +277,13 @@ class HLAIIPredBackend(Backend):
             output = json.loads(proc.stdout)
             for chain_id, res_dict in output.items():
                 per_peptide = [PeptideHit(**h) for h in res_dict.get("per_peptide", [])]
+                # Normalize per_residue keys to int (JSON deserializes dict keys as strings)
+                raw_per_residue = res_dict.get("per_residue", {})
+                per_residue = {int(k): v for k, v in raw_per_residue.items()}
                 results[chain_id] = BackendResult(
                     backend=self.name,
                     per_peptide=per_peptide,
-                    per_residue=res_dict.get("per_residue", {}),
+                    per_residue=per_residue,
                     meta=res_dict.get("meta", {}),
                 )
         except subprocess.TimeoutExpired:

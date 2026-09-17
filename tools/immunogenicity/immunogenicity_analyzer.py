@@ -198,9 +198,15 @@ def compute_immunogenicity_score(metrics: Dict, donor_metrics: Optional[Dict] = 
 
 
 def find_positions_of_interest(donor_seq: str, variant_seq: str,
-                               donor_epi: Dict[int, float],
-                               variant_epi: Dict[int, float]) -> List[Dict]:
+                               donor_epi: Dict,
+                               variant_epi: Dict) -> List[Dict]:
     """Find positions where epitope score changes between donor and variant."""
+    # Defensive: ensure keys are int (JSON deserializes as strings)
+    if donor_epi and isinstance(next(iter(donor_epi)), str):
+        donor_epi = {int(k): v for k, v in donor_epi.items()}
+    if variant_epi and isinstance(next(iter(variant_epi)), str):
+        variant_epi = {int(k): v for k, v in variant_epi.items()}
+
     positions = []
     # Check positions that differ between donor and variant
     max_len = max(len(donor_seq), len(variant_seq))
@@ -329,6 +335,13 @@ def analyze_immunogenicity(
             donor_res = mhc_backend.score(
                 {"donor": donor_seq}, alleles, pep_len=pep_len)
             donor_backend_res = donor_res.get("donor")
+            if donor_backend_res and not donor_backend_res.error:
+                donor_epi = donor_backend_res.per_residue
+                donor_metrics = compute_epitope_metrics(donor_epi, len(donor_seq))
+        elif donor_variant_name:
+            # No external donor file, but V0 found in variants — use it as donor reference
+            donor_seq = chain_variants.get(donor_variant_name, "")
+            donor_backend_res = mhc_results.get(donor_variant_name)
             if donor_backend_res and not donor_backend_res.error:
                 donor_epi = donor_backend_res.per_residue
                 donor_metrics = compute_epitope_metrics(donor_epi, len(donor_seq))

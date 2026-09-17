@@ -108,10 +108,51 @@ def check_network_connectivity() -> bool:
     """Check if network is available for downloading weights."""
     try:
         import urllib.request
+        import urllib.error
         urllib.request.urlopen("https://huggingface.co", timeout=5)
         return True
-    except:
+    except (urllib.error.URLError, OSError, TimeoutError):
         return False
+
+
+def check_weights_available() -> bool:
+    """Check if AntiBERTy weights are already available locally.
+
+    Returns True if weights exist in:
+    1. ANTIbertY_WEIGHTS_DIR environment variable
+    2. Packaged trained_models/AntiBERTy_md_smooth directory
+    3. Hugging Face cache
+    """
+    import os
+    # Check environment variable
+    env_dir = os.environ.get("ANTIBERTY_WEIGHTS_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        if os.path.isfile(os.path.join(env_dir, "config.json")) and \
+           (os.path.isfile(os.path.join(env_dir, "model.safetensors")) or
+            os.path.isfile(os.path.join(env_dir, "pytorch_model.bin"))):
+            return True
+
+    # Check packaged weights
+    try:
+        import antiberty
+        pkg_dir = os.path.dirname(os.path.realpath(antiberty.__file__))
+        packaged_dir = os.path.join(pkg_dir, "trained_models", "AntiBERTy_md_smooth")
+        if os.path.isdir(packaged_dir):
+            if os.path.isfile(os.path.join(packaged_dir, "config.json")) and \
+               (os.path.isfile(os.path.join(packaged_dir, "model.safetensors")) or
+                os.path.isfile(os.path.join(packaged_dir, "pytorch_model.bin"))):
+                return True
+    except ImportError:
+        pass
+
+    # Check Hugging Face cache
+    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+    if os.path.isdir(hf_cache):
+        for entry in os.listdir(hf_cache):
+            if "AntiBERTy" in entry or "antiberty" in entry.lower():
+                return True
+
+    return False
 
 
 def run_igfold_cli(
@@ -210,12 +251,14 @@ def run_igfold_python(
         import torch
         from igfold import IgFoldRunner
         
-        # Set device
+        # Resolve device
         if device.startswith("cuda") and torch.cuda.is_available():
             device_id = int(device.split(":")[-1]) if ":" in device else 0
-            torch.device(f"cuda:{device_id}")
+            resolved_device = torch.device(f"cuda:{device_id}")
+        else:
+            resolved_device = torch.device("cpu")
         
-        igfold = IgFoldRunner()
+        igfold = IgFoldRunner(device=resolved_device)
         
         out = igfold.fold(
             output_path,
@@ -231,6 +274,35 @@ def run_igfold_python(
         return False
     except Exception as e:
         print(f"  [ERROR] Python API failed: {e}", file=sys.stderr)
+        return False
+
+
+def validate_pdb(pdb_path: str) -> bool:
+    """Validate that a PDB file is not empty and contains ATOM records.
+    
+    Args:
+        pdb_path: Path to PDB file
+    
+    Returns:
+        True if valid, False otherwise
+    """
+    if not os.path.isfile(pdb_path):
+        return False
+    
+    try:
+        with open(pdb_path, 'r') as f:
+            content = f.read()
+        
+        # Check file is not empty
+        if not content.strip():
+            return False
+        
+        # Check for ATOM records
+        if 'ATOM' not in content:
+            return False
+        
+        return True
+    except (IOError, OSError):
         return False
 
 
@@ -291,7 +363,11 @@ def predict_single_fasta(
         )
     
     if success and os.path.exists(output_path):
-        return output_path
+        if validate_pdb(output_path):
+            return output_path
+        else:
+            print(f"  [WARNING] Output PDB file is invalid or empty: {output_path}", file=sys.stderr)
+            return None
     
     return None
 
@@ -456,6 +532,11 @@ Requirements:
     
     # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
+    
+    # Auto-detect offline mode if weights are already available
+    if not args.offline and check_weights_available():
+        print("[IgFold] AntiBERTy weights found locally - using offline mode")
+        args.offline = True
     
     # Check network connectivity for first-time setup (unless --offline)
     if not args.offline:
