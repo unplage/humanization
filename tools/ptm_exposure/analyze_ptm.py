@@ -77,11 +77,11 @@ CONSERVED_CYS = {
 
 # Maximum SASA values for amino acids (Tien et al. 2013)
 MAX_SASA = {
-    'ALA': 129.0, 'ARG': 274.0, 'ASN': 195.0, 'ASP': 193.0,
-    'CYS': 167.0, 'GLU': 223.0, 'GLN': 225.0, 'GLY': 104.0,
-    'HIS': 224.0, 'ILE': 197.0, 'LEU': 201.0, 'LYS': 236.0,
-    'MET': 224.0, 'PHE': 240.0, 'PRO': 159.0, 'SER': 155.0,
-    'THR': 172.0, 'TRP': 285.0, 'TYR': 263.0, 'VAL': 174.0,
+    'ALA': 113.0, 'ARG': 241.0, 'ASN': 158.0, 'ASP': 151.0,
+    'CYS': 140.0, 'GLU': 183.0, 'GLN': 179.0, 'GLY': 85.0,
+    'HIS': 194.0, 'ILE': 182.0, 'LEU': 180.0, 'LYS': 211.0,
+    'MET': 203.0, 'PHE': 218.0, 'PRO': 143.0, 'SER': 122.0,
+    'THR': 146.0, 'TRP': 259.0, 'TYR': 229.0, 'VAL': 160.0,
 }
 
 # 3-letter to 1-letter amino acid mapping
@@ -230,6 +230,7 @@ def detect_ptm_sites(sequence: str, chain: str,
     """Detect PTM sites in sequence and assess exposure."""
     sites = []
     conserved_cys = CONSERVED_CYS.get(chain, set())
+    seen_positions = {}  # Track positions to avoid double-counting (e.g., Cys oxidation + unpaired)
 
     for motif_name, motif_info in PTM_PATTERNS.items():
         pattern = motif_info["pattern"]
@@ -244,6 +245,15 @@ def detect_ptm_sites(sequence: str, chain: str,
             # Skip if this is a conserved Cys and motif involves C
             if "Cys" in motif_name or "oxidation (C)" in motif_name:
                 if res_num in conserved_cys:
+                    continue
+
+            # Deduplicate: if this position already has a Cys-related PTM, skip
+            # (e.g., skip "unpaired Cys" if "oxidation (C)" already detected)
+            if res_num in seen_positions:
+                prev_motif = seen_positions[res_num]
+                # Skip if both are Cys-related (oxidation + unpaired)
+                if ("Cys" in motif_name or "oxidation (C)" in motif_name) and \
+                   ("Cys" in prev_motif or "oxidation (C)" in prev_motif):
                     continue
 
             # Get sequence context (3 residues before and after)
@@ -297,6 +307,8 @@ def detect_ptm_sites(sequence: str, chain: str,
                 is_exposed=is_exposed,
                 adjusted_risk=adjusted_risk
             ))
+            # Track position for deduplication
+            seen_positions[res_num] = motif_name
 
     return sites
 

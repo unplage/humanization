@@ -321,25 +321,29 @@ def calculate_adjustment_factor(
     backmut_positions = [p for p in positions if p.is_backmutation]
     rationale = []
 
-    if not backmut_positions:
-        rationale.append("No backmutation positions in peptide: false positive")
-        return 0.0, rationale
+    # If no backmutation positions, use all positions for structural assessment
+    # This handles cases where we don't have backmutation data (e.g., IgFold variants)
+    positions_to_use = backmut_positions if backmut_positions else positions
 
-    n_total = len(backmut_positions)
-    n_buried = sum(1 for p in backmut_positions if p.buried is True)
-    n_exposed = sum(1 for p in backmut_positions if p.buried is False)
-    n_uncertain = sum(1 for p in backmut_positions if p.buried is None)
+    if not positions_to_use:
+        rationale.append("No positions available for structural assessment")
+        return 0.5, rationale  # conservative default
+
+    n_total = len(positions_to_use)
+    n_buried = sum(1 for p in positions_to_use if p.buried is True)
+    n_exposed = sum(1 for p in positions_to_use if p.buried is False)
+    n_uncertain = sum(1 for p in positions_to_use if p.buried is None)
 
     if method == "binary":
         if n_buried == n_total:
-            rationale.append(f"All {n_total} backmutation positions buried (relSASA < {BURIED_THRESHOLD})")
+            rationale.append(f"All {n_total} positions buried (relSASA < {BURIED_THRESHOLD})")
             return RISK_ADJUSTMENT['buried'], rationale
         elif n_exposed > 0:
             factor = n_exposed / n_total
-            rationale.append(f"{n_exposed}/{n_total} backmutation positions exposed (relSASA > {EXPOSED_THRESHOLD})")
+            rationale.append(f"{n_exposed}/{n_total} positions exposed (relSASA > {EXPOSED_THRESHOLD})")
             return factor, rationale
         else:
-            rationale.append(f"All {n_total} backmutation positions uncertain")
+            rationale.append(f"All {n_total} positions uncertain")
             return RISK_ADJUSTMENT['uncertain'], rationale
 
     elif method == "relSASA":
@@ -347,7 +351,7 @@ def calculate_adjustment_factor(
         weighted_sum = 0.0
         weight_sum = 0.0
 
-        for pos in backmut_positions:
+        for pos in positions_to_use:
             # Base weight: importance of this backmutation position
             tier_weights = {
                 'T1': 1.0,
@@ -457,14 +461,17 @@ def assess_variant_structural_risk(
         # Calculate adjustment factor
         factor, rationale = calculate_adjustment_factor(positions, method)
 
-        # Count position categories
+        # Count position categories (use all positions if no backmutation data)
         backmut_positions = [p for p in positions if p.is_backmutation]
-        n_buried = sum(1 for p in backmut_positions if p.buried is True)
-        n_exposed = sum(1 for p in backmut_positions if p.buried is False)
-        n_uncertain = sum(1 for p in backmut_positions if p.buried is None)
+        if backmut_positions:
+            count_positions = backmut_positions
+        else:
+            count_positions = positions  # use all positions for counting
+        n_buried = sum(1 for p in count_positions if p.buried is True)
+        n_exposed = sum(1 for p in count_positions if p.buried is False)
+        n_uncertain = sum(1 for p in count_positions if p.buried is None)
 
         adjusted_score = score * factor
-        print(f"DEBUG肽: {peptide}: score={score:.3f}, factor={factor:.3f}, adjusted={adjusted_score:.3f}")
 
         peptides.append(PeptideRiskAssessment(
             peptide=peptide,
@@ -485,8 +492,6 @@ def assess_variant_structural_risk(
     total_raw = sum(p.raw_score for p in peptides)
     total_adjusted = sum(p.adjusted_score for p in peptides)
     overall_adjustment = total_adjusted / total_raw if total_raw > 0 else 1.0
-
-    print(f"DEBUG: total_raw={total_raw:.3f}, total_adjusted={total_adjusted:.3f}, overall={overall_adjustment:.3f}")
 
     return VariantStructuralRisk(
         variant_name=variant_name,
@@ -829,8 +834,6 @@ def run_structural_risk_assessment(
                         if verbose:
                             print(f"  Loaded {len(backmutations)} backmutations from {csv_path}")
                         break
-
-        print(f"DEBUG: chain={chain_type}, backmutations={len(backmutations)}")
 
         for vname, vdata in variants.items():
             # Find structure file

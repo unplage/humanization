@@ -775,25 +775,40 @@ def parse_query_inputs(args) -> list:
             else:
                 vl_map[hdr] = seq
 
-        # Pair by base name
+        # Pair by base name (remove _Heavy/_Light/_VH/_VL suffix)
         all_names = list(dict.fromkeys(list(vh_map.keys()) + list(vl_map.keys())))
         used = set()
         for hdr in all_names:
             if hdr in used:
                 continue
-            base = hdr.split("_")[0].split()[0]
+            # Extract base name by removing known suffixes
+            base = hdr
+            for suffix in ["_Heavy", "_Light", "_VH", "_VL"]:
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
             vh = vh_map.get(hdr)
             vl = vl_map.get(hdr)
             # try to find partner
             if vh and not vl:
                 for vhdr in vl_map:
-                    if vhdr.split("_")[0].split()[0] == base and vhdr not in used:
+                    partner_base = vhdr
+                    for suffix in ["_Heavy", "_Light", "_VH", "_VL"]:
+                        if partner_base.endswith(suffix):
+                            partner_base = partner_base[:-len(suffix)]
+                            break
+                    if partner_base == base and vhdr not in used:
                         vl = vl_map[vhdr]
                         used.add(vhdr)
                         break
             elif vl and not vh:
                 for vhdr in vh_map:
-                    if vhdr.split("_")[0].split()[0] == base and vhdr not in used:
+                    partner_base = vhdr
+                    for suffix in ["_Heavy", "_Light", "_VH", "_VL"]:
+                        if partner_base.endswith(suffix):
+                            partner_base = partner_base[:-len(suffix)]
+                            break
+                    if partner_base == base and vhdr not in used:
                         vh = vh_map[vhdr]
                         used.add(vhdr)
                         break
