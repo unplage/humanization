@@ -6,6 +6,7 @@ Portable core is **pure Python stdlib** — do not add third-party deps for core
 ## 重要原则
 
 - **不要自作主张提交GitHub**: 只有在用户明确命令时才执行 `git commit` 和 `git push`。代码修改完成后，等待用户确认再提交。
+- **使用tools文件夹中的程序前必须先阅读README**: 使用 `tools/` 下任何子文件夹的程序前，必须先阅读该子文件夹中的 `README_*.md` 或 `README.md`，了解正确的使用方法、输入格式和参数要求，按要求进行分析。
 
 ## Commands
 
