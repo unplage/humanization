@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Generate USAN Standard Guide Word Document."""
+"""Generate USAN Standard Guide Word Document.
+
+Usage:
+    python3 tools/usan/generate_usan_report.py [--output PATH]
+"""
+
+import argparse
+import os
 
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -642,7 +649,14 @@ def create_document():
 
 
 if __name__ == '__main__':
+    here = os.path.dirname(os.path.abspath(__file__))
+    parser = argparse.ArgumentParser(description="Generate USAN Standard Guide Word document")
+    parser.add_argument("--output", "-o",
+                        default=os.path.join(here, "USAN标准指南.docx"),
+                        help="output .docx path (default: alongside this script)")
+    args = parser.parse_args()
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     doc = create_document()
-    output_path = '/home/jiemiaoxing/work/opencode_task/humanization/USAN标准指南.docx'
-    doc.save(output_path)
-    print(f"✅ Word document generated: {output_path}")
+    doc.save(args.output)
+    print(f"Word document generated: {args.output}")
