@@ -16,6 +16,13 @@ data/AbRSA/
 data/ncbi-igblast-1.22.0/
 data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx
 
+# PATAA patent antibody database (large; regenerate with preprocess_pataa.py)
+data/pataa_work/
+data/pataa_cdrs.json
+data/pataa_stats.json
+tools/pataa_homology/database/pataa.*
+tools/pataa_homology/database/tax*
+
 # IgFold AntiBERTy weights (downloaded from HuggingFace)
 tools/igfold/antiberty_weights/
 
