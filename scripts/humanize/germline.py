@@ -353,6 +353,12 @@ def download_germline_db(db_dir: str, url_base: Optional[str] = None) -> Germlin
 # Position-wise comparison (Kabat space)
 # ---------------------------------------------------------------------------
 
+# Regions included in FR identity: FR1+FR2+FR3. FR4 is deliberately NOT
+# included — it is J-gene-derived (human by construction after grafting) and
+# too conserved across species to discriminate donors, so including it would
+# inflate humanness scores and break comparability with published V-region-only
+# metrics (e.g. Olimpieri et al.). CDR3 is likewise excluded (donor-grafted,
+# no germline V correspondence).
 FR_REGIONS = ("FR1", "FR2", "FR3")
 CDR_REGIONS = ("CDR1", "CDR2")
 
@@ -361,9 +367,11 @@ def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, f
     """Per-position comparison between query and a germline V gene.
     Returns identity fractions over FR, CDR1-2, and all, plus per-region breakdown.
 
-    Note: CDR3 (H95-102 / L89-97) is excluded by construction — it is
-    grafted from the donor and has no germline correspondence, so including
-    it in the denominator would artificially lower all_identity scores.
+    Note: CDR3 (H95-102 / L89-97) and FR4 (H103-113 / L98-107) are both
+    excluded by construction — CDR3 is grafted from the donor and has no
+    germline V correspondence; FR4 comes from the human J gene (human by
+    construction, and too conserved across species to be discriminative).
+    Including either would artificially inflate all_identity.
     """
     if gene.numbered is None:
         return {

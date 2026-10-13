@@ -470,8 +470,11 @@ def main():
         
         # Evaluation Criteria
         doc.add_heading('Evaluation Criteria', level=2)
-        doc.add_paragraph('Kabat numbering: FR1 (1-30) + CDR1 (31-35) + FR2 (36-49) + CDR2 (50-65) + FR3 (66-94) + CDR3 (95-102) + FR4 (103-113)')
-        doc.add_paragraph('IMGT numbering: FR1 (1-26) + CDR1 (27-38) + FR2 (39-55) + CDR2 (56-65) + FR3 (66-104) + CDR3 (105-117) + FR4 (118-128)')
+        if chain_type == 'H':
+            doc.add_paragraph('Kabat numbering (VH): FR1 (1-30) + CDR1 (31-35) + FR2 (36-49) + CDR2 (50-65) + FR3 (66-94) + CDR3 (95-102) + FR4 (103-113)')
+        else:
+            doc.add_paragraph('Kabat numbering (VL): FR1 (1-23) + CDR1 (24-34) + FR2 (35-49) + CDR2 (50-56) + FR3 (57-88) + CDR3 (89-97) + FR4 (98-107)')
+        doc.add_paragraph('IMGT numbering (same for VH/VL): FR1 (1-26) + CDR1 (27-38) + FR2 (39-55) + CDR2 (56-65) + FR3 (66-104) + CDR3 (105-117) + FR4 (118-128)')
         doc.add_paragraph('Excluded: CDR3 (from donor antibody) and FR4 (from human J gene)')
         doc.add_paragraph('Humanization estimate (Academic convention): Based on sequence identity, not official USAN/INN naming')
         doc.add_paragraph('Note: Official USAN/INN naming is based on the technology used (transgenic mouse, CDR grafting, phage display, etc.)')

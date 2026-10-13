@@ -159,9 +159,16 @@ def classify_humanization_level(fr_identity: float) -> str:
 def format_sequence_comparison_table(numbered, germline_numbered, chain_type: str):
     """Generate a table showing sequences under different numbering schemes.
 
+    NOTE: both NumberedChain inputs are Kabat-numbered (the caller passes the
+    Kabat result of evaluate_sequence). The Kabat table is therefore exact;
+    the "IMGT" table only re-slices the same Kabat position labels at IMGT
+    numeric boundaries and is an approximate cross-scheme view (see note
+    below). True IMGT scoring/alignment runs on real IMGT posmaps in
+    format_results_imgt() -> compare_imgt_posmaps_direct().
+
     Args:
-        numbered: NumberedChain object for query sequence
-        germline_numbered: NumberedChain object for germline sequence
+        numbered: NumberedChain object for query sequence (Kabat)
+        germline_numbered: NumberedChain object for germline sequence (Kabat)
         chain_type: "H" or "L"
 
     Returns:
@@ -203,7 +210,15 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
                     seq += posmap[pos]
         return seq
 
-    # Kabat numbering regions
+    # Region boundary tables, applied to the Kabat posmap labels above.
+    #   kabat_regions: canonical Kabat definitions, identical to
+    #     KABAT_VH_REGIONS / KABAT_VL_REGIONS in scripts/humanize/imgt_numbering.py.
+    #   imgt_regions: Lefranc 2003 canonical IMGT ranges — VH and VL use the
+    #     SAME definitions (identical to IMGT_REGIONS in imgt_numbering.py).
+    # NOTE: the IMGT table below slices Kabat labels at these IMGT numeric
+    # boundaries. Kabat and IMGT position numbers differ (e.g. Kabat H31-35
+    # CDR1 vs IMGT 27-38), so the residues shown are approximate, not true
+    # IMGT numbering.
     if chain_type == "H":
         kabat_regions = {
             "FR1": (1, 30),
@@ -235,17 +250,17 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
             "FR4": (98, 107),
         }
         imgt_regions = {
-            "FR1": (1, 23),
-            "CDR1": (24, 34),
-            "FR2": (35, 55),
+            "FR1": (1, 26),
+            "CDR1": (27, 38),
+            "FR2": (39, 55),
             "CDR2": (56, 65),
-            "FR3": (66, 88),
-            "CDR3": (89, 104),
-            "FR4": (105, 118),
+            "FR3": (66, 104),
+            "CDR3": (105, 117),
+            "FR4": (118, 128),
         }
         prefix = "L"
 
-    # Kabat numbering table
+    # Kabat table: Kabat labels x Kabat boundaries (exact)
     lines.append(f"\n  Kabat numbering:")
     lines.append(f"  {'Region':<8} {'Positions':<15} {'Query':<30} {'Germline':<30}")
     lines.append(f"  {'-'*8} {'-'*15} {'-'*30} {'-'*30}")
@@ -260,8 +275,9 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
 
         lines.append(f"  {region:<8} {prefix}{start_num}-{prefix}{end_num:<12} {q_display:<30} {g_display:<30}")
 
-    # IMGT numbering table
-    lines.append(f"\n  IMGT numbering:")
+    # IMGT-boundary view: same Kabat labels sliced at IMGT ranges
+    # (approximate — see note above; not true IMGT numbering)
+    lines.append(f"\n  IMGT region boundaries (approximate, sliced on Kabat labels):")
     lines.append(f"  {'Region':<8} {'Positions':<15} {'Query':<30} {'Germline':<30}")
     lines.append(f"  {'-'*8} {'-'*15} {'-'*30} {'-'*30}")
 
@@ -275,8 +291,12 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
 
         lines.append(f"  {region:<8} {prefix}{start_num}-{prefix}{end_num:<12} {q_display:<30} {g_display:<30}")
 
-    # Sequence identity summary
-    lines.append(f"\n  Sequence identity summary:")
+    # Raw per-region identity over ALL 7 Kabat regions — this diagnostic
+    # table INCLUDES CDR3 and FR4, unlike the headline FR/CDR/overall scores
+    # which exclude both (CDR3 = donor-grafted, FR4 = J-derived; see
+    # compare_to_germline in scripts/humanize/germline.py). The numbers here
+    # therefore will not reconcile with the headline scores.
+    lines.append(f"\n  Sequence identity summary (all regions, incl. CDR3+FR4):")
     lines.append(f"  {'Region':<10} {'Identity':<12} {'Query Length':<15} {'Germline Length':<15}")
     lines.append(f"  {'-'*10} {'-'*12} {'-'*15} {'-'*15}")
 
@@ -394,6 +414,9 @@ def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, t
         lines.append(f"\n  IMGT region breakdown:")
         lines.append(f"  {'Region':<10} {'Identity':<12} {'Match':<8} {'Total':<8}")
         lines.append(f"  {'-'*10} {'-'*12} {'-'*8} {'-'*8}")
+        # FR1+CDR1+FR2+CDR2+FR3 only (IMGT_EVAL_REGIONS); CDR3 and FR4 are
+        # excluded here for consistency with the headline fr/cdr identities
+        # above (CDR3 = donor-grafted, FR4 = J-derived).
         for region in ["FR1", "CDR1", "FR2", "CDR2", "FR3"]:
             stats = best_scores["imgt_region_stats"].get(region, {})
             identity = stats.get("identity", 0)

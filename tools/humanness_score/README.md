@@ -71,11 +71,13 @@ python3 tools/humanness_score/generate_all_reports.py \
 ## Numbering Schemes
 
 ### Kabat Numbering
-- FR1: 1-30, CDR1: 31-35, FR2: 36-49, CDR2: 50-65, FR3: 66-94, CDR3: 95-102, FR4: 103-113
+- VH: FR1 1-30, CDR1 31-35, FR2 36-49, CDR2 50-65, FR3 66-94, CDR3 95-102, FR4 103-113
+- VL: FR1 1-23, CDR1 24-34, FR2 35-49, CDR2 50-56, FR3 57-88, CDR3 89-97, FR4 98-107
 - Used internally by the pipeline
 
 ### IMGT Numbering
 - FR1: 1-26, CDR1: 27-38, FR2: 39-55, CDR2: 56-65, FR3: 66-104, CDR3: 105-117, FR4: 118-128
+  (identical for VH and VL, Lefranc 2003)
 - Used for WHO/INN/USAN drug naming
 
 ## Humanization Classification
@@ -91,10 +93,11 @@ python3 tools/humanness_score/generate_all_reports.py \
 
 ## Evaluation Criteria
 
-- **Excluded Regions**: CDR3 (donor) and FR4 (human J gene)
+- **Excluded Regions**: CDR3 (donor-grafted) and FR4 (human J gene, highly conserved across species) — both excluded from the headline scores so results stay comparable with published V-region-only humanness metrics
 - **FR Identity**: Identity in framework regions (FR1+FR2+FR3)
 - **CDR Identity**: Identity in CDR1+CDR2 regions
 - **Overall Identity**: Weighted average
+- **Note**: The terminal "Sequence identity summary" table is a raw per-region diagnostic that *includes* CDR3 and FR4, so its numbers will not reconcile with the headline scores
 
 ## Example Output Files
 
