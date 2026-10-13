@@ -32,6 +32,11 @@ except ImportError:
     print("ERROR: freesasa not installed. Run: pip install freesasa", file=sys.stderr)
     sys.exit(1)
 
+# Repo root (for optional Kabat region annotation via scripts.humanize.numbering)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 
 # ---------------------------------------------------------------------------
 # PTM Risk Patterns (from scripts/humanize/config.py)
@@ -122,6 +127,8 @@ class PTMSite:
     exposure_threshold: float
     is_exposed: bool
     adjusted_risk: str  # Risk after exposure adjustment
+    region: str = "-"       # Kabat region (FR1/CDR1/FR2/CDR2/FR3/CDR3/FR4)
+    region_imgt: str = "-"  # IMGT region (FR1/CDR1/FR2/CDR2/FR3/CDR3/FR4)
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +231,80 @@ def get_residue_info(chain: str, res_num: int, res_name: str,
 # PTM Detection
 # ---------------------------------------------------------------------------
 
+def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """Map 1-based residue index -> (Kabat region, IMGT region).
+
+    Kabat regions come from the pipeline Kabat numbering engine
+    (ANARCI -> AbRSA -> built-in for VH; built-in for VL).
+    IMGT regions come from the pipeline IMGT numbering engine
+    (ANARCI scheme=imgt -> AbRSA imgt), same engine path as
+    tools/humanness_score. Regions per residue are read directly from the
+    NumberedChain.region field, so no static Kabat->IMGT lookup table is
+    involved (that table has gaps for insertion-dependent positions).
+
+    Degrades to "-" per position if numbering is unavailable or fails
+    (e.g. non-antibody chain such as antigen).
+    """
+    fallback = ({i + 1: "-" for i in range(len(sequence))},
+                {i + 1: "-" for i in range(len(sequence))})
+    try:
+        from scripts.humanize.numbering import number_heavy, number_light
+        from scripts.humanize.imgt_numbering import number_with_abrsa_imgt
+    except ImportError:
+        return fallback
+
+    label = chain.strip().upper()
+
+    # Kabat numbering
+    kabat_numbered = None
+    try:
+        if label == "L":
+            kabat_numbered = number_light(sequence)
+        elif label == "H":
+            kabat_numbered = number_heavy(sequence)
+        else:
+            # Unknown chain label (e.g. antigen A/B/C): try heavy, accept L detection
+            try:
+                kabat_numbered = number_heavy(sequence)
+                if kabat_numbered.chain_type == "L":
+                    kabat_numbered = number_light(sequence)
+            except Exception:
+                kabat_numbered = None
+        if kabat_numbered is None:
+            kabat_numbered = number_light(sequence)
+    except Exception:
+        kabat_numbered = None
+
+    chain_type = kabat_numbered.chain_type if kabat_numbered is not None else (
+        "L" if label == "L" else "H")
+
+    regions_kabat = {i + 1: "-" for i in range(len(sequence))}
+    if kabat_numbered is not None:
+        for r in kabat_numbered.residues:
+            idx = r.index  # 0-based index into the original sequence
+            if 0 <= idx < len(sequence):
+                regions_kabat[idx + 1] = r.region
+
+    # IMGT numbering (independent engine call, same as humanness_score)
+    regions_imgt = {i + 1: "-" for i in range(len(sequence))}
+    try:
+        imgt_numbered = number_with_abrsa_imgt(sequence, chain_type)
+        if imgt_numbered is not None:
+            for r in imgt_numbered.residues:
+                idx = r.index
+                if 0 <= idx < len(sequence):
+                    regions_imgt[idx + 1] = r.region
+    except Exception:
+        pass
+
+    return regions_kabat, regions_imgt
+
+
 def detect_ptm_sites(sequence: str, chain: str,
                      sasa_data: Dict[int, float],
-                     residue_names: Dict[int, str]) -> List[PTMSite]:
+                     residue_names: Dict[int, str],
+                     regions: Optional[Dict[int, str]] = None,
+                     regions_imgt: Optional[Dict[int, str]] = None) -> List[PTMSite]:
     """Detect PTM sites in sequence and assess exposure."""
     sites = []
     conserved_cys = CONSERVED_CYS.get(chain, set())
@@ -305,7 +383,9 @@ def detect_ptm_sites(sequence: str, chain: str,
                 sasa_classification=sasa_class,
                 exposure_threshold=threshold,
                 is_exposed=is_exposed,
-                adjusted_risk=adjusted_risk
+                adjusted_risk=adjusted_risk,
+                region=(regions or {}).get(res_num, "-"),
+                region_imgt=(regions_imgt or {}).get(res_num, "-"),
             ))
             # Track position for deduplication
             seen_positions[res_num] = motif_name
@@ -351,8 +431,10 @@ def analyze_structure(pdb_path: str) -> Dict:
                 residue_names[res_num] = atom['resname']
                 break
 
-        # Detect PTM sites
-        ptm_sites = detect_ptm_sites(sequence, chain, sasa_data[chain], residue_names)
+        # Detect PTM sites (with Kabat + IMGT region annotation)
+        regions, regions_imgt = get_chain_regions(sequence, chain)
+        ptm_sites = detect_ptm_sites(sequence, chain, sasa_data[chain], residue_names,
+                                     regions, regions_imgt)
 
         # Get all residue info
         residue_info = []
@@ -406,13 +488,13 @@ def format_text_report(results: Dict, title: str = "PTM Exposure Analysis") -> s
             lines.append("    No PTM sites detected.")
             continue
 
-        lines.append(f"  {'Pos':<8} {'AA':<5} {'Motif':<25} {'AbsSASA':<10} {'RelSASA':<10} {'Class':<15} {'Risk':<10}")
-        lines.append("  " + "-" * 85)
+        lines.append(f"  {'Pos':<8} {'AA':<5} {'Kabat':<8} {'IMGT':<8} {'Motif':<25} {'AbsSASA':<10} {'RelSASA':<10} {'Class':<15} {'Risk':<10}")
+        lines.append("  " + "-" * 101)
 
         for site in sorted(data["ptm_sites"], key=lambda x: x["res_num"]):
             risk_marker = "!" if site["adjusted_risk"] == "high" else " " if site["adjusted_risk"] == "medium" else " "
             lines.append(
-                f"  {chain}{site['res_num']:<5} {site['res_name']:<5} {site['motif']:<25} "
+                f"  {chain}{site['res_num']:<5} {site['res_name']:<5} {site.get('region', '-'):<8} {site.get('region_imgt', '-'):<8} {site['motif']:<25} "
                 f"{site['abs_sasa']:<10.1f} {site['rel_sasa']:<10.3f} {site['sasa_classification']:<15} "
                 f"{site['adjusted_risk'].upper():<10}{risk_marker}"
             )
@@ -452,13 +534,13 @@ def save_markdown_report(results: Dict, output_path: str, title: str = "PTM Expo
             lines.append("No PTM sites detected.\n")
             continue
 
-        lines.append("| Position | AA | Motif | AbsSASA | RelSASA | Classification | Risk |")
-        lines.append("|----------|-----|-------|---------|---------|----------------|------|")
+        lines.append("| Position | AA | Kabat | IMGT | Motif | AbsSASA | RelSASA | Classification | Risk |")
+        lines.append("|----------|-----|-------|------|-------|---------|---------|----------------|------|")
 
         for site in sorted(data["ptm_sites"], key=lambda x: x["res_num"]):
             risk_marker = "**" if site["adjusted_risk"] == "high" else ""
             lines.append(
-                f"| {chain}{site['res_num']} | {site['res_name']} | {site['motif']} | "
+                f"| {chain}{site['res_num']} | {site['res_name']} | {site.get('region', '-')} | {site.get('region_imgt', '-')} | {site['motif']} | "
                 f"{site['abs_sasa']:.1f} | {site['rel_sasa']:.3f} | "
                 f"{site['sasa_classification']} | {risk_marker}{site['adjusted_risk'].upper()}{risk_marker} |"
             )
@@ -511,12 +593,12 @@ def save_word_report(results: Dict, output_path: str, title: str = "PTM Exposure
         doc.add_paragraph(f"Sequence length: {len(seq)} residues")
         
         # Create table for PTM sites
-        table = doc.add_table(rows=1, cols=7)
+        table = doc.add_table(rows=1, cols=9)
         table.style = 'Light Grid Accent 1'
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
         # Header row
-        headers = ['Position', 'AA', 'Motif', 'AbsSASA', 'RelSASA', 'Classification', 'Risk']
+        headers = ['Position', 'AA', 'Kabat', 'IMGT', 'Motif', 'AbsSASA', 'RelSASA', 'Classification', 'Risk']
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -530,14 +612,16 @@ def save_word_report(results: Dict, output_path: str, title: str = "PTM Exposure
             row = table.add_row()
             row.cells[0].text = f"{chain}{site['res_num']}"
             row.cells[1].text = site["res_name"]
-            row.cells[2].text = site["motif"]
-            row.cells[3].text = f"{site['abs_sasa']:.1f}"
-            row.cells[4].text = f"{site['rel_sasa']:.3f}"
-            row.cells[5].text = site["sasa_classification"]
-            row.cells[6].text = site["adjusted_risk"].upper()
+            row.cells[2].text = site.get("region", "-")
+            row.cells[3].text = site.get("region_imgt", "-")
+            row.cells[4].text = site["motif"]
+            row.cells[5].text = f"{site['abs_sasa']:.1f}"
+            row.cells[6].text = f"{site['rel_sasa']:.3f}"
+            row.cells[7].text = site["sasa_classification"]
+            row.cells[8].text = site["adjusted_risk"].upper()
 
             # Color code risk level
-            risk_cell = row.cells[6]
+            risk_cell = row.cells[8]
             for paragraph in risk_cell.paragraphs:
                 for run in paragraph.runs:
                     if site["adjusted_risk"] == "high":
@@ -559,7 +643,7 @@ def save_word_report(results: Dict, output_path: str, title: str = "PTM Exposure
             doc.add_heading('High/Medium Risk Details', level=2)
             for site in high_med_sites:
                 p = doc.add_paragraph()
-                p.add_run(f"{chain}{site['res_num']} ({site['res_name']})").bold = True
+                p.add_run(f"{chain}{site['res_num']} ({site['res_name']}, Kabat {site.get('region', '-')} / IMGT {site.get('region_imgt', '-')})").bold = True
                 p.add_run(f" - {site['motif']}")
                 p.add_run(f"\nContext: ...{site['sequence_context']}...")
                 p.add_run(f"\nRelSASA: {site['rel_sasa']:.3f} ({site['sasa_classification']})")

@@ -7,6 +7,7 @@ Analyze high-risk PTM (Post-Translational Modification) sites in antibody struct
 - **PTM Detection**: Identifies deamidation, isomerization, oxidation, glycosylation, and other PTM risks
 - **Structural Exposure**: Uses FreeSASA to calculate actual solvent accessibility
 - **Risk Adjustment**: Downgrades risk for buried (non-exposed) PTM sites
+- **Region Annotation**: Labels each risk site with its Kabat region AND IMGT region (FR1/CDR1/FR2/CDR2/FR3/CDR3/FR4) via the pipeline numbering engine, following the same IMGT boundaries as `tools/humanness_score`
 - **Multiple Output Formats**: Text, JSON, Markdown, and Word reports
 - **Batch Processing**: Analyze single files or entire directories
 
@@ -102,15 +103,15 @@ PTM sites are classified as "adjusted risk" based on both sequence pattern and s
   Chain A (VH):
   ========================================================================
 
-  Pos     AA    Motif                     AbsSASA    RelSASA    Class           Risk
-  ---------------------------------------------------------------------------------------
-  H26     D     isomerization (DG)        45.2       0.234      INTERMEDIATE    HIGH!
+  Pos     AA    Kabat    IMGT     Motif                     AbsSASA    RelSASA    Class           Risk
+  ---------------------------------------------------------------------------------------------------
+  H26     D     FR1      FR1      isomerization (DG)        45.2       0.234      INTERMEDIATE    HIGH!
          Context: ...SDGTVF...
-  H27     G     isomerization (DG)        12.1       0.116      BURIED          MEDIUM
+  H27     D     FR1      CDR1     isomerization (DG)        12.1       0.116      BURIED          MEDIUM
          Context: ...DGTVFP...
-  H33     W     oxidation (W)             89.3       0.313      INTERMEDIATE    MEDIUM
+  H33     W     CDR1     CDR1     oxidation (W)             89.3       0.313      INTERMEDIATE    MEDIUM
          Context: ...NYWLGW...
-  H50     M     oxidation (M)             23.4       0.104      BURIED          LOW
+  H50     M     CDR2     FR2      oxidation (M)             23.4       0.104      BURIED          LOW
 
 ================================================================================
   SUMMARY
