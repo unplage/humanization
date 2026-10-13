@@ -7,6 +7,8 @@ Outputs PDB files for RMSD evaluation with the humanization pipeline.
 Requirements:
     - conda environment: igfold (Python >= 3.11, PyTorch >= 2.0)
     - Install: conda create -n igfold python=3.11 && conda run -n igfold pip install igfold
+    - OpenMM + pdbfixer (recommended): conda run -n igfold pip install openmm pdbfixer
+      Used for --refine openmm (default); falls back to no refinement if missing
     - AntiBERTy weights: First run requires internet to download ~100MB weights from Hugging Face
       If offline, set ANTIbertY_WEIGHTS_DIR to a local copy
 
@@ -17,8 +19,11 @@ Usage:
     # Predict all variants in a directory
     conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/
 
-    # Predict with refinement and renumbering
-    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --refine openmm --renumber
+    # Predict with renumbering (OpenMM refinement is on by default)
+    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --renumber
+
+    # Skip refinement
+    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --refine none
 
     # Use GPU
     conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --device cuda:0
@@ -155,10 +160,62 @@ def check_weights_available() -> bool:
     return False
 
 
+def openmm_available() -> bool:
+    """Check whether OpenMM is importable (needed for --refine openmm).
+
+    Returns:
+        True if openmm can be imported, False otherwise.
+    """
+    try:
+        import openmm  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def configure_openmm_plugins() -> str:
+    """Point OPENMM_PLUGIN_DIR at non-OpenCL plugins only.
+
+    `import openmm` loads every plugin in its plugins directory. On some
+    machines (headless GPU servers with a broken/slow OpenCL ICD) dlopening
+    the OpenCL plugins hangs for minutes. IgFold refinement only needs the
+    CPU platform, so unless the user already set OPENMM_PLUGIN_DIR, redirect
+    it to a per-user cache directory of symlinks to the non-OpenCL plugins.
+
+    Returns:
+        The plugin directory in effect ("" if OpenMM layout not found).
+    """
+    if os.environ.get("OPENMM_PLUGIN_DIR"):
+        return os.environ["OPENMM_PLUGIN_DIR"]
+
+    # Locate openmm/lib/plugins without importing the package (which would
+    # trigger the plugin load we are trying to make safe).
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("openmm")
+        if spec is None or spec.origin is None:
+            return ""
+        pkg_dir = os.path.dirname(os.path.abspath(spec.origin))
+        plugins_dir = os.path.abspath(os.path.join(pkg_dir, "..", "OpenMM.libs", "lib", "plugins"))
+        if not os.path.isdir(plugins_dir):
+            return ""
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "igfold_openmm_cpu_plugins")
+        os.makedirs(cache_dir, exist_ok=True)
+        for entry in os.scandir(plugins_dir):
+            if entry.name.endswith(".so") and "OpenCL" not in entry.name:
+                link = os.path.join(cache_dir, entry.name)
+                if not os.path.lexists(link):
+                    os.symlink(os.path.realpath(entry.path), link)
+        os.environ["OPENMM_PLUGIN_DIR"] = cache_dir
+        return cache_dir
+    except OSError:
+        return ""
+
+
 def run_igfold_cli(
     sequences: Dict[str, str],
     output_path: str,
-    refine: str = "none",
+    refine: str = "openmm",
     renumber: bool = False,
     num_models: int = 4,
     device: str = "cpu",
@@ -309,7 +366,7 @@ def validate_pdb(pdb_path: str) -> bool:
 def predict_single_fasta(
     fasta_path: str,
     output_dir: str,
-    refine: str = "none",
+    refine: str = "openmm",
     renumber: bool = False,
     num_models: int = 4,
     device: str = "cpu",
@@ -375,7 +432,7 @@ def predict_single_fasta(
 def predict_batch(
     input_dir: str,
     output_dir: str,
-    refine: str = "none",
+    refine: str = "openmm",
     renumber: bool = False,
     num_models: int = 4,
     device: str = "cpu",
@@ -456,8 +513,11 @@ Examples:
     # Predict all variants in a directory
     python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/
 
-    # Predict with refinement and renumbering
-    python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --refine openmm --renumber
+    # Predict with renumbering (OpenMM refinement is on by default)
+    python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --renumber
+
+    # Skip refinement
+    python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --refine none
 
     # Use GPU
     python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --device cuda:0
@@ -496,8 +556,8 @@ Requirements:
     parser.add_argument(
         "--refine",
         choices=["none", "openmm", "pyrosetta"],
-        default="none",
-        help="Refinement method (default: none)",
+        default="openmm",
+        help="Refinement method (default: openmm; falls back to none if openmm not installed)",
     )
     parser.add_argument(
         "--renumber",
@@ -554,6 +614,16 @@ Requirements:
             sys.exit(1)
     else:
         print("[IgFold] Offline mode - skipping network check")
+    
+    # Fall back to no refinement if openmm is requested but not installed
+    if args.refine == "openmm":
+        # Restrict plugin loading to CPU/Reference (avoids OpenCL ICD hangs;
+        # no-op if the user already set OPENMM_PLUGIN_DIR).
+        configure_openmm_plugins()
+        if not openmm_available():
+            print("[WARNING] OpenMM not installed - falling back to --refine none", file=sys.stderr)
+            print("          Install with: conda run -n igfold pip install openmm pdbfixer", file=sys.stderr)
+            args.refine = "none"
     
     # Run prediction
     if args.input:
