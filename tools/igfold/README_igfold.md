@@ -12,11 +12,13 @@ This tool uses [IgFold](https://github.com/Graylab/IgFold) to predict antibody s
 conda create -n igfold python=3.11 -y
 ```
 
-### 2. Install IgFold
+### 2. Install IgFold, OpenMM and pdbfixer
 
 ```bash
-conda run -n igfold pip install igfold
+conda run -n igfold pip install igfold openmm pdbfixer
 ```
+
+OpenMM (MIT-licensed) + pdbfixer power `--refine openmm`, the default refinement: IgFold runs pdbfixer on the prediction, then OpenMM energy-minimizes it, fixing stereochemistry and tightening side-chain packing (lowering spurious SASA on buried residues). If they are not installed, the wrapper automatically falls back to `--refine none` with a warning.
 
 ### 3. Download AntiBERTy weights (first run only)
 
@@ -51,14 +53,22 @@ conda run -n igfold python tools/igfold_predict.py \
   --output af3/amg110_variants/
 ```
 
-### With refinement and renumbering
+### With renumbering (OpenMM refinement is on by default)
 
 ```bash
 conda run -n igfold python tools/igfold_predict.py \
   --input-dir af3/amg110_variants/ \
   --output af3/amg110_variants/ \
-  --refine openmm \
   --renumber
+```
+
+### Without refinement (faster, unrelaxed side chains)
+
+```bash
+conda run -n igfold python tools/igfold_predict.py \
+  --input-dir af3/amg110_variants/ \
+  --output af3/amg110_variants/ \
+  --refine none
 ```
 
 ### Using GPU
@@ -77,7 +87,7 @@ conda run -n igfold python tools/igfold_predict.py \
 | `--input` | Input FASTA file (single prediction) | - |
 | `--input-dir` | Input directory with FASTA files (batch) | - |
 | `--output` | Output directory for PDB files | Required |
-| `--refine` | Refinement method: `none`, `openmm`, `pyrosetta` | `none` |
+| `--refine` | Refinement method: `none`, `openmm`, `pyrosetta` | `openmm` (falls back to `none` if openmm missing) |
 | `--renumber` | Renumber with Chothia scheme | False |
 | `--num-models` | Number of ensemble models (1-4) | 4 |
 | `--device` | Device: `cpu`, `cuda:0`, `cuda:1`, `mps` | `cpu` |
@@ -160,10 +170,24 @@ If you run out of GPU memory, use CPU mode:
 
 ### Slow prediction
 
-For faster prediction:
+For faster predictions:
 1. Use `--num-models 1` (faster, slightly less accurate)
 2. Use GPU if available (`--device cuda:0`)
-3. Use `--refine none` (skip refinement)
+3. Use `--refine none` (skip OpenMM refinement, ~30-60s faster per structure)
+
+### "[WARNING] OpenMM not installed" message
+
+The wrapper requested `--refine openmm` (the default) but `import openmm` failed. Install it with `conda run -n igfold pip install openmm pdbfixer`, or pass `--refine none` explicitly to silence the fallback.
+
+### `import openmm` hangs (OpenCL plugin load)
+
+On some machines (typically headless GPU servers whose OpenCL ICD does not enumerate cleanly) OpenMM's default plugin loading hangs for minutes. The wrapper auto-defends: unless you set `OPENMM_PLUGIN_DIR` yourself, it points that variable at `~/.cache/igfold_openmm_cpu_plugins/` — a symlink farm of the non-OpenCL (CPU/Reference) plugins — before refining. Refinement then uses the CPU platform (fine for Fv-sized minimizations). To restore full plugin loading (e.g. OpenCL GPU acceleration), set the variable yourself:
+
+```bash
+export OPENMM_PLUGIN_DIR=$($CONDA_PREFIX/bin/python -c \
+  "import os,importlib.util as u; s=u.find_spec('openmm'); \
+print(os.path.abspath(os.path.join(os.path.dirname(s.origin),'..','OpenMM.libs','lib','plugins')))")
+```
 
 ## References
 
