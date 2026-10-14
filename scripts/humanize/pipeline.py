@@ -36,7 +36,7 @@ from .variants import Variant, assemble_variants
 @dataclass
 class PipelineConfig:
     germline_dir: str = ""
-    germline_strategy: str = "auto"    # fr_best|cdr_best|composite|cvi_best|min_backmutations|current|auto
+    germline_strategy: str = "auto"    # fr_best|cdr_best|composite|cvi_best|min_backmutations|current|adimab_frequency|pioneer_frequency|composite_3axis|auto
     forced_germlines: Dict[str, str] = field(default_factory=dict)  # {"H": "IGHV1-3*01", "L": "IGKV1-39*01"}
     cdr_scheme: str = "kabat"          # kabat|chothia|abm|imgt (graft def)
     report_schemes: List[str] = field(default_factory=lambda: ["kabat", "chothia", "imgt"])
@@ -48,7 +48,7 @@ class PipelineConfig:
     calibration_path: Optional[str] = None  # calibration.json from `humanize learn`
     biophi_env: Optional[str] = None        # conda env with biophi (server)
     oasis_db: Optional[str] = None          # OASis 9-mer DB path (server)
-    mock_structures: bool = True       # run without AF3/MPNN
+    mock_structures: bool = True       # unused legacy field; AF3/MPNN are controlled by af3.mode/mpnn.mode
     interactive_indel: bool = False    # enable interactive indel selection
     af3_validate_variants: bool = False  # predict each variant and compute CDR-RMSD
     design_panel: bool = False         # emit structure-guided V_opt panel
@@ -135,7 +135,7 @@ def run_pipeline(
             "treating as VHH; verify species"
         )
 
-    # germline DB (NCBI FASTA preferred, bundled JSON fallback)
+    # germline DB (bundled Kabat-space JSON preferred, NCBI FASTA fallback)
     try:
         db = load_germline_db(config.germline_dir or _default_germline_dir())
     except FileNotFoundError as e:
@@ -577,7 +577,8 @@ def _process_chain(
             for k, r in oas.items():
                 humanness.setdefault(k, {})["oasis_identity"] = r.oasis_identity
 
-    # ---- Step 4: Developability optimization (if high-risk motifs found AND mpnn enabled) ----
+    # ---- Step 4: Developability optimization (runs when high-risk motifs are
+    # found; mpnn.mode controls real MPNN vs germline-consensus fallback) ----
     from .mpnn import detect_developability_risks, enrich_risks_with_structure, run_developability_optimization, DevelopabilityOptimizationResult
     dev_opt_result = DevelopabilityOptimizationResult()
     
@@ -637,7 +638,9 @@ def build_cdr_framework_sets(
 
     ``cdr_sets`` maps the scheme CDR name (CDR1/CDR2/CDR3) to its position
     labels; ``framework_positions`` is FR1-FR3 excluding any CDR-loop residue
-    (e.g. strict-Kabat H93/H94 belong to CDR3 and must not enter the fit).
+    (e.g. H93/H94 are labelled FR3 in the strict numbering scheme but belong
+    to the CDR3 loop set used here (graft.CDR_POS_SETS), so they must not
+    enter the fit).
     """
     from .graft import CDR_POS_SETS
     ctype = numbered.chain_type
@@ -668,6 +671,41 @@ def pdb_chain_pos_map(model, chain: str, numbered: NumberedChain) -> Dict[str, i
     if len(ca) == len(numbered.residues):
         return {r.pos: ca[i][0] for i, r in enumerate(numbered.residues)}
     return {r.pos: r.index + 1 for r in numbered.residues}
+
+
+def align_pos_map(donor_numbered, vseq: str, model, chain: str,
+                  min_identity: float = 0.5) -> Optional[Dict[str, int]]:
+    """Map donor Kabat positions to variant PDB resseqs via sequence alignment.
+
+    Two independent numbering runs (donor FASTA vs a variant PDB sequence) can
+    place CDR insertions at different anchor residues (e.g. donor L30A-F vs
+    variant L27A-F for the same 17-residue VL CDR1); pairing residues by label
+    then mismatches them and inflates CDR-RMSD. Align donor sequence to the
+    variant CA sequence and key the variant map by donor labels; gapped
+    residues are omitted. Returns None when the alignment is too poor to trust
+    (caller should fall back to label-based pairing).
+    """
+    from .fr_indel import _needleman_wunsch
+
+    ca = sorted((a.resseq, a.resname)
+                for a in model.atoms if a.chain == chain and a.name == "CA")
+    if len(ca) != len(vseq):
+        return None
+    aln = _needleman_wunsch(list(donor_numbered.sequence), list(vseq))
+    matches = sum(1 for a, b in aln if a != "-" and b != "-" and a == b)
+    aligned = sum(1 for a, b in aln if a != "-" and b != "-")
+    if not aligned or matches / aligned < min_identity:
+        return None
+    out: Dict[str, int] = {}
+    di = vi = 0
+    for a, b in aln:
+        if a != "-" and b != "-":
+            out[donor_numbered.residues[di].pos] = ca[vi][0]
+        if a != "-":
+            di += 1
+        if b != "-":
+            vi += 1
+    return out
 
 
 def _plddt_by_pos(model, label: str, numbered: NumberedChain) -> Dict[str, float]:

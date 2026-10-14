@@ -112,8 +112,9 @@ def _estimate_n_backmutations(
 ) -> int:
     """估计回复突变数量（基于实际的 tier 分析）。
 
-    使用与下游完全一致的 analyze_backmutations 统计 **V2 变体（T1+T2）**
-    的回复突变数——即生产推荐变体的真实回复数。旧实现统计 T1+T2+T3，
+    使用 analyze_backmutations 统计 T1+T2 层的回复突变数，作为 **V2 变体**
+    回复数的近似（V2 完整组装还可能包含 donor FR 插入与 FR4 结构性回复，
+    见 variants.py）。旧实现统计 T1+T2+T3，
     而 T3 数量 ≈ 框架差异数，导致 min_backmutations 策略与 fr_best 趋同。
     """
     if gene.numbered is None:

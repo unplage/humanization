@@ -60,6 +60,20 @@ def test_numbering():
     check("IGKV1-39 CDR3", l.seq_range("L89", "L95") == "QQSYSTP")
     check("IGKV1-39 FR4", l.seq_range("L98", "L107") == "FGQGTKVEIK")
 
+    # Regression: ANARCI Kabat path (_anarci_to_numbered_chain) used to
+    # return cdrs={}, leaving H-chain CDR summaries blank whenever ANARCI
+    # was available (AMG110 VH has an H6A FR1 insertion).
+    AMG110_VH = ("EVQLLEQSGAELVRPGTSVKISCKASGYAFTNYWLGWVKQRPGHGLEWIGDIFPGSG"
+                 "NIHYNEKFKGKATLTADKSSSTAYMQLSSLTFEDSAVYFCARLRNWDEPMDYWGQGTTVTVSS")
+    amg = number_heavy(AMG110_VH)
+    check("AMG110 VH cdrs populated", bool(amg.cdrs), str(amg.cdrs))
+    check("AMG110 VH CDR1 = NYWLG",
+          amg.cdrs.get("CDR1") is not None and amg.seq_range(*amg.cdrs["CDR1"]) == "NYWLG",
+          str(amg.cdrs.get("CDR1")))
+    check("AMG110 VH CDR3 = LRNWDEPMDY",
+          amg.cdrs.get("CDR3") is not None and amg.seq_range(*amg.cdrs["CDR3"]) == "LRNWDEPMDY",
+          str(amg.cdrs.get("CDR3")))
+
     m4 = number_heavy(M4D5_VH)
     # AbRSA uses standard Kabat CDR2: H50-H65 without H52A insertion
     check("4D5 VH CDR2 = donor loop", m4.seq_range("H50", "H65") == "YINPYNGVTKYNQKFKG")
@@ -171,6 +185,219 @@ def test_chemical_liability_delta():
     check("reversion introducing a donor N-glycan is penalised",
           bool(hits2) and hits2[0].chemical_score <= -0.5,
           str([(c.position, c.chemical_score) for c in bm2.candidates]))
+
+
+def test_dev_risk_position_sensitivity():
+    """Regression: _calculate_dev_risk_score must scan the residue AT the
+    given Kabat position, not the first occurrence of that amino acid in the
+    sequence (seq.find regression)."""
+    print("dev-risk position sensitivity")
+    from humanize.backmut import _calculate_dev_risk_score
+    vh = ("EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADS"
+          "VKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKWGQGTLVTVSS")
+    donor = number_heavy(vh)
+    n_positions = [r.pos for r in donor.residues if r.aa == "N"]
+    check("fixture has multiple N positions", len(n_positions) >= 2,
+          str(n_positions))
+    scores = {p: _calculate_dev_risk_score("N", p, donor, "H")
+              for p in n_positions}
+    check("scores are position-sensitive (not all identical)",
+          len(set(scores.values())) > 1, str(scores))
+    check("at least one N scores > 0 (motif scan works)",
+          any(v > 0 for v in scores.values()), str(scores))
+
+
+def test_insertion_chem_delta():
+    """Regression: FR-insertion chemical score must compare donor-with-insertion
+    vs the same sequence WITHOUT the inserted residue. The old code rebuilt
+    donor.sequence with donor_aa at its own index (a no-op), so chem was
+    identically 0 and never penalised a liability-creating insertion."""
+    print("insertion chemical delta")
+    from humanize.backmut import analyze_backmutations, _liability_score
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    gene = [g for g in db.v_genes if g.gene_id == "IGHV1-46*01"][0]
+    # AMG110 VH: donor FR1 insertion E at H6 vs germline IGHV1-46*01.
+    amg = ("EVQLLEQSGAELVRPGTSVKISCKASGYAFTNYWLGWVKQRPGHGLEWIGDIFPGSG"
+           "NIHYNEKFKGKATLTADKSSSTAYMQLSSLTFEDSAVYFCARLRNWDEPMDYWGQGTTVTVSS")
+    bm_e = analyze_backmutations(number_heavy(amg), gene, is_vhh=False)
+    ins_e = [c for c in bm_e.candidates if "fr_indel" in c.features]
+    check("neutral E insertion produces a candidate",
+          bool(ins_e) and ins_e[0].position == "H6",
+          str([(c.position, c.donor_aa) for c in ins_e]))
+    # Same donor but the inserted residue is N: N-Q-S forms an N-glycan
+    # (N[^P][ST]) at the insertion, so keeping it must be penalised.
+    var = amg[:5] + "N" + amg[6:]
+    donor_n = number_heavy(var)
+    bm_n = analyze_backmutations(donor_n, gene, is_vhh=False)
+    ins_n = [c for c in bm_n.candidates if "fr_indel" in c.features]
+    check("N-glycan insertion produces a candidate",
+          bool(ins_n) and ins_n[0].donor_aa == "N",
+          str([(c.position, c.donor_aa) for c in ins_n]))
+    if ins_e and ins_n:
+        check("liability-creating insertion is penalised (lower composite)",
+              ins_n[0].composite < ins_e[0].composite,
+              f"E={ins_e[0].composite} N={ins_n[0].composite}")
+        # The signed delta must match _liability_score(absent) - _liability_score(donor)
+        r = donor_n.residue(ins_n[0].position)
+        absent = donor_n.sequence[:r.index] + donor_n.sequence[r.index + 1:]
+        expected = _liability_score(absent) - _liability_score(donor_n.sequence)
+        check("insertion chem equals the signed liability delta",
+              expected < 0, f"expected chem={expected}")
+
+
+def test_rmsd_alignment_pos_map():
+    """Regression: cmd_rmsd paired donor/variant residues by Kabat label from
+    two independent numbering runs. Insertion anchors can differ between the
+    runs for the same CDR sequence (AMG110 VL: donor L30A-F vs IGKV4-1-based
+    variant L27A-F), silently mismatching residues and inflating CDR1 RMSD
+    (~5.3 A on identical sequences). align_pos_map pairs residues by sequence
+    alignment instead; with identical CA coordinates the CDR RMSD must be ~0."""
+    print("rmsd alignment pos map")
+    from humanize.pipeline import align_pos_map, build_cdr_framework_sets, pdb_chain_pos_map
+    from humanize.structure import load_model, structure_rmsd
+
+    donor_l = ("ELVMTQSPSSLTVTAGEKVTMSCKSSQSLLNSGNQKNYLTWYQQKPGQPPKLLIYWASTRE"
+               "SGVPDRFTGSGSGTDFTLTISSVQAEDLAVYYCQNDYSYPLTFGQGTKLEIK")
+    var_l = ("ELVMTQSPGSLAVSLGERATINCKSSQSLLNSGNQKNYLTWYQQKPGQPPKLLIYWASTRE"
+             "SGVPDRFSGSGSGTDFTLTISSLQAEDVAVYYCQNDYSYPLTFGQGTKLEIK")
+
+    aa3 = {"A": "ALA", "C": "CYS", "D": "ASP", "E": "GLU", "F": "PHE",
+           "G": "GLY", "H": "HIS", "I": "ILE", "K": "LYS", "L": "LEU",
+           "M": "MET", "N": "ASN", "P": "PRO", "Q": "GLN", "R": "ARG",
+           "S": "SER", "T": "THR", "V": "VAL", "W": "TRP", "Y": "TYR"}
+
+    def write_ca_pdb(path, seq, chain):
+        with open(path, "w") as fh:
+            for i, aa in enumerate(seq):
+                fh.write(
+                    "ATOM  %5d  CA  %s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
+                    % (i + 1, aa3[aa], chain, i + 1, i * 3.8, 10.0, 0.0,
+                       1.0, 90.0))
+            fh.write("END\n")
+
+    # donor via AbRSA directly (L30A-F-style insertions) to reproduce the
+    # cross-engine mismatch cmd_rmsd used to see; portable fallback =
+    # built-in L27A-F on both sides (label branch then self-skips)
+    try:
+        from humanize.abrsa import number_with_abrsa
+        donor_num = number_with_abrsa(donor_l, "L", "kabat")
+        if donor_num is None:
+            raise ValueError("abrsa returned None")
+    except Exception:
+        donor_num = number_light(donor_l)
+    var_num = number_light(var_l)
+
+    def cdr1_labels(num):
+        return [r.pos for r in num.residues
+                if 24 <= int("".join(c for c in r.pos if c.isdigit())) <= 34]
+
+    d_cdr1, v_cdr1 = cdr1_labels(donor_num), cdr1_labels(var_num)
+
+    with tempfile.TemporaryDirectory() as td:
+        dpath, vpath = os.path.join(td, "d.pdb"), os.path.join(td, "v.pdb")
+        write_ca_pdb(dpath, donor_l, "B")
+        write_ca_pdb(vpath, var_l, "L")
+        dmodel, vmodel = load_model(dpath), load_model(vpath)
+        cdr_sets, framework = build_cdr_framework_sets(donor_num, "kabat")
+        donor_regions = {r.pos: r.region for r in donor_num.residues}
+
+        def run(pos_map_donor, pos_map_var):
+            return structure_rmsd(
+                dmodel, "B", pos_map_donor, vmodel, "L", pos_map_var,
+                cdr_sets, framework, "L", pos_regions=donor_regions)
+
+        # label-based pairing (the old behaviour) when anchors differ
+        dpos = pdb_chain_pos_map(dmodel, "B", donor_num)
+        vpos_label = pdb_chain_pos_map(vmodel, "L", var_num)
+        if d_cdr1 != v_cdr1:
+            old = run(dpos, vpos_label)
+            check("label-based CDR1 RMSD inflated on identical coords",
+                  (old["per_cdr"].get("CDR1") or 0) > 1.0,
+                  str(old["per_cdr"].get("CDR1")))
+
+        # alignment-based pairing must recover ~0 on identical coordinates
+        vpos_aln = align_pos_map(donor_num, var_l, vmodel, "L")
+        check("align_pos_map returns a map", vpos_aln is not None)
+        new = run(dpos, vpos_aln)
+        c1 = new["per_cdr"].get("CDR1")
+        check("aligned CDR1 RMSD ~0 on identical coords",
+              c1 is not None and c1 < 0.2, str(c1))
+        c_all = new["cdr_rmsd"]
+        check("aligned CDR-RMSD ~0 on identical coords",
+              c_all is not None and c_all < 0.2, str(c_all))
+        # identity gate: same-length unrelated sequence must be rejected
+        check("align_pos_map rejects unrelated sequence",
+              align_pos_map(donor_num, "A" * len(donor_l), vmodel, "L") is None)
+
+
+def test_vl_numbering_unification():
+    """VL must always be numbered by the built-in engine (Kabat L27A-F CDR1
+    insertion convention, lambda supported). Guards against three bugs:
+    (1) AbRSA hijacking VL through number_heavy's try-first fallback (it
+    numbers VL without error, chain_type=L, insertions at L28-30);
+    (2) ANARCI-less classify misrouting lambda to the built-in heavy engine;
+    (3) the built-in heavy engine swallowing light chains whose CDR3 'W'
+    hits the loose W103 fallback."""
+    print("vl numbering unification")
+    from humanize.sequences import classify_sequences, _anarci_chain_type
+    import humanize.sequences as _seq_mod
+
+    kappa = ("ELVMTQSPSSLTVTAGEKVTMSCKSSQSLLNSGNQKNYLTWYQQKPGQPPKLLIYWASTRE"
+             "SGVPDRFTGSGSGTDFTLTISSVQAEDLAVYYCQNDYSYPLTFGQGTKLEIK")
+    lam = ("SYVLTQPPSVSVAPGKTARITCGGNNIGSKSVHWYQQFPGRAPVLVIYYDSTKRPSGIPERF"
+           "SGSNSGNTATLTISRVEAGDEADYYCQVWDSSSDHVVFGGGTKLTVL")
+    vh = ("EVQLLEQSGAELVRPGTSVKISCKASGYAFTNYWLGWVKQRPGHGLEWIGDIFPGSG"
+          "NIHYNEKFKGKATLTADKSSSTAYMQLSSLTFEDSAVYFCARLRNWDEPMDYWGQGTTVTVSS")
+    vhh = ("EVQLVESGGGLVQAGGSLRLSCAASGRTFSSYAMGWFRQAPGKEREFVAAISGSGGSTYYAD"
+           "SVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCAAAGSSGRLYDYWGQGTQVTVSS")
+
+    def cdr1_ins(chain):
+        return [r.pos for r in chain.numbered.residues
+                if r.pos[-1:].isalpha()
+                and 24 <= int("".join(c for c in r.pos if c.isdigit())) <= 34]
+
+    def classify():
+        return {c.name: c for c in classify_sequences(
+            [("k", kappa), ("l", lam), ("h", vh), ("v", vhh)])}
+
+    # --- with ANARCI (this environment) ---
+    ch = classify()
+    check("kappa VL classified as L", ch["k"].chain_type == "L",
+          ch["k"].chain_type)
+    check("kappa VL numbered by builtin (L27A-F insertions)",
+          cdr1_ins(ch["k"]) == [f"L27{x}" for x in "ABCDEF"],
+          str(cdr1_ins(ch["k"])))
+    check("lambda VL classified as L", ch["l"].chain_type == "L",
+          ch["l"].chain_type)
+    check("VH classified as H", ch["h"].chain_type == "H", ch["h"].chain_type)
+    check("VHH classified as H with vhh flag",
+          ch["v"].chain_type == "H" and ch["v"].is_vhh,
+          f"{ch['v'].chain_type}/{ch['v'].is_vhh}")
+    try:
+        number_heavy(kappa)
+        check("number_heavy rejects kappa VL", False, "returned a chain")
+    except ValueError:
+        check("number_heavy rejects kappa VL", True)
+
+    # --- without ANARCI (portable fallback chain) ---
+    saved = _seq_mod._anarci_chain_type
+    _seq_mod._anarci_chain_type = lambda s: None
+    try:
+        ch2 = classify()
+        check("portable: kappa VL -> L via fallback", ch2["k"].chain_type == "L",
+              ch2["k"].chain_type)
+        check("portable: kappa VL builtin insertions",
+              cdr1_ins(ch2["k"]) == [f"L27{x}" for x in "ABCDEF"],
+              str(cdr1_ins(ch2["k"])))
+        check("portable: lambda VL -> L (not swallowed as H)",
+              ch2["l"].chain_type == "L", ch2["l"].chain_type)
+        check("portable: VH -> H", ch2["h"].chain_type == "H",
+              ch2["h"].chain_type)
+        check("portable: VHH -> H + vhh",
+              ch2["v"].chain_type == "H" and ch2["v"].is_vhh,
+              f"{ch2['v'].chain_type}/{ch2['v'].is_vhh}")
+    finally:
+        _seq_mod._anarci_chain_type = saved
 
 
 def test_structure_adaptive_scoring():
@@ -458,23 +685,34 @@ def test_developability_scan():
 
 
 def test_input_validation():
-    """Error paths for malformed inputs were never tested."""
+    """Error paths for malformed inputs (short seq, all-X seq)."""
     print("input validation")
-    from humanize.sequences import parse_input
-    short = ">bad\nEVQL\n"
-    try:
-        list(parse_input(short))
-        check("short sequence rejected", False, "no error raised")
-    except Exception:
-        check("short sequence rejected", True)
-    garbage = ">x\n" + "X" * 130 + "\n"
-    try:
-        chains = list(parse_input(garbage))
-        numbered_ok = any(c.numbered is not None for c in chains)
-        check("all-X sequence does not produce usable numbering",
-              not numbered_ok or True)  # tolerated either way, must not crash
-    except Exception:
-        check("all-X sequence handled without crash", True)
+    import tempfile
+    from humanize.sequences import InputError, parse_input
+    with tempfile.TemporaryDirectory() as td:
+        short = os.path.join(td, "short.fasta")
+        with open(short, "w") as fh:
+            fh.write(">bad\nEVQL\n")
+        try:
+            parse_input(short)
+            check("short sequence rejected", False, "no error raised")
+        except InputError:
+            check("short sequence rejected", True)
+        except Exception as e:
+            check("short sequence rejected", False, f"wrong error type: {e!r}")
+
+        garbage = os.path.join(td, "garbage.fasta")
+        with open(garbage, "w") as fh:
+            fh.write(">x\n" + "X" * 130 + "\n")
+        try:
+            parse_input(garbage)
+            # tolerated either way: all-X may or may not produce usable
+            # numbering; the hard requirement is only that it must not crash
+            check("all-X sequence handled without crash", True)
+        except InputError:
+            check("all-X sequence handled without crash", True)
+        except Exception as e:
+            check("all-X sequence handled without crash", False, f"crashed: {e!r}")
 
 
 def test_graft_loop_conservation():
@@ -1485,6 +1723,10 @@ def test_end_to_end():
 def main():
     test_numbering()
     test_chemical_liability_delta()
+    test_dev_risk_position_sensitivity()
+    test_insertion_chem_delta()
+    test_rmsd_alignment_pos_map()
+    test_vl_numbering_unification()
     test_structure_adaptive_scoring()
     test_vl_cdr3_insertion_numbering()
     test_structure_hint_chain_filtering()

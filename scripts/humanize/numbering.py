@@ -4,23 +4,25 @@ Implements *Kabat* numbering of antibody variable domains using conserved
 anchor residues that are structurally invariant:
 
     VH:  Cys22 (FR1) . Trp36 (FR2) . Cys92 (FR3) . Trp103 (FR4)
-    VL:  Cys23 (FR1) . Trp35 (FR2) . Cys88 (FR3) . Phe98 (FR4)
+    VL:  Cys23 kappa / Cys22 lambda (FR1) . Trp35 (FR2) . Cys88 (FR3) . Phe98 (FR4)
 
 Framework lengths between anchors are fixed by the scheme:
 
     VH:  FR1 1-30, CDR1 31-35(+35A..), FR2 36-49, CDR2 50-65(+52A-D),
-         FR3 66-92(+82A-C), CDR3 95-102(+100A-K), FR4 103-113
+         FR3 66-94(+82A-C), CDR3 95-102(+100A-K), FR4 103-113
     VL:  FR1 1-23, CDR1 24-34(+27A-E), FR2 35-49, CDR2 50-56,
          FR3 57-88(+82A-C), CDR3 89-97, FR4 98-107
 
 Anchor candidates are validated by (a) conserved-motif context and (b) the
 total number of residues spanned, so exotic loop lengths and species quirks
 (e.g. mouse FR3 ending 'YFC', VHH long CDR3) are handled robustly. The engine
-is scheme-accurate for standard V domains; ANARCI mode (exact) is used on the
-server for cross-validation.
+is scheme-accurate for standard V domains; when installed on the server,
+ANARCI is tried first for heavy chains and the built-in engine is the
+portable fallback (see number_heavy/number_light).
 
-When AbRSA is available (data/AbRSA/AbRSA), it is used as the primary numbering
-engine for more accurate CDR delimitation with proper insertion handling.
+When AbRSA is available (data/AbRSA/AbRSA), it is tried after ANARCI for
+heavy chains; the built-in engine remains the portable fallback, and VL
+always uses the built-in engine (see number_light).
 """
 
 from __future__ import annotations
@@ -91,8 +93,8 @@ def _letters(n: int) -> List[str]:
 
 def _find_fr2_trp(s: str, start: int, end: int, chain_type: str) -> Optional[int]:
     """Find the FR2-start Trp (H: W36, L: W35). Prefers a W whose downstream
-    context matches the FR2-start consensus (H: 'W[VFLI][RQ]' e.g. WVRQ/WVKQ/
-    WFRQ; L: 'WYQ') and whose CDR1 length is canonical."""
+    context matches the FR2-start consensus (H: 'W[VFLIY][RQ]' e.g. WVRQ/WVKQ/
+    WFRQ; L: 'WY[QFL]' i.e. WYQ/WYF/WYL) and whose CDR1 length is canonical."""
     if chain_type == "H":
         ctx_pat = re.compile(r"W[VFLIY][RQ]")
         len_ok = lambda n: 4 <= n <= 16
@@ -146,9 +148,13 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
             pass
 
     # 2. Fallback to AbRSA
+    # Only accept heavy chains: AbRSA numbers VL sequences without error and
+    # returns them chain_type="L" (with L30A-F-style CDR1 insertions that
+    # deviate from the Kabat/ANARCI L27A-F convention), which used to hijack
+    # every kappa VL through classify_sequences' try-heavy-first routing.
     if is_abrsa_available():
         result = number_with_abrsa(seq, "H", "kabat")
-        if result is not None:
+        if result is not None and result.chain_type == "H":
             result.species_hint = species_hint
             return result
     
@@ -188,6 +194,7 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
         raise ValueError("[VH] no Trp36 (FR2 start) anchor found")
     cdr1_len = w_idx - fr1_len
     if not (4 <= cdr1_len <= 16):
+        # message text "expected 5-12" is legacy; the actual gate is 4-16 (see condition above)
         warnings.append(f"[VH] unusual CDR1 length {cdr1_len} (expected 5-12)")
     cdr1_seq = s[fr1_len:w_idx]
     if len(cdr1_seq) <= 5:
@@ -356,9 +363,15 @@ def _find_j_anchor(s: str, start: int, end: int, chain_type: str) -> Optional[in
     if best is not None:
         return best
     # final fallback: the anchor is the first W/F at the start of the
-    # J-consensus stretch (<=3 residues past the CDR3 end)
+    # J-consensus stretch (<=3 residues past the CDR3 end). For H require
+    # W[GST] so a light chain's in-CDR3 'W' (e.g. lambda ...QVW-DSSS...) is
+    # never mistaken for W103 -- otherwise the built-in heavy engine would
+    # swallow lambda VL when ANARCI/AbRSA are unavailable.
     for i in range(start, min(start + 4, end)):
-        if s[i] == ("W" if chain_type == "H" else "F"):
+        if chain_type == "H":
+            if s[i] == "W" and i + 1 < len(s) and s[i + 1] in "GST":
+                return i
+        elif s[i] == "F":
             return i
     return None
 
@@ -374,7 +387,7 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
     """
     # Note: ANARCI has a known bug with VL CDR3 numbering (shifts L91-L95 to L96-L97).
     # AbRSA also has issues with VL numbering. So we use the built-in engine directly.
-    # The built-in engine correctly handles VL CDR3 at positions L89-L95.
+    # The built-in engine correctly handles VL CDR3 at positions L89-L97.
     s = seq.upper().strip()
     n = len(s)
     warnings: List[str] = []
@@ -400,6 +413,7 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
         raise ValueError("[VL] no Trp35 (FR2 start) anchor found")
     cdr1_len = w_idx - fr1_len
     if not (6 <= cdr1_len <= 17):
+        # message text "expected 11-17" is legacy; the actual gate is 6-17 (see condition above)
         warnings.append(f"[VL] unusual CDR1 length {cdr1_len} (expected 11-17)")
     cdr1_seq = s[fr1_len:w_idx]
     cdr1_len = len(cdr1_seq)

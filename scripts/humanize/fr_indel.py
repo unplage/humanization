@@ -117,9 +117,11 @@ def detect_fr_indels(
 ) -> List[FRIndel]:
     """Detect FR insertions and deletions between donor and germline.
 
-    Uses sequence alignment (not just position comparison) to find the
-    exact insertion/deletion point. When donor FR has more residues than
-    germline, we align the sequences to find where the extra residue is.
+    Compares per-region residue counts, then scores every position of the
+    longer sequence as a candidate indel point by shift-comparison and
+    context heuristics (_find_all_insertion_candidates). Needleman-Wunsch
+    alignment is used elsewhere (build_fr_correspondence), not in this
+    detection path.
 
     Returns a list of FRIndel objects, one per detected indel. Each FRIndel
     contains a list of candidates with confidence scores for interactive selection.

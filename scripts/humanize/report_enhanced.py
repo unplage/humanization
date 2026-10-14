@@ -57,7 +57,7 @@ def _calculate_fv_identity(query: Optional[NumberedChain], gene: Optional[Germli
     q = query.posmap()
     g = gene.numbered.posmap()
     
-    # 排除 CDR3 (H95-102 / L89-97)
+    # Fv = FR + CDR 整体（含 CDR3，符合 Fv 定义；CDR 区域单独统计见 _calculate_fr_identity / CDR 表）
     common = [p for p in q if p in g]
     
     if not common:
@@ -445,8 +445,8 @@ def generate_hotspot_summary(
         v0_count, v0_sites = _count_high_risk_sites(rep, cdr_only=True)
         lines.append(f"{chain_type}\t{cdr_seq}\t{v0_count}\t{', '.join(v0_sites)}")
         
-        # V1-V3 变体: 每个变体单独扫描其移植后序列的 CDR 区域风险
-        for i, v in enumerate(rep.variants[1:4], start=1):
+        # 变体 (V1 起, 含 V2a/V2b/V2/V3 等; 与 4.2 节一致, 不再用 [1:4] 截断)
+        for i, v in enumerate(rep.variants[1:], start=1):
             v_count, v_sites = _scan_high_risk(v.graft.numbered, cdr_only=True)
             lines.append(f"{chain_type}{i}\t{cdr_seq}\t{v_count}\t{', '.join(v_sites)}")
     
@@ -1103,14 +1103,16 @@ def _generate_cdr_summary_table_data(rep: ChainReport) -> List[List[str]]:
         ", ".join(high_risk_sites) if high_risk_sites else "-"
     ])
     
-    # V1-V3 变体
+    # V1-V3 变体 (每个变体单独扫描其移植后序列, 与 markdown 版本一致)
     for i in range(1, 4):
         if i < len(rep.variants):
+            v = rep.variants[i]
+            v_count, v_sites = _scan_high_risk(v.graft.numbered, cdr_only=True)
             rows.append([
                 f"{chain_type}{i}",
                 cdr_seq,
-                str(high_risk_count),
-                ", ".join(high_risk_sites) if high_risk_sites else "-"
+                str(v_count),
+                ", ".join(v_sites) if v_sites else "-"
             ])
     
     return rows

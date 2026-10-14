@@ -4,7 +4,8 @@ V0  pure graft (all-human framework, donor CDRs) — FR indel positions excluded
 V1  V0 + Tier-1 back-mutations (structural pillars) — no indel positions
 V2  V1 + Tier-2 back-mutations + donor FR insertions (recommended)
 V3  V2 + selected Tier-3 (exposed, low-risk immunogenic positions)
-SDR grafted variant is produced in structure mode (see sdr module).
+SDR grafted variant is produced in structure mode (see
+minimal.py::build_paratope_variant).
 """
 
 from __future__ import annotations
