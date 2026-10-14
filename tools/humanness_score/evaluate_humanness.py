@@ -8,8 +8,8 @@ Compares input sequences against human germline V/J genes and reports:
   - Number of positions differing from germline (potential back-mutation candidates)
 
 Usage:
-    python3 -m scripts.humanize.evaluate_humanness --input seq.fasta
-    python3 -m scripts.humanize.evaluate_humanness --vh EVQLVESGGGLVQPGGSLRLSCAASGFTFTDYTMHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCARMDYWGQGTLVTVSS --vl DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK
+    python3 tools/humanness_score/evaluate_humanness.py --input seq.fasta
+    python3 tools/humanness_score/evaluate_humanness.py --vh EVQLVESGGGLVQPGGSLRLSCAASGFTFTDYTMHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCARMDYWGQGTLVTVSS --vl DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK
 """
 
 import argparse

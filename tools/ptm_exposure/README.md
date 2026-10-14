@@ -129,10 +129,10 @@ This tool is independent of the main humanization pipeline. It can be used:
 
 1. **Before humanization**: Assess PTM risks in donor sequences
 2. **After humanization**: Validate that optimized variants have acceptable PTM profiles
-3. **For external structures**: Analyze any antibody PDB/CIF file
+3. **For external structures**: Analyze any antibody PDB file (CIF not supported by the parser)
 
 ## Notes
 
-- Conserved disulfide Cys (VH 22/92, VL 22/23/88) are excluded from "unpaired Cys" and "oxidation (C)" risks
+- Conserved disulfide Cys (VH 22/92, VL 22/23/88, Kabat) are excluded from "unpaired Cys" and "oxidation (C)" risks. The H/L chain type is detected by the pipeline numbering engine (sequence-based), and the Kabat positions are mapped to sequential structure indices through the same numbering, so AF3/Boltz structures with A/B chain labels and CDR-insertion-shifted indices (e.g. VH C92 at sequential index ~96) are handled correctly
 - SASA is calculated using the FreeSASA algorithm (Lee & Richards)
-- Maximum SASA values are from Tien et al. 2013
+- Maximum SASA values are from Tien et al. 2013 (PLoS ONE 8(11):e80635, Table 1 "Theoretical"/ALLOWED scale), identical to `scripts/humanize/structure.py` and `tools/tap_profiler/tap_analyzer.py` (previously this tool carried the Miller et al. 1987 values under a Tien citation, which inflated relSASA by up to ~28% for ASP)

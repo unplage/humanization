@@ -32,7 +32,7 @@ pip install huggingface_hub
 python -c "from huggingface_hub import snapshot_download; snapshot_download('jeffruffolo/AntiBERTy', local_dir='./antiberty_weights')"
 
 # Copy the weights to the target machine and set:
-export ANTIbertY_WEIGHTS_DIR=/path/to/antiberty_weights
+export ANTIBERTY_WEIGHTS_DIR=/path/to/antiberty_weights
 ```
 
 ## Usage
@@ -40,7 +40,7 @@ export ANTIbertY_WEIGHTS_DIR=/path/to/antiberty_weights
 ### Single antibody prediction
 
 ```bash
-conda run -n igfold python tools/igfold_predict.py \
+conda run -n igfold python tools/igfold/igfold_predict.py \
   --input af3/amg110_variants/amg110_V1.fasta \
   --output af3/amg110_variants/
 ```
@@ -48,7 +48,7 @@ conda run -n igfold python tools/igfold_predict.py \
 ### Batch prediction (all variants)
 
 ```bash
-conda run -n igfold python tools/igfold_predict.py \
+conda run -n igfold python tools/igfold/igfold_predict.py \
   --input-dir af3/amg110_variants/ \
   --output af3/amg110_variants/
 ```
@@ -56,7 +56,7 @@ conda run -n igfold python tools/igfold_predict.py \
 ### With renumbering (OpenMM refinement is on by default)
 
 ```bash
-conda run -n igfold python tools/igfold_predict.py \
+conda run -n igfold python tools/igfold/igfold_predict.py \
   --input-dir af3/amg110_variants/ \
   --output af3/amg110_variants/ \
   --renumber
@@ -65,7 +65,7 @@ conda run -n igfold python tools/igfold_predict.py \
 ### Without refinement (faster, unrelaxed side chains)
 
 ```bash
-conda run -n igfold python tools/igfold_predict.py \
+conda run -n igfold python tools/igfold/igfold_predict.py \
   --input-dir af3/amg110_variants/ \
   --output af3/amg110_variants/ \
   --refine none
@@ -74,7 +74,7 @@ conda run -n igfold python tools/igfold_predict.py \
 ### Using GPU
 
 ```bash
-conda run -n igfold python tools/igfold_predict.py \
+conda run -n igfold python tools/igfold/igfold_predict.py \
   --input-dir af3/amg110_variants/ \
   --output af3/amg110_variants/ \
   --device cuda:0
@@ -158,7 +158,7 @@ If you see "Network is unreachable" error, it means IgFold cannot download the A
 
 1. Run on a machine with internet access
 2. Download weights manually (see Installation section)
-3. Set `ANTIbertY_WEIGHTS_DIR` environment variable to local weights
+3. Set `ANTIBERTY_WEIGHTS_DIR` environment variable to local weights
 
 ### CUDA out of memory
 

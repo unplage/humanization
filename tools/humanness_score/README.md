@@ -24,7 +24,7 @@ pip install biopython anarci python-docx
 ```bash
 # From FASTA file
 python3 tools/humanness_score/evaluate_humanness.py \
-    --input data/examples/amg110.fasta
+    --input data/examples/mouse_4d5_fab.fasta
 
 # Direct sequences
 python3 tools/humanness_score/evaluate_humanness.py \
@@ -59,7 +59,7 @@ python3 tools/humanness_score/generate_all_reports.py \
     FR identity:  0.8500 (85.0%)
     CDR identity: 0.4000 (40.0%)
 
-  Humanization estimate: Academic: likely Humanized-like
+  Humanization estimate: Academic: likely Humanized-like (FR identity >= 85%)
   (Note: Official USAN/INN naming requires knowledge of manufacturing process)
 ```
 

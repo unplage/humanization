@@ -6,7 +6,7 @@ Antibody stability prediction tool for humanization pipeline. Predicts absolute 
 
 - **Absolute Stability (ΔG)**: Predicts protein folding free energy
 - **Mutational Effect (ΔΔG)**: Evaluates impact of back-mutations on stability
-- **Batch Analysis**: Analyze multiple variants (V0-V3) in parallel
+- **Batch Analysis**: Analyze multiple variants (V0-V3) sequentially (single-threaded loop, not parallel)
 - **Pipeline Integration**: Works with humanization pipeline output
 - **Multiple Models**: ESM3ΔG (recommended) and SaProtΔG
 
@@ -34,7 +34,8 @@ pip install git+https://github.com/yehlincho/absolute-stability-predictor.git
 python3 tools/stability_predictor/stability_analyzer.py \
     --pdb structure.pdb
 
-# Specify chain (default: A)
+# Label only (--chain is stored/reported as chain_id but is not applied for
+# chain extraction; the model receives the whole PDB file)
 python3 tools/stability_predictor/stability_analyzer.py \
     --pdb antibody.pdb \
     --chain H
@@ -199,7 +200,7 @@ python3 tools/stability_predictor/stability_analyzer.py --pdb structure.pdb
 
 1. Check PDB file format is valid
 2. Ensure structure has valid backbone atoms
-3. Try with `--chain A` to specify chain
+3. Try with `--chain A` to set the reported chain label (note: chain filtering is not applied; the model receives the whole PDB)
 
 ## Scientific Background
 

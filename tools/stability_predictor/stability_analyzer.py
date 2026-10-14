@@ -21,8 +21,8 @@ Usage:
     # Batch analysis for variant panel
     python3 tools/stability_predictor/stability_analyzer.py --pdb-dir variants/ --output results/
 
-    # From humanization pipeline output
-    python3 tools/stability_predictor/stability_analyzer.py --pipeline-dir outputs/step3/
+    # From humanization pipeline output (pass the AF3 output dir via --pdb-dir)
+    python3 tools/stability_predictor/stability_analyzer.py --pdb-dir outputs/step3/af3/ --output results/
 """
 
 import argparse

@@ -35,7 +35,10 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-# Reference SASA values from Tien et al. 2013 (A^2)
+# Reference SASA values: Miller et al. 1987 scale (A^2), often miscopied
+# under a Tien et al. 2013 citation (Tien's recommended values are larger,
+# e.g. ALA 129 / ASP 193; cf. scripts/humanize/structure.py). NOTE: this
+# constant is currently unused (dead code).
 REFERENCE_SASA = {
     'ALA': 113.0, 'ARG': 241.0, 'ASN': 158.0, 'ASP': 151.0, 'CYS': 140.0,
     'GLU': 183.0, 'GLN': 179.0, 'GLY': 85.0, 'HIS': 194.0, 'ILE': 182.0,
