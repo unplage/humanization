@@ -100,7 +100,8 @@ def parse_fasta(path: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# alignment (BLOSUM62, mirror cdr_homology: global for CDR1/2, local for CDR3)
+    # alignment (BLOSUM62, mirror cdr_homology: global for CDR1/2/3 -- CDR3
+    # is also aligned globally; the local aligner is currently unused)
 # ---------------------------------------------------------------------------
 
 _aligner = None

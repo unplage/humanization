@@ -333,7 +333,7 @@ Generated with `--all-formats`:
 
 ### FreeSASA (structural analysis)
 
-- **Method**: Shrake-Rupley algorithm for SASA computation
+- **Method**: Lee-Richards algorithm for SASA computation (FreeSASA default)
 - **Reference**: Beer et al., *J Chem Inf Model* (2016)
 - **Note**: Used for structural risk adjustment in Step 2
 

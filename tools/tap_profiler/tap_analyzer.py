@@ -3,7 +3,7 @@
 
 Calculates 5 developability metrics based on TAP guidelines:
 1. Total CDR Length (Ltot) - Sum of all 6 CDR lengths (IMGT numbering via ANARCI)
-2. Patches of Surface Hydrophobicity (PSH) - Hydrophobic patches on CDR vicinity
+2. Patches of Surface Hydrophobicity (PSH) - Hydrophobic patches over all surface-exposed residues (whole Fv, not CDR-restricted)
 3. Patches of Positive Charge (PPC) - Positive charge patches  
 4. Patches of Negative Charge (PNC) - Negative charge patches
 5. Structural Fv Charge Symmetry Parameter (SFvCSP) - Charge balance VH vs VL
@@ -635,7 +635,7 @@ def calculate_SASA_metrics(sasa_data: Dict[str, Dict[int, float]],
                            sequences: Dict[str, str]) -> Tuple[float, float, float]:
     """Calculate PSH, PPC, PNC from SASA data.
     
-    PSH: Number of hydrophobic patches on CDR vicinity surface
+    PSH: Number of hydrophobic patches over all surface-exposed residues (whole Fv)
     PPC: Number of positive charge patches
     PNC: Number of negative charge patches
     

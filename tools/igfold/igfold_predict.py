@@ -10,26 +10,26 @@ Requirements:
     - OpenMM + pdbfixer (recommended): conda run -n igfold pip install openmm pdbfixer
       Used for --refine openmm (default); falls back to no refinement if missing
     - AntiBERTy weights: First run requires internet to download ~100MB weights from Hugging Face
-      If offline, set ANTIbertY_WEIGHTS_DIR to a local copy
+      If offline, set ANTIBERTY_WEIGHTS_DIR to a local copy
 
 Usage:
     # Predict a single antibody (VH + VL)
-    conda run -n igfold python tools/igfold_predict.py --input af3/amg110_variants/amg110_V1.fasta --output af3/amg110_variants/
+    conda run -n igfold python tools/igfold/igfold_predict.py --input af3/amg110_variants/amg110_V1.fasta --output af3/amg110_variants/
 
     # Predict all variants in a directory
-    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/
+    conda run -n igfold python tools/igfold/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/
 
     # Predict with renumbering (OpenMM refinement is on by default)
-    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --renumber
+    conda run -n igfold python tools/igfold/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --renumber
 
     # Skip refinement
-    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --refine none
+    conda run -n igfold python tools/igfold/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --refine none
 
     # Use GPU
-    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --device cuda:0
+    conda run -n igfold python tools/igfold/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/ --device cuda:0
 
     # Offline mode (if weights already downloaded)
-    conda run -n igfold python tools/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/
+    conda run -n igfold python tools/igfold/igfold_predict.py --input-dir af3/amg110_variants/ --output af3/amg110_variants/
 
 Author: Humanization Pipeline
 Date: 2026

@@ -80,13 +80,20 @@ CONSERVED_CYS = {
     "L": {22, 23, 88},  # VL (kappa and lambda)
 }
 
-# Maximum SASA values for amino acids (Tien et al. 2013)
+# Maximum SASA values for amino acids. Tien et al. 2013 (PLoS ONE 8(11):e80635),
+# Table 1 "Theoretical" / ALLOWED-region scale; identical table to
+# scripts/humanize/structure.py (ref_sasa) and tools/tap_profiler/tap_analyzer.py.
+# NOTE: this table previously held the Miller et al. 1987 values while citing
+# Tien 2013. Miller underestimates maxASA by up to ~28% (ASP 151 vs 193),
+# which systematically inflated relSASA and biased borderline sites toward
+# higher exposure/risk. FreeSASA's Lee & Richards (1.4 A probe) ASA is within
+# the calculation scope Tien et al. state their values apply to.
 MAX_SASA = {
-    'ALA': 113.0, 'ARG': 241.0, 'ASN': 158.0, 'ASP': 151.0,
-    'CYS': 140.0, 'GLU': 183.0, 'GLN': 179.0, 'GLY': 85.0,
-    'HIS': 194.0, 'ILE': 182.0, 'LEU': 180.0, 'LYS': 211.0,
-    'MET': 203.0, 'PHE': 218.0, 'PRO': 143.0, 'SER': 122.0,
-    'THR': 146.0, 'TRP': 259.0, 'TYR': 229.0, 'VAL': 160.0,
+    'ALA': 129.0, 'ARG': 274.0, 'ASN': 195.0, 'ASP': 193.0,
+    'CYS': 167.0, 'GLU': 223.0, 'GLN': 225.0, 'GLY': 104.0,
+    'HIS': 224.0, 'ILE': 197.0, 'LEU': 201.0, 'LYS': 236.0,
+    'MET': 224.0, 'PHE': 240.0, 'PRO': 159.0, 'SER': 155.0,
+    'THR': 172.0, 'TRP': 285.0, 'TYR': 263.0, 'VAL': 174.0,
 }
 
 # 3-letter to 1-letter amino acid mapping
@@ -231,8 +238,8 @@ def get_residue_info(chain: str, res_num: int, res_name: str,
 # PTM Detection
 # ---------------------------------------------------------------------------
 
-def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[int, str]]:
-    """Map 1-based residue index -> (Kabat region, IMGT region).
+def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[int, str], str, set]:
+    """Map 1-based residue index -> (Kabat region, IMGT region), plus chain type.
 
     Kabat regions come from the pipeline Kabat numbering engine
     (ANARCI -> AbRSA -> built-in for VH; built-in for VL).
@@ -242,11 +249,21 @@ def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[i
     NumberedChain.region field, so no static Kabat->IMGT lookup table is
     involved (that table has gaps for insertion-dependent positions).
 
+    The third return value is the detected chain type ("H" or "L") from the
+    same numbering engine, used for chain-type-keyed lookups (e.g. conserved
+    disulfide Cys) regardless of the PDB chain label (A/B/H/L...).
+    The fourth return value maps CONSERVED_CYS (Kabat numbers) to 1-based
+    sequential indices via the same numbering, since CDR insertions shift
+    sequential indices relative to Kabat (e.g. VH C92 sits at sequential
+    index ~96).
+
     Degrades to "-" per position if numbering is unavailable or fails
     (e.g. non-antibody chain such as antigen).
     """
     fallback = ({i + 1: "-" for i in range(len(sequence))},
-                {i + 1: "-" for i in range(len(sequence))})
+                {i + 1: "-" for i in range(len(sequence))},
+                "L" if chain.strip().upper() == "L" else "H",
+                set(CONSERVED_CYS.get("L" if chain.strip().upper() == "L" else "H", set())))
     try:
         from scripts.humanize.numbering import number_heavy, number_light
         from scripts.humanize.imgt_numbering import number_with_abrsa_imgt
@@ -279,11 +296,19 @@ def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[i
         "L" if label == "L" else "H")
 
     regions_kabat = {i + 1: "-" for i in range(len(sequence))}
+    conserved_cys_idx: set = set()
     if kabat_numbered is not None:
+        target_nums = CONSERVED_CYS.get(chain_type, set())
         for r in kabat_numbered.residues:
             idx = r.index  # 0-based index into the original sequence
             if 0 <= idx < len(sequence):
                 regions_kabat[idx + 1] = r.region
+            m = re.match(r"^[A-Z](\d+)", r.pos or "")
+            if m and int(m.group(1)) in target_nums:
+                conserved_cys_idx.add(idx + 1)
+    else:
+        # Numbering failed: legacy fallback treats Kabat numbers as indices
+        conserved_cys_idx = set(CONSERVED_CYS.get(chain_type, set()))
 
     # IMGT numbering (independent engine call, same as humanness_score)
     regions_imgt = {i + 1: "-" for i in range(len(sequence))}
@@ -297,17 +322,29 @@ def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[i
     except Exception:
         pass
 
-    return regions_kabat, regions_imgt
+    return regions_kabat, regions_imgt, chain_type, conserved_cys_idx
 
 
 def detect_ptm_sites(sequence: str, chain: str,
                      sasa_data: Dict[int, float],
                      residue_names: Dict[int, str],
                      regions: Optional[Dict[int, str]] = None,
-                     regions_imgt: Optional[Dict[int, str]] = None) -> List[PTMSite]:
-    """Detect PTM sites in sequence and assess exposure."""
+                     regions_imgt: Optional[Dict[int, str]] = None,
+                     chain_type: Optional[str] = None,
+                     conserved_cys_idx: Optional[set] = None) -> List[PTMSite]:
+    """Detect PTM sites in sequence and assess exposure.
+
+    chain_type ("H"/"L", from get_chain_regions) is used for chain-type-keyed
+    lookups such as CONSERVED_CYS; the raw PDB chain label (A/B/H/L...) is kept
+    only for display. conserved_cys_idx (1-based sequential indices mapped
+    from Kabat numbers via the numbering engine) overrides the raw Kabat-number
+    fallback. Either may be omitted for direct callers.
+    """
     sites = []
-    conserved_cys = CONSERVED_CYS.get(chain, set())
+    if conserved_cys_idx is not None:
+        conserved_cys = conserved_cys_idx
+    else:
+        conserved_cys = CONSERVED_CYS.get(chain_type or chain, set())
     seen_positions = {}  # Track positions to avoid double-counting (e.g., Cys oxidation + unpaired)
 
     for motif_name, motif_info in PTM_PATTERNS.items():
@@ -432,9 +469,9 @@ def analyze_structure(pdb_path: str) -> Dict:
                 break
 
         # Detect PTM sites (with Kabat + IMGT region annotation)
-        regions, regions_imgt = get_chain_regions(sequence, chain)
+        regions, regions_imgt, chain_type, conserved_cys_idx = get_chain_regions(sequence, chain)
         ptm_sites = detect_ptm_sites(sequence, chain, sasa_data[chain], residue_names,
-                                     regions, regions_imgt)
+                                     regions, regions_imgt, chain_type, conserved_cys_idx)
 
         # Get all residue info
         residue_info = []

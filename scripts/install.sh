@@ -5,7 +5,7 @@
 #
 # Default (portable core): Python + standard library only, germline data
 # bundled. Works on any Linux/macOS machine.
-#   --full  additionally installs ANARCI (exact numbering cross-validation)
+#   --full  additionally installs ANARCI (tried first for heavy-chain numbering when available)
 #           and IgBLAST binaries + NCBI germline database.
 #
 # ProteinMPNN and AlphaFold3 are NOT installed here: they are heavy
@@ -42,7 +42,7 @@ else
   echo "    (conda not found; using ${PYTHON})"
 fi
 
-# --- optional exact-numbering cross-validation ---------------------------------
+# --- optional ANARCI (primary heavy-chain numbering engine when available) --
 if [ "${FULL}" = "1" ]; then
   if command -v conda >/dev/null 2>&1; then
     conda install -y -n "${ENV_NAME}" -c bioconda -c conda-forge hmmer==3.3.2
