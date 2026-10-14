@@ -1,9 +1,11 @@
 """Germline database handling and framework selection.
 
-Uses the NCBI IgBLAST germline V/J FASTA files (human_gl_V.fasta,
-human_gl_J.fasta) as the authoritative germline source. Sequences are
-numbered with the portable Kabat engine, so matching is done position-wise
-in Kabat space (no alignment needed).
+Loads the bundled Kabat-space germline JSON (data/germline/
+human_germline_kabat.json) as the preferred source (amino acid sequences,
+already numbered in Kabat space, so matching is position-wise with no
+alignment needed). The NCBI IgBLAST germline V/J FASTA files
+(human_gl_*.fasta) are a nucleotide fallback when the bundled JSON is
+absent (see load_germline_db).
 
 Selection strategy (industry standard "hybrid" approach):
   1. Rank human V genes by FRAMEWORK identity (FR1+FR2+FR3, CDRs excluded).
@@ -468,6 +470,8 @@ def choose_germlines(
       * primary ranking by FR identity;
       * among the top-FR hits, pick the gene that also maximizes CDR1+2
         identity (fewer back-mutations / less structural perturbation).
+    The j_pick parameter is currently unused; J selection is always ranked
+    by identity (then frequency).
     """
     ctype = query.chain_type
     v_genes = db.human(ctype)

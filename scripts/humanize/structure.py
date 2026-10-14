@@ -6,10 +6,10 @@
   PDB reader and computes the structure hints consumed by back-mutation
   scoring: per-residue buriedness (SASA proxy), CDR contacts and
   antigen contacts, plus CDR-loop RMSD vs a reference model.
-* `--mock` mode produces no structure data (all hints None); the pipeline
-  then relies on sequence/structure-free rules.
+ * When no structure is available (AF3 mode off and no --donor-structure),
+  all hints are None; the pipeline then relies on sequence-only rules.
 
-Requires biopython only for the full SASA computation; without it, a
+Full SASA uses FreeSASA when installed (Lee & Richards); without it, a
 cheap heavy-atom-neighbourhood proxy is used.
 """
 
@@ -66,9 +66,9 @@ def parse_pdb(path: str) -> Optional[PDBModel]:
     with open(path) as fh:
         for line in fh:
             if line.startswith("ATOM") or line.startswith("HETATM"):
-                # Hydrogen filtering is deferred to heavy_atoms() which uses
-                # the PDB element column (line[76:78]) for robustness; the
-                # atom name prefix check there handles most cases already.
+                # NOTE: the PDB element column (76:78) is not parsed; hydrogen
+                # filtering happens in heavy_atoms() via the atom-name prefix
+                # check (a.name[0] != "H").
                 try:
                     # AF3 stores pLDDT in the B-factor column (60:66)
                     plddt = float(line[60:66]) if len(line) > 66 else 0.0
@@ -854,7 +854,7 @@ class AF3Config:
     db_dir: str = ""
     api_url: str = ""
     api_token: str = ""
-    n_structs: int = 2          # seeds per job
+    n_structs: int = 2          # unused legacy field (seeds are hardcoded in make_af3_input)
 
 
 def make_af3_input(

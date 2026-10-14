@@ -91,6 +91,10 @@ WEIGHTS = {
         "vhh_hallmark": 1.00,
         "disulfide_cys": 1.00,   # donor Cys paired with CDR Cys (VHH CDR3)
     },
+    # NOTE: the two sub-tables below ("immunogenicity", "chemical") are
+    # legacy and not read by any code; live scoring reads only
+    # WEIGHTS["structural"] and WEIGHTS["blend"]. Chemical liability deltas
+    # now live in LIABILITY_MOTIFS below.
     "immunogenicity": {
         "exposed_mismatch": 1.00,   # exposed non-human residue
         "buried_mismatch": 0.35,    # buried non-human residue (weak benefit)
@@ -212,9 +216,11 @@ EMPIRICAL_NO_EFFECT_NOTE = {
 #
 # NOTE: tier assignment is implemented authoritatively in
 # scripts/humanize/backmut.py::_assign_tier (hard-coded from the literature
-# position sets above). The TIER_RULES table was a declarative duplicate that
-# drifted out of sync and is intentionally removed -- keep _assign_tier as the
-# single source of truth.
+# position sets above); with structure hints present the operative wrapper
+# is _assign_tier_with_structure (same rules, exposure-adjusted). The
+# TIER_RULES table was a declarative duplicate that drifted out of sync and
+# is intentionally removed -- keep _assign_tier/_assign_tier_with_structure
+# as the single source of truth.
 # ---------------------------------------------------------------------------
 
 TIER_LABELS = {
@@ -289,8 +295,10 @@ HIGH_RISK_MOTIFS = {
 
 def detect_high_risk_positions(sequence: str, chain_type: str = "H") -> list:
     """Detect high-risk developability positions in a sequence.
-    
-    Returns list of dicts: [{"pos": int, "motif": str, "risk": str, "issue": str, "context": str}]
+
+    Returns list of dicts: [{"seq_pos": int, "motif": str, "motif_name": str,
+    "risk": str, "issue": str, "context": str}] (seq_pos is a 0-based
+    sequence index; no Kabat mapping is applied).
     """
     import re
     results = []
@@ -298,8 +306,7 @@ def detect_high_risk_positions(sequence: str, chain_type: str = "H") -> list:
         pattern = info["pattern"]
         for match in re.finditer(pattern, sequence):
             start = match.start()
-            # Map sequence position to Kabat position (approximate)
-            # This is simplified - in practice use numbering module
+            # +/-2-residue sequence context window
             context = sequence[max(0, start-2):min(len(sequence), start+len(match.group())+2)]
             results.append({
                 "seq_pos": start,

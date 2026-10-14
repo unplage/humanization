@@ -4,13 +4,14 @@ Workflow (full mode, requires ProteinMPNN on the server):
   1. Take a grafted variant structure (AF3) or donor structure.
   2. Design all framework residues with CDRs + VH/VL interface + VHH
      hallmark fixed (MPNN keeps the backbone).
-  3. Filter designed sequences by human-likeness (germline identity of the
-     designed FR) and drop designs introducing developability risks.
-  4. Optionally re-score top designs with AF3 (CDR RMSD, interface).
-  5. Emit the best designs as alternative framework variants.
+  3. Drop designs that introduce developability risk motifs.
+  4. Emit the best designs as alternative framework variants.
+  (No human-likeness filtering and no AF3 re-scoring are performed here.)
 
-Mock mode (portable): emits the top-10-germline CONSENSUS framework as a
-sanity-check alternative (no ProteinMPNN required).
+Mock/off mode (portable): emits a CONSENSUS framework voted over the
+provided germline set as a sanity-check alternative (no ProteinMPNN
+required). Note: run_mpnn() is currently unused; the pipeline calls
+run_developability_optimization().
 """
 
 from __future__ import annotations

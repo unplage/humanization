@@ -80,11 +80,13 @@ KABAT_TO_IMGT_VH = {
     # CDR1 (Kabat 26-35 -> IMGT 27-38)
     # Note: IMGT has gaps at positions 31-34 for CDR1 length variation
     26: 27, 27: 28, 28: 29, 29: 30,
-    # Kabat 30-33 map to IMGT gaps (31-34), handled by _map_insertion
+    # Kabat 30-33 have no direct table entries here; bare positions are
+    # skipped by kabat_to_imgt_position (lettered CDR1 insertions go through
+    # _map_insertion)
     34: 35, 35: 36,  # Kabat 34-35 -> IMGT 35-36
 
     # FR2 (Kabat 36-50 -> IMGT 41-55)
-    # Note: IMGT FR2 starts at 41 (CONSERVED-TRP at 41)
+    # Note: IMGT FR2 spans 39-55; the conserved Trp (Kabat W36) maps to IMGT 41
     36: 41, 37: 42, 38: 43, 39: 44, 40: 45, 41: 46,
     42: 47, 43: 48, 44: 49, 45: 50, 46: 51, 47: 52,
     48: 53, 49: 54, 50: 55,
@@ -92,7 +94,8 @@ KABAT_TO_IMGT_VH = {
     # CDR2 (Kabat 51-65 -> IMGT 56-65)
     # Note: IMGT has gaps at positions 58-64 for CDR2 length variation
     51: 56, 52: 57,
-    # Kabat 52A-52J map to IMGT 58-65, handled by _map_insertion
+    # Kabat 52A-52J map to IMGT 58-65 via _map_insertion (52I is not in the
+    # insertion table and is skipped)
 
     # FR3 (Kabat 58-94 -> IMGT 66-104)
     # Note: Complex mapping due to IMGT gaps at positions 73, 81-82
@@ -108,7 +111,8 @@ KABAT_TO_IMGT_VH = {
     89: 101, 90: 102, 91: 103, 92: 104,  # 92=Cys (2nd-CYS)
 
     # CDR3 (Kabat 93-102 -> IMGT 105-117)
-    # Note: CDR3 is variable length, IMGT has gaps at positions 111-112
+    # Note: CDR3 is variable length; IMGT 105-117 are used continuously here
+    # (Kabat 99-100 map to IMGT 111-112)
     93: 105, 94: 106, 95: 107, 96: 108, 97: 109, 98: 110,
     99: 111, 100: 112,
     # Kabat 100A-100K map to IMGT 108+, handled by _map_insertion
@@ -134,12 +138,14 @@ KABAT_TO_IMGT_VL = {
     24: 27,  # Kabat 24 -> IMGT 27
     # Kabat 25-29 map to IMGT 28-32 (part of CDR1)
     25: 28, 26: 29, 27: 30, 28: 31, 29: 32,
-    # Kabat 30-33 map to IMGT gaps 33-34 (handled by alignment)
-    30: 33, 31: 34, 32: 35, 33: 36, 34: 37, 35: 38,  # Wait, 34 is end of CDR1?
-    # Actually: Kabat 34 -> IMGT 35 (end of CDR1), Kabat 35 -> IMGT 39 (FR2 start)
+    # Kabat 30-33 -> IMGT 33-36 (CDR1 continuation)
+    30: 33, 31: 34, 32: 35, 33: 36, 34: 37, 35: 38,  # NOTE: key 35 is redefined below (35: 39, FR2 start); the later entry wins
+    # Kabat 34 -> IMGT 37 (end of CDR1), Kabat 35 -> IMGT 39 (FR2 start; see below)
 
     # FR2 (Kabat 35-49 -> IMGT 39-55)
-    # Note: IMGT FR2 starts at 39 (CONSERVED-TRP at 39)
+    # Note: IMGT FR2 starts at 39 (conserved Trp is at IMGT 41 per IMGT
+    # convention; this table maps Kabat W35 to 39 -- mapping-table vs
+    # anchor-convention discrepancy left as-is, unverified)
     35: 39, 36: 40, 37: 41, 38: 42, 39: 43, 40: 44,
     41: 45, 42: 46, 43: 47, 44: 48, 45: 49, 46: 50,
     47: 51, 48: 52, 49: 53, 50: 55,
@@ -321,7 +327,7 @@ def kabat_posmap_to_imgt_posmap(posmap: Dict[str, str], chain_type: str) -> Dict
 
     Args:
         posmap: Dictionary mapping Kabat position labels to amino acids
-                e.g., {"H1": "E", "H31": "Y", "H100A": "F"}
+                e.g., {"H1": "E", "H27": "Y", "H100A": "F"}
         chain_type: "H" for heavy chain, "L" for light chain
 
     Returns:

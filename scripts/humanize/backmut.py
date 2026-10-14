@@ -1,6 +1,7 @@
 """Back-mutation candidate identification and scoring.
 
-For every framework position (FR1-FR3) where the donor differs from the
+For every framework position (FR1-FR4, plus FR indel candidates) where the
+donor differs from the
 chosen human germline, we classify the position by structural role and
 immunogenicity, then assign:
 
@@ -40,8 +41,8 @@ from .numbering import NumberedChain
 FR_REGIONS = ("FR1", "FR2", "FR3")
 J_ANCHOR = {"H": 103, "L": 98}
 
-# Backbone atom names (used to separate side-chain-mediated contacts from
-# trivial main-chain contacts in the Ig beta-sandwich).
+# Backbone atom names (currently unused; side-chain vs backbone contact
+# attribution is implemented in structure.py).
 BACKBONE_ATOMS = {"N", "CA", "C", "O"}
 
 # Residue side-chain volume (Zamyatnin 1972, A^3). Used to flag buried
@@ -642,13 +643,15 @@ def analyze_backmutations(
                 tier = "T3"
                 structural_demoted = True
                 rationale_item = f"dev_risk: high developability risk ({dev_risk_score:.2f})"
-                # Will be added to rationale later
+                # NOTE: rationale_item is currently unused; the demotion is
+                # described via _rationale_with_structure instead
 
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
             + WEIGHTS["blend"][1] * benefit
             # positive chemical rewards are capped at 1, but negative
-            # penalties (introduces_nglycan) must pass through unclamped,
+            # penalties (reversions that introduce a new liability motif)
+            # must pass through unclamped,
             # otherwise the penalty would silently vanish (regression-tested)
             + WEIGHTS["blend"][2] * min(1, chem)
         ), 1)
@@ -795,11 +798,20 @@ def analyze_backmutations(
             benefit = 0.3 + 0.5 * exposure * 0.8  # moderate rarity
 
             # Chemical score: insertion liability delta (donor residue kept vs
-            # absent); the insertion residue itself is scanned in context.
+            # absent); sign convention matches the back-mutation path:
+            #   chem > 0 -> keeping the insertion REMOVES a liability that the
+            #               graft (no-insertion) state carries -> reward keep
+            #   chem < 0 -> keeping the insertion INTRODUCES / retains a
+            #               liability -> penalise keep
+            # (The previous code rebuilt donor.sequence with donor_aa at its
+            # own index, which is a no-op, so chem was identically 0.)
             d_res = donor.residue(pos)
-            ridx = d_res.index if d_res is not None else max(0, donor.sequence.find(donor_aa))
-            inserted_state = donor.sequence[:ridx] + donor_aa + donor.sequence[ridx + 1:]
-            chem = _liability_score(inserted_state) - _liability_score(donor.sequence)
+            if d_res is not None and d_res.aa.upper() == donor_aa.upper():
+                ridx = d_res.index
+                absent_state = donor.sequence[:ridx] + donor.sequence[ridx + 1:]
+                chem = _liability_score(absent_state) - _liability_score(donor.sequence)
+            else:
+                chem = 0.0
 
             composite = 100 * (WEIGHTS["blend"][0] * structural
                                + WEIGHTS["blend"][1] * benefit
@@ -1000,9 +1012,12 @@ def _calculate_dev_risk_score(donor_aa: str, pos: str, donor, chain_type: str) -
     
     risk_score = 0.0
     
-    # Get the residue and surrounding context
+    # Get the residue index from the numbered donor (seq.find(donor_aa) would
+    # locate the FIRST occurrence of that letter anywhere in the sequence,
+    # scanning the wrong position whenever the residue is not unique)
     seq = donor.sequence
-    idx = seq.find(donor_aa) if donor_aa else -1
+    d_res = donor.residue(pos) if pos else None
+    idx = d_res.index if d_res is not None else -1
     if idx < 0:
         return 0.0
     

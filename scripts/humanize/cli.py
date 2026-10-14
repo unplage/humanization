@@ -4,7 +4,7 @@
 Usage:
   humanize run    --input seq.fasta [--outdir outputs] [--format fab|vhh|auto]
                   [--scheme kabat|chothia|abm|imgt] [--germline-dir DIR]
-                  [--germline-strategy fr_best|cdr_best|composite|cvi_best|min_backmutations|current|auto]
+                  [--germline-strategy fr_best|cdr_best|composite|cvi_best|min_backmutations|current|adimab_frequency|pioneer_frequency|composite_3axis|auto]
                   [--af3-mode off|local|api] [--mpnn-mode off|local]
                   [--antigen SEQ] [--donor-structure PDB]
   humanize setup-germline [--dir DIR]      # download NCBI IgBLAST germline
@@ -135,7 +135,9 @@ def cmd_rmsd(args):
     from humanize.structure import (
         _AA3TO1, count_clashes, load_model, match_pdb_chain, structure_rmsd,
     )
-    from humanize.pipeline import build_cdr_framework_sets, pdb_chain_pos_map
+    from humanize.pipeline import (
+        align_pos_map, build_cdr_framework_sets, pdb_chain_pos_map,
+    )
 
     _fmt, chains = parse_input(args.input, args.format)
     ctype = args.chain
@@ -184,7 +186,14 @@ def cmd_rmsd(args):
             print(f"[humanize] numbering failed for {vpath}: {e}",
                   file=sys.stderr)
             continue
-        vpos = pdb_chain_pos_map(vmodel, vlabel, vnum)
+        # Pair donor/variant residues by sequence alignment: two independent
+        # numbering runs can place CDR insertions at different anchors (e.g.
+        # donor L30A-F vs variant L27A-F), silently mismatching residues when
+        # pairing by label. Fall back to label-based mapping if alignment is
+        # untrustworthy.
+        vpos = align_pos_map(donor, vseq, vmodel, vlabel)
+        if vpos is None:
+            vpos = pdb_chain_pos_map(vmodel, vlabel, vnum)
         donor_regions = {r.pos: r.region for r in donor.residues}
         res = structure_rmsd(
             dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework,

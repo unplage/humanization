@@ -59,7 +59,9 @@ def _detect_lambda_chain(sequence: str) -> bool:
 
 
 def _anarci_to_numbered_chain(result_anarci, chain_type: str, sequence: str):
-    """Convert ANARCI output to NumberedChain for any scheme (Kabat/IMGT).
+    """Convert ANARCI output to NumberedChain (region labels use Kabat
+    cutoffs via _get_region_from_position; live callers pass Kabat-scheme
+    ANARCI results).
 
     Args:
         result_anarci: Raw ANARCI output tuple
@@ -69,7 +71,7 @@ def _anarci_to_numbered_chain(result_anarci, chain_type: str, sequence: str):
     Returns:
         NumberedChain or None if conversion fails
     """
-    from .numbering import NumberedChain, NumberedResidue  # noqa: F811
+    from .numbering import NumberedChain, NumberedResidue, _cdr_segments  # noqa: F811
 
     try:
         numbering_list = result_anarci[0][0][0][0]
@@ -94,7 +96,7 @@ def _anarci_to_numbered_chain(result_anarci, chain_type: str, sequence: str):
         else:
             pos_label = f"{prefix}{pos_num}"
 
-        # Determine region from position number (works for both Kabat and IMGT)
+        # Region from position number using Kabat cutoffs (_get_region_from_position)
         region = _get_region_from_position(pos_num, chain_type)
 
         residues.append(NumberedResidue(
@@ -108,14 +110,19 @@ def _anarci_to_numbered_chain(result_anarci, chain_type: str, sequence: str):
     if not residues:
         return None
 
-    return NumberedChain(
+    chain = NumberedChain(
         chain_type=chain_type,
         sequence=seq,
         residues=residues,
         species_hint="unknown",
         warnings=[],
-        cdrs={},
     )
+    # Populate CDR segments (same as the built-in engine at
+    # numbering.py:number_heavy/number_light). The previous code returned
+    # cdrs={} here, leaving H-chain CDR summaries blank whenever the ANARCI
+    # Kabat path was taken (ANARCI is preferred over the built-in engine).
+    chain.cdrs = _cdr_segments(chain)
+    return chain
 
 
 def _get_region_from_position(pos_num: int, chain_type: str) -> str:
@@ -174,8 +181,9 @@ def number_with_anarci_imgt(sequence: str, chain_type: str) -> Optional[Numbered
 
     seq = sequence.upper().strip()
 
-    # Lambda chain detection: ANARCI misclassifies lambda as kappa
-    # We detect lambda and adjust chain_type accordingly
+    # Lambda detection is currently disabled: _detect_lambda_chain returns
+    # False unconditionally (ANARCI handles lambda natively), so is_lambda
+    # is always False and no chain_type adjustment happens
     is_lambda = False
     if chain_type == 'L' and _detect_lambda_chain(seq):
         is_lambda = True

@@ -5,14 +5,16 @@ measured affinities). This module converts those records into empirical
 per-position effects and recalibrates the scoring:
 
   1. parse experiments (JSON): parent + variants + KD (optional Tm/expr)
-  2. per-position effect: within-parent contrast
-     effect(p) = mean(ΔΔG of variants carrying the DONOR residue at p)
-               - mean(ΔΔG of variants carrying the HUMAN residue at p)
-     ΔΔG = RT*ln(KD_var/KD_parent), RT = 0.593 kcal/mol (25 C)
-  3. shrink effects toward 0 by sample size (empirical Bayes-lite)
-  4. write calibration.json: per-position effects + feature/tier adjustments
-  5. pipeline consumes calibration: composite modifiers + tier overrides +
-     report column "empirical ΔΔG"
+  2. per-position effect: ridge regression of each variant's ddG on indicators
+     of which framework positions carry the humanized residue (ridge, lam=1);
+     when the variant set does not identify positions, fall back to
+     attributing each variant's ddG equally to its changed positions
+     ddG = RT*ln(KD_var/KD_parent), RT = 0.593 kcal/mol (25 C)
+     (PositionEffect.effect > 0 => donor residue is better, revert helps)
+  3. combine per-experiment effects weighted by sample size, shrunk toward 0
+  4. write calibration.json: per-position effects + metadata
+  5. pipeline consumes calibration: effect_thresholds in backmut.py apply
+     composite modifiers + tier overrides + report column "empirical ddG"
 
 Design rules for the experimental data (see docs/learning_loop.md):
   * include V0 (pure graft) and V2 (T1+T2) at minimum, plus single-position

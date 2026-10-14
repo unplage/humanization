@@ -5,7 +5,8 @@ The grafted V domain is assembled position-wise:
     CDR1-3   <- donor (per chosen CDR definition)
     FR4      <- human J gene
     VHH      <- additionally keep donor residues at the FR2 hallmark
-                positions (Kabat 37/44/45/47) and at structural Cys pairs
+                positions (Kabat 37/44/45/47); conserved-Cys protection is
+                handled by the back-mutation tier rules (backmut.py), not here
 """
 
 from __future__ import annotations

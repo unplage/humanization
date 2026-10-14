@@ -130,7 +130,7 @@ def minimal_reversion_set(
             if pos in chosen:
                 continue
             gain = len(pairs & remaining)
-            # tie-break: composite score, then structural score
+            # tie-break: composite score only (structural score not consulted)
             if gain > best_gain or (
                 gain == best_gain and best_pos is not None
                 and (candidates[pos].composite

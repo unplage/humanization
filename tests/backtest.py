@@ -5,6 +5,7 @@ approved) humanization decisions?
 Cases (parent -> actual humanized, sequences from PDB structures):
   Case 1   mouse anti-HER2 4D5       -> trastuzumab (1N8Z / 1FVC)
   Case 2   mouse anti-VEGF A4.6.1    -> humanized anti-VEGF Fab (1BJ1)
+  Case VHH gold-standard VHH case (run in the same loop below)
 
 For every framework position we compare what the ACTUAL humanized sequence
 carries (donor residue / human germline residue / neither) against the
