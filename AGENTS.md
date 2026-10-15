@@ -52,6 +52,8 @@ python3 tests/backtest_scale.py     # HumAb25: 25 approved mouse antibodies
    9 个底层策略: `fr_best` | `cdr_best` | `composite` (0.7*FR+0.3*CDR) | `cvi_best` (canonical+vernier+interface) | `min_backmutations` | `current` (top-30% FR with max CDR) | `adimab_frequency` | `pioneer_frequency` | `composite_3axis` (0.5*CVI+0.3*freq+0.2*FR)。
    `auto` 是默认路由策略（VH=`adimab_frequency`，VL=`current`），不需要单独跑。
 
+   **坐标空间**: `--numbering {kabat,imgt}`（默认 kabat）。`compare` 与后续 `run` 必须使用相同值；`imgt` 要求 ANARCI（无便携回退），强制 `--scheme imgt`，整条流水线在 IMGT 空间运行（种系 `abnumber_human_imgt.json`、位点集经 `kabat_imgt_positions.json` 对应表翻译）。限制：`rmsd` 与 `learn` 校准仍为 Kabat；IMGT 模式下 Kabat 键的预计算 immunogenicity/calibration 输入自动忽略并告警。
+
    **每个策略必须返回 5 个候选**（按评分排序，分数相同时按使用频率排序），格式示例：
    ```
    策略: fr_best

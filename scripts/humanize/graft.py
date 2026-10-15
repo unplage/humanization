@@ -15,13 +15,13 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .germline import GermlineDB, GermlineGene
-from .germline import _region_of_pos
+from .germline import _region_of_pos, _imgt_region_of_pos
 from .numbering import (
     NumberedChain,
     NumberedResidue,
     _cdr_segments,
 )
-from .config import VHH_HALLMARK
+from .schemespec import cdr_windows, get_spec
 from .fr_indel import (
     FRCorrespondence,
     build_fr_correspondence,
@@ -61,22 +61,23 @@ CDR_POS_SETS = {
 }
 
 
-def is_cdr_loop_position(chain_type: str, num: int, scheme: str = "kabat") -> bool:
+def is_cdr_loop_position(chain_type: str, num: int, scheme: str = "kabat",
+                          numbering: str = "kabat") -> bool:
     """True if the position is part of a grafted CDR loop (incl. CDR3-H 93/94).
 
     Used wherever loop membership matters for sequence-level logic (grafting,
     paratope/SDR, structure contact hints, back-mutation filtering)."""
-    return num in cdr_positions_for(scheme, chain_type)
+    return num in cdr_positions_for(scheme, chain_type, numbering)
 
 
 def _pos_num(pos: str) -> int:
     return int("".join(c for c in pos if c.isdigit()))
 
 
-def cdr_positions_for(scheme: str, chain_type: str) -> set:
-    """Position numbers included in each CDR for the scheme (for grafting)."""
+def cdr_positions_for(scheme: str, chain_type: str, numbering: str = "kabat") -> set:
+    """Position numbers included in each CDR for (numbering, scheme)."""
     out = set()
-    for (lo, hi) in CDR_POS_SETS[scheme][chain_type].values():
+    for (lo, hi) in cdr_windows(numbering, scheme)[chain_type].values():
         out.update(range(lo, hi + 1))
     return out
 
@@ -94,6 +95,43 @@ class GraftResult:
     fr_correspondence: Optional["FRCorrespondence"] = None
 
 
+def _order_key(pos: str):
+    return (pos[0], _pos_num(pos), pos)
+
+
+def _sorted_positions(keys, donor: NumberedChain, numbering: str) -> List[str]:
+    """Sequence-order the assembled position labels.
+
+    Kabat labels sort correctly by (prefix, number, label). IMGT insertion
+    letters at 111/112 are NOT emitted in sequence order by ANARCI
+    (e.g. H112B, H112A, H112), so labels present in the donor are ordered by
+    the donor's residue order; non-donor labels (FR deletions, J residues
+    beyond the donor) are bare ints merged in numeric position."""
+    keys = list(keys)
+    if numbering != "imgt":
+        return sorted(keys, key=_order_key)
+    dindex = {r.pos: i for i, r in enumerate(donor.residues)}
+    donor_keys = sorted((k for k in keys if k in dindex), key=lambda k: dindex[k])
+    rest = sorted((k for k in keys if k not in dindex),
+                  key=lambda k: (_pos_num(k), k))
+
+    def _base(p: str) -> int:
+        return _pos_num(p)
+
+    out: List[str] = []
+    di = ri = 0
+    while di < len(donor_keys) or ri < len(rest):
+        if di >= len(donor_keys):
+            out.append(rest[ri]); ri += 1
+        elif ri >= len(rest):
+            out.append(donor_keys[di]); di += 1
+        elif _base(rest[ri]) < _base(donor_keys[di]):
+            out.append(rest[ri]); ri += 1
+        else:
+            out.append(donor_keys[di]); di += 1
+    return out
+
+
 def chain_from_origin_map(
     seq: str,
     out: Dict[str, str],
@@ -101,6 +139,8 @@ def chain_from_origin_map(
     donor: Optional[NumberedChain],
     gmap_src: Optional[NumberedChain],
     jmap_src: Optional[NumberedChain],
+    scheme: str = "kabat",
+    numbering: str = "kabat",
 ) -> NumberedChain:
     """Build a numbered chain directly from an assembled position map.
 
@@ -108,26 +148,26 @@ def chain_from_origin_map(
     strict-Kabat annotations (e.g. H93/H94 = FR3) match the donor. Positions
     absent from all sources fall back to a numeric region rule.
     """
-    sources = [s for s in (donor, gmap_src, jmap_src) if s is not None]
+    region_fn = _imgt_region_of_pos if numbering == "imgt" else _region_of_pos
     res = []
-    for i, (pos, aa) in enumerate(sorted(out.items(),
-                                         key=lambda kv: (kv[0][0], _pos_num(kv[0]), kv[0]))):
+    if donor is not None:
+        order = _sorted_positions(out.keys(), donor, numbering)
+    else:
+        order = sorted(out.keys(), key=_order_key)
+    for i, pos in enumerate(order):
+        aa = out[pos]
         region = ""
-        for s in sources:
+        for s in (x for x in (donor, gmap_src, jmap_src) if x is not None):
             r = s.residue(pos)
             if r is not None:
                 region = r.region
                 break
         if not region:
-            region = _region_of_pos(pos)
+            region = region_fn(pos)
         res.append(NumberedResidue(pos, aa, region, i))
     chain = NumberedChain(chain_type, seq, res)
-    chain.cdrs = _cdr_segments(chain)
+    chain.cdrs = _cdr_segments(chain, scheme, numbering)
     return chain
-
-
-def _order_key(pos: str):
-    return (pos[0], _pos_num(pos), pos)
 
 
 def graft_chain(
@@ -138,6 +178,7 @@ def graft_chain(
     is_vhh: bool = False,
     exclude_indel: bool = False,
     fr_indels: Optional[list] = None,
+    numbering: str = "kabat",
 ) -> GraftResult:
     """Build one humanized V domain (CDR grafting).
 
@@ -149,6 +190,7 @@ def graft_chain(
                    the graft. Used for V0 (pure graft without donor indels).
     fr_indels:     pre-computed FR indel list (keeps user-confirmed insertion
                    positions); detected internally when omitted.
+    numbering:     coordinate space of donor/germline ("kabat" | "imgt").
     """
     chain_type = donor.chain_type
     if v_gene.numbered is None or j_gene.numbered is None:
@@ -156,17 +198,19 @@ def graft_chain(
     gmap_src: NumberedChain = v_gene.numbered
     jmap_src: NumberedChain = j_gene.numbered
     warnings: List[str] = []
+    spec = get_spec(numbering)
 
     dmap = donor.posmap()                # position -> aa (donor)
     gmap = gmap_src.posmap()             # human germline V
     jmap = jmap_src.posmap()             # human J (FR4)
 
     if fr_indels is None:
-        fr_indels = detect_fr_indels(donor, v_gene)
-    corr = build_fr_correspondence(donor, v_gene, fr_indels)
+        fr_indels = detect_fr_indels(donor, v_gene, numbering)
+    corr = build_fr_correspondence(donor, v_gene, fr_indels, numbering)
 
-    cdr_nums = cdr_positions_for(scheme, chain_type)
-    j_anchor = 103 if chain_type == "H" else 98
+    cdr_nums = cdr_positions_for(scheme, chain_type, numbering)
+    j_anchor = spec.j_anchor_for(chain_type)
+    hallmark = spec.vhh_hallmark
     insertion_set = set(corr.insertion_positions)
 
     out: Dict[str, str] = {}
@@ -188,7 +232,7 @@ def graft_chain(
             continue
         dpos = corr.germline_to_donor.get(gpos)
         key = dpos if dpos is not None else gpos
-        if (is_vhh and chain_type == "H" and num in VHH_HALLMARK
+        if (is_vhh and chain_type == "H" and num in hallmark
                 and dpos is not None and dmap.get(dpos)):
             out[key] = dmap[dpos]
             origin[key] = "donor(vhh)"
@@ -208,17 +252,13 @@ def graft_chain(
             continue
         if dmap.get(dpos):
             out[dpos] = dmap[dpos]
-            if is_vhh and chain_type == "H" and _pos_num(dpos) in VHH_HALLMARK:
+            if is_vhh and chain_type == "H" and _pos_num(dpos) in hallmark:
                 origin[dpos] = "donor(vhh)"
             else:
                 origin[dpos] = "donor(indel)"
 
     # ---- 5. FR4 / J region (human J by construction; donor fallback)
-    fr4_positions = sorted(
-        (set(jmap) | {p for p in dmap if _pos_num(p) >= j_anchor}),
-        key=_order_key,
-    )
-    for pos in fr4_positions:
+    for pos in set(jmap) | {p for p in dmap if _pos_num(p) >= j_anchor}:
         if _pos_num(pos) < j_anchor:
             continue
         if jmap.get(pos):
@@ -233,13 +273,15 @@ def graft_chain(
                 f"[{chain_type}] FR4 position {pos} absent from J "
                 f"gene; keeping donor residue to avoid truncation")
 
-    seq = "".join(aa for pos, aa in sorted(out.items(), key=lambda kv: _order_key(kv[0])))
+    seq = "".join(aa for pos in _sorted_positions(out.keys(), donor, numbering)
+                  for aa in (out[pos],))
 
     # Build the numbered chain directly from the assembled position map.
     # Positions come from consistently-numbered donor/germline/J maps, so
     # framework lengths (e.g. VH3-family FR2 = 13 with gap at H49 vs a donor
     # that fills H49) are preserved by construction.
-    numbered = chain_from_origin_map(seq, out, chain_type, donor, gmap_src, jmap_src)
+    numbered = chain_from_origin_map(seq, out, chain_type, donor, gmap_src,
+                                     jmap_src, scheme, numbering)
 
     donor_positions = [pos for pos in out if origin[pos].startswith("donor")]
 
@@ -262,6 +304,8 @@ def _materialize(
     dmap: Dict[str, str],
     gmap: Dict[str, str],
     jmap: Dict[str, str],
+    donor: Optional[NumberedChain] = None,
+    numbering: str = "kabat",
 ) -> Tuple[str, Dict[str, str]]:
     """Turn an origin map into the amino-acid sequence.
 
@@ -278,7 +322,11 @@ def _materialize(
             aas[pos] = gmap.get(gpos) or dmap.get(pos, "")
         else:  # J
             aas[pos] = jmap.get(pos) or dmap.get(pos, "")
-    seq = "".join(aa for pos, aa in sorted(aas.items(), key=lambda kv: _order_key(kv[0])))
+    if donor is not None:
+        order = _sorted_positions(aas.keys(), donor, numbering)
+    else:
+        order = sorted(aas.keys(), key=_order_key)
+    seq = "".join(aas[pos] for pos in order)
     return seq, aas
 
 
@@ -292,6 +340,7 @@ def graft_variant(
     force_human: Optional[List[str]] = None,
     exclude_indel: bool = False,
     fr_indels: Optional[list] = None,
+    numbering: str = "kabat",
 ) -> GraftResult:
     """Graft + apply a list of back-mutations (position labels like 'H67').
 
@@ -301,7 +350,8 @@ def graft_variant(
     fr_indels:     pre-computed FR indels (keeps user-confirmed insertion pos).
     """
     base = graft_chain(donor, v_gene, j_gene, scheme, is_vhh,
-                       exclude_indel=exclude_indel, fr_indels=fr_indels)
+                       exclude_indel=exclude_indel, fr_indels=fr_indels,
+                       numbering=numbering)
     if not backmutations and not force_human:
         return base
     if v_gene.numbered is None or j_gene.numbered is None:
@@ -309,7 +359,8 @@ def graft_variant(
     dmap = donor.posmap()
     gmap = v_gene.numbered.posmap()
     jmap = j_gene.numbered.posmap()
-    corr = base.fr_correspondence or build_fr_correspondence(donor, v_gene, fr_indels)
+    corr = base.fr_correspondence or build_fr_correspondence(
+        donor, v_gene, fr_indels, numbering)
     out = dict(base.origin)
     for pos in backmutations or []:
         if pos in dmap and dmap[pos]:
@@ -319,11 +370,11 @@ def graft_variant(
             continue   # VHH hallmark must not be touched
         out[pos] = "germline"
     # rebuild sequence from origin map (germline labels resolve through corr)
-    seq, seqs = _materialize(out, corr, dmap, gmap, jmap)
+    seq, seqs = _materialize(out, corr, dmap, gmap, jmap, donor, numbering)
     # rebuild the numbered chain from the position map (see graft_chain)
     numbered = chain_from_origin_map(
         seq, seqs, base.chain_type, donor,
-        v_gene.numbered, j_gene.numbered,
+        v_gene.numbered, j_gene.numbered, scheme, numbering,
     )
     return GraftResult(
         scheme=scheme,

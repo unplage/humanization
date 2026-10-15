@@ -43,22 +43,24 @@ class MPNNResult:
     warnings: List[str] = field(default_factory=list)
 
 
-def _fixed_positions(chain: NumberedChain, is_vhh: bool) -> str:
+def _fixed_positions(chain: NumberedChain, is_vhh: bool,
+                     numbering: str = "kabat") -> str:
     """Fixed residue numbers (1-based, single chain) for MPNN."""
+    from .schemespec import get_spec
+    spec = get_spec(numbering)
     fixed = set()
     for r in chain.residues:
         if r.region in ("CDR1", "CDR2", "CDR3"):
             fixed.add(r.index + 1)
     # VH/VL interface + VHH hallmark + structural pillars stay fixed
-    from .config import INTERFACE_CORE, INTERFACE_EXTENDED, VERNIER_ZONE, VHH_HALLMARK
     ctype = chain.chain_type
     for r in chain.residues:
         num = int("".join(c for c in r.pos if c.isdigit()))
-        if num in INTERFACE_CORE[ctype] or num in INTERFACE_EXTENDED[ctype]:
+        if spec.is_interface(ctype, num):
             fixed.add(r.index + 1)
-        if num in VERNIER_ZONE[ctype]:
+        if spec.is_vernier(ctype, num):
             fixed.add(r.index + 1)
-        if is_vhh and ctype == "H" and num in VHH_HALLMARK:
+        if is_vhh and ctype == "H" and spec.is_vhh_hallmark(num):
             fixed.add(r.index + 1)
     return ",".join(str(i) for i in sorted(fixed))
 
@@ -221,6 +223,7 @@ def run_developability_optimization(
     structure_hints: Optional["StructureHints"] = None,  # From Step 3
     is_vhh: bool = False,
     top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
+    numbering: str = "kabat",
 ) -> DevelopabilityOptimizationResult:
     """Optimize high-risk developability positions using ProteinMPNN.
     
@@ -319,19 +322,20 @@ def run_developability_optimization(
         result.warnings.append("ProteinMPNN not available, using germline consensus")
     else:
         # Build fixed positions, excluding ONLY optimizable high-risk positions
+        from .schemespec import get_spec
+        spec = get_spec(numbering)
         fixed = set()
         for r in chain.residues:
             if r.region in ("CDR1", "CDR2", "CDR3"):
                 fixed.add(r.index + 1)
-        from .config import INTERFACE_CORE, INTERFACE_EXTENDED, VERNIER_ZONE, VHH_HALLMARK
         ctype = chain.chain_type
         for r in chain.residues:
             num = int("".join(c for c in r.pos if c.isdigit()))
-            if num in INTERFACE_CORE[ctype] or num in INTERFACE_EXTENDED[ctype]:
+            if spec.is_interface(ctype, num):
                 fixed.add(r.index + 1)
-            if num in VERNIER_ZONE[ctype]:
+            if spec.is_vernier(ctype, num):
                 fixed.add(r.index + 1)
-            if is_vhh and ctype == "H" and num in VHH_HALLMARK:
+            if is_vhh and ctype == "H" and spec.is_vhh_hallmark(num):
                 fixed.add(r.index + 1)
         
         # Remove ONLY optimizable positions from fixed set (not skipped ones)

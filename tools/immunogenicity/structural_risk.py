@@ -571,11 +571,18 @@ def assess_variant_structural_risk(
 
 
 def load_numbering_json(path: str) -> Dict[str, List[str]]:
-    """Load per-variant Kabat labels: ``{variant_name: [label, ...]}``.
+    """Load per-variant position labels: ``{variant_name: [label, ...]}``.
 
     Written by the pipeline as ``variants_numbering.json`` (next to
     ``variants.fasta``). Each list is aligned to that variant chain's sequence,
     so index 0 is the first residue. Enables exact FR4/backmutation matching.
+
+    Two shapes are accepted:
+      * legacy flat ``{variant: [label, ...]}`` (Kabat runs);
+      * ``{"numbering_scheme": ..., "variants": {variant: [label, ...]}}``.
+    Labels share the coordinate space of the run (Kabat or IMGT); matching is
+    exact-by-label, so back-mutation CSV positions and these labels always
+    agree within one run.
     """
     if not path or not os.path.isfile(path):
         return {}
@@ -586,6 +593,8 @@ def load_numbering_json(path: str) -> Dict[str, List[str]]:
         return {}
     if not isinstance(data, dict):
         return {}
+    if isinstance(data.get("variants"), dict):
+        data = data["variants"]
     return {k: v for k, v in data.items() if isinstance(v, list)}
 
 
@@ -933,7 +942,7 @@ def run_structural_risk_assessment(
             numbering_json = cand
     numbering = load_numbering_json(numbering_json) if numbering_json else {}
     if verbose and numbering:
-        print(f"  Loaded Kabat labels for {len(numbering)} variant(s) from "
+        print(f"  Loaded position labels for {len(numbering)} variant(s) from "
               f"{numbering_json}")
     elif verbose:
         print("  WARNING: no variants_numbering.json found; backmutation/FR4 "
@@ -1091,7 +1100,7 @@ if __name__ == "__main__":
     parser.add_argument("--backmutation-dir",
                         help="Directory containing backmutation CSVs")
     parser.add_argument("--numbering-json",
-                        help="variants_numbering.json (per-variant Kabat labels); "
+                        help="variants_numbering.json (per-variant position labels); "
                              "auto-discovered in --backmutation-dir when omitted")
     parser.add_argument("--output-dir", default=".",
                         help="Output directory for reports")

@@ -285,12 +285,14 @@ def _build_cdrs_from_numbering(numbering_list, chain_type: str):
                 last_pos = pos_num
 
         if first_pos is not None and last_pos is not None:
-            # Use last insertion letter for end position if present
+            # End label: the LAST residue (in sequence order) at last_pos.
+            # ANARCI emits some IMGT insertions out of alphabetical order
+            # (e.g. 112B before 112A), so take the final occurrence rather
+            # than the first letter encountered.
             end_label = f"{prefix}{last_pos}"
             for (pos_num, ins_flag), aa in numbering_list:
-                if pos_num == last_pos and ins_flag and ins_flag != ' ':
+                if pos_num == last_pos and aa != '-' and ins_flag and ins_flag != ' ':
                     end_label = f"{prefix}{last_pos}{ins_flag}"
-                    break
 
             start_label = f"{prefix}{first_pos}"
             cdrs[cdr_name] = (start_label, end_label)

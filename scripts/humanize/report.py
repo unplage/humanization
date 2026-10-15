@@ -11,7 +11,28 @@ from .backmut import BackMutationResult
 from .config import TIER_LABELS
 from .minimal import MatrixEntry, MinimalReversion
 from .pipeline import ChainReport, RunResult
-from .imgt_numbering import compare_to_germline_imgt, format_imgt_region_alignment
+from .imgt_numbering import (
+    compare_to_germline_imgt,
+    compare_to_germline_imgt_direct,
+    format_imgt_region_alignment,
+)
+
+
+def _numbering_of(result: RunResult) -> str:
+    cfg = getattr(result, "config", None)
+    return cfg.numbering if cfg is not None else "kabat"
+
+
+def _imgt_eval_scores(query_posmap, germline_posmap, chain_type: str,
+                      numbering: str) -> dict:
+    """IMGT-space identity for the WHO/INN/USAN section.
+
+    Kabat-numbered maps go through the conversion table; IMGT-numbered maps
+    are compared directly (converting IMGT labels would corrupt them)."""
+    if numbering == "imgt":
+        return compare_to_germline_imgt_direct(query_posmap, germline_posmap,
+                                               chain_type)
+    return compare_to_germline_imgt(query_posmap, germline_posmap, chain_type)
 
 
 def _num(v, nd=2):
@@ -44,9 +65,11 @@ def write_csv(path: str, backmut: BackMutationResult) -> None:
 
 
 def write_json(path: str, result: RunResult) -> None:
+    numbering = _numbering_of(result)
     payload = {
         "version": "0.1.0",
         "format": result.format,
+        "numbering": numbering,
         "warnings": result.warnings,
         "chains": [],
     }
@@ -62,10 +85,11 @@ def write_json(path: str, result: RunResult) -> None:
             "usan_naming_class": None,
         }
         if rep.germline.v_gene and rep.germline.v_gene.numbered and chain.numbered:
-            imgt_scores = compare_to_germline_imgt(
+            imgt_scores = _imgt_eval_scores(
                 chain.numbered.posmap(),
                 rep.germline.v_gene.numbered.posmap(),
                 chain.chain_type,
+                numbering,
             )
             imgt_data["fr_identity"] = imgt_scores.get("fr_identity")
             imgt_data["cdr_identity"] = imgt_scores.get("cdr_identity")
@@ -186,11 +210,13 @@ def write_json(path: str, result: RunResult) -> None:
 
 
 def write_markdown(path: str, result: RunResult) -> None:
+    numbering = _numbering_of(result)
     L = []
     L.append("# Antibody Humanization Report")
     L.append("")
     L.append(f"- Format: **{result.format.upper()}**")
     L.append(f"- CDR graft scheme (variants): **{result.config.cdr_scheme if result.config else 'kabat'}**")
+    L.append(f"- Numbering: **{numbering}**")
     if result.warnings:
         L.append("- Warnings:")
         for w in result.warnings:
@@ -223,8 +249,9 @@ def write_markdown(path: str, result: RunResult) -> None:
                 imgt_scores = []
                 for g, sc in rep.germline.alternatives:
                     if g.numbered:
-                        scores = compare_to_germline_imgt(
-                            chain.numbered.posmap(), g.numbered.posmap(), chain.chain_type
+                        scores = _imgt_eval_scores(
+                            chain.numbered.posmap(), g.numbered.posmap(),
+                            chain.chain_type, numbering,
                         )
                         imgt_scores.append((g, scores))
 
@@ -260,7 +287,8 @@ def write_markdown(path: str, result: RunResult) -> None:
                         L.append(f"**Region alignment vs {best_imgt.gene_id} (IMGT):**")
                         L.append("```")
                         alignment = format_imgt_region_alignment(
-                            chain.numbered.posmap(), best_imgt.numbered.posmap(), chain.chain_type
+                            chain.numbered.posmap(), best_imgt.numbered.posmap(),
+                            chain.chain_type, numbering=numbering,
                         )
                         L.append(alignment)
                         L.append("```")
@@ -347,11 +375,11 @@ def write_markdown(path: str, result: RunResult) -> None:
         # even when no reversion is needed.
         _jg = rep.germline.j_gene
         if _jg is not None and _jg.numbered is not None:
-            from .config import J_ANCHOR
+            from .schemespec import get_spec
             jmap = _jg.numbered.posmap()
             _donor_num = rep.input_chain.numbered
             dmap = _donor_num.posmap() if _donor_num is not None else {}
-            anchor = J_ANCHOR[rep.backmut.chain_type]
+            anchor = get_spec(numbering).j_anchor_for(rep.backmut.chain_type)
 
             fr4_candidates = {c.position: c for c in rep.backmut.candidates
                               if c.tier == "T_FR4"}
@@ -500,8 +528,10 @@ def write_markdown(path: str, result: RunResult) -> None:
                 L.append("")
     L.append("## Notes")
     L.append("")
-    L.append("- Position numbering: Kabat (portable engine); ANARCI (exact) "
-             "recommended on the server for verification.")
+    L.append(f"- Position numbering: {numbering.upper()}"
+             + ("" if numbering == "imgt"
+                else " (portable engine); ANARCI (exact) "
+                     "recommended on the server for verification."))
     L.append("- `KEEP_DONOR` positions (VHH hallmark / Cys) must NOT be reverted.")
     L.append("- Structure-based hints (buriedness, contacts) appear only when "
              "AF3 mode is enabled.")
@@ -574,6 +604,10 @@ def write_all(outdir: str, result: RunResult) -> Dict[str, str]:
                 numbering[v.name] = [r.pos for r in numbered.residues]
     num_path = os.path.join(outdir, "variants_numbering.json")
     with open(num_path, "w") as fh:
-        json.dump(numbering, fh, indent=2)
+        # Top-level "numbering_scheme" records the coordinate space; consumers
+        # that only understand the legacy flat {variant: [labels]} shape must
+        # skip non-list values (structural_risk.load_numbering_json does).
+        json.dump({"numbering_scheme": _numbering_of(result),
+                   "variants": numbering}, fh, indent=2)
     paths["numbering"] = num_path
     return paths

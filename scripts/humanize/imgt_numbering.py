@@ -477,20 +477,27 @@ def format_imgt_region_alignment(
     germline_posmap: Dict[str, str],
     chain_type: str,
     top_n: int = 5,
+    numbering: str = "kabat",
 ) -> str:
     """Format a detailed alignment showing IMGT region differences.
 
     Args:
-        query_posmap: Query sequence as {kabat_position: amino_acid}
-        germline_posmap: Germline sequence as {kabat_position: amino_acid}
+        query_posmap: Query sequence as {position: amino_acid}
+        germline_posmap: Germline sequence as {position: amino_acid}
         chain_type: "H" or "L"
         top_n: Not used, kept for API compatibility
+        numbering: "kabat" converts both maps via the lookup table;
+                   "imgt" treats the inputs as already IMGT-numbered.
 
     Returns:
         Formatted string showing region-by-region alignment
     """
-    query_imgt = kabat_posmap_to_imgt_posmap(query_posmap, chain_type)
-    germline_imgt = kabat_posmap_to_imgt_posmap(germline_posmap, chain_type)
+    if numbering == "imgt":
+        query_imgt = query_posmap
+        germline_imgt = germline_posmap
+    else:
+        query_imgt = kabat_posmap_to_imgt_posmap(query_posmap, chain_type)
+        germline_imgt = kabat_posmap_to_imgt_posmap(germline_posmap, chain_type)
 
     lines = []
 

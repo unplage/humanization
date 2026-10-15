@@ -42,21 +42,24 @@ def _pos_num(pos: str) -> int:
 CVI_SETS = CVI
 
 
-def cvi_homology(donor: NumberedChain, germline: GermlineGene) -> float:
+def cvi_homology(donor: NumberedChain, germline: GermlineGene,
+                 numbering: str = "kabat") -> float:
     """CVI (canonical/vernier/interface) residue identity donor vs germline.
     BI 2024: correlates with expression titer and retained affinity."""
     if germline.numbered is None:
         return 0.0
+    from .schemespec import get_spec
+    spec = get_spec(numbering)
     ctype = donor.chain_type
     d = donor.posmap()
     g = germline.numbered.posmap()
     n = same = 0
-    j_anchor = 103 if ctype == "H" else 98
+    j_anchor = spec.j_anchor_for(ctype)
     for pos, aa in d.items():
         num = _pos_num(pos)
         if num >= j_anchor:
             continue
-        if num not in CVI_SETS[ctype]:
+        if not spec.in_cvi(ctype, num):
             continue
         if donor.region_of(pos) not in ("FR1", "FR2", "FR3"):
             continue
@@ -156,13 +159,14 @@ def minimal_reversion_set(
 # Paratope (SDR-style) grafting variant (structure mode)
 # ---------------------------------------------------------------------------
 
-def paratope_positions(donor: NumberedChain, structure: StructureHints) -> List[str]:
+def paratope_positions(donor: NumberedChain, structure: StructureHints,
+                       scheme: str = "kabat", numbering: str = "kabat") -> List[str]:
     """CDR-loop residues that contact the antigen in the complex model."""
     from .graft import is_cdr_loop_position
     out = []
     for r in donor.residues:
         num = int("".join(c for c in r.pos if c.isdigit()))
-        if is_cdr_loop_position(donor.chain_type, num) \
+        if is_cdr_loop_position(donor.chain_type, num, scheme, numbering) \
                 and structure.antigen_contact("", r.pos):
             out.append(r.pos)
     return out
@@ -176,17 +180,19 @@ def build_paratope_variant(
     backmut: BackMutationResult,
     structure: StructureHints,
     is_vhh: bool = False,
+    numbering: str = "kabat",
 ) -> Optional[GraftResult]:
     """Precision graft: human framework + structural pillars (T1+T2) +
     only the antigen-contacting CDR residues (paratope). Requires the
     antigen complex structure; returns None otherwise."""
     if not (structure.data.get("antigen_contact") or {}):
         return None
-    sdr = paratope_positions(donor, structure)
+    sdr = paratope_positions(donor, structure, scheme, numbering)
     if not sdr:
         return None
 
-    base = graft_chain(donor, v_gene, j_gene, scheme, is_vhh=is_vhh)
+    base = graft_chain(donor, v_gene, j_gene, scheme, is_vhh=is_vhh,
+                       numbering=numbering)
     # revert T1+T2 pillars
     pillars = backmut.revert_positions(("T1", "T2"))
     # remove CDR residues that are NOT in the paratope (humanize them)
@@ -194,11 +200,12 @@ def build_paratope_variant(
     from .graft import is_cdr_loop_position
     for pos in base.donor_positions:
         num = int("".join(c for c in pos if c.isdigit()))
-        if is_cdr_loop_position(donor.chain_type, num) and pos not in sdr:
+        if is_cdr_loop_position(donor.chain_type, num, scheme, numbering) \
+                and pos not in sdr:
             force_human.append(pos)
     result = graft_variant(
         donor, v_gene, j_gene, scheme, pillars,
-        is_vhh=is_vhh, force_human=force_human,
+        is_vhh=is_vhh, force_human=force_human, numbering=numbering,
     )
     return result
 
@@ -222,6 +229,7 @@ def matrix_alternatives(
     scheme: str,
     is_vhh: bool = False,
     n: int = 3,
+    numbering: str = "kabat",
 ) -> List[MatrixEntry]:
     """Design V2-class variants on the top-N alternative germlines.
     Each alternative gets its own back-mutation set (analyzed on its own
@@ -230,13 +238,14 @@ def matrix_alternatives(
 
     entries: List[MatrixEntry] = []
     for g, _s in alternatives[:n]:
-        bm = analyze_backmutations(donor, g, is_vhh=is_vhh)
+        bm = analyze_backmutations(donor, g, is_vhh=is_vhh, numbering=numbering)
         positions = bm.revert_positions(("T1", "T2"))
-        graft = graft_variant(donor, g, j_gene, scheme, positions, is_vhh=is_vhh)
+        graft = graft_variant(donor, g, j_gene, scheme, positions,
+                              is_vhh=is_vhh, numbering=numbering)
         entries.append(MatrixEntry(
             germline=g,
             backmut=bm,
-            cvi=cvi_homology(donor, g),
+            cvi=cvi_homology(donor, g, numbering),
             graft_v2=graft,
         ))
     return entries

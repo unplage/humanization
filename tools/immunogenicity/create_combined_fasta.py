@@ -95,6 +95,9 @@ def build_combo_numbering(
     """Map per-chain pipeline labels onto per-combo, chain-aware keys."""
     with open(numbering_source) as fh:
         base = json.load(fh)
+    # v2 shape carries "numbering_scheme"/"variants"; legacy is flat.
+    if isinstance(base, dict) and isinstance(base.get("variants"), dict):
+        base = base["variants"]
 
     combo_num: Dict[str, List[str]] = {}
     for combo, h_var, l_var in pairs:

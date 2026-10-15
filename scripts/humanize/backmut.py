@@ -20,18 +20,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .config import (
-    CANONICAL,
     CHEMICAL_EXPOSURE_WEIGHT,
-    EMPIRICAL_NO_EFFECT,
     EMPIRICAL_NO_EFFECT_NOTE,
     FR4_STRUCTURAL_WEIGHTS,
     FR4_REVERSION_THRESHOLD,
-    INTERFACE_CORE,
-    INTERFACE_EXTENDED,
     STRUCTURAL_CONTACT_WEIGHTS,
     STRUCTURAL_EXPOSURE_FACTOR,
-    VERNIER_ZONE,
-    VHH_HALLMARK,
     WEIGHTS,
 )
 from .learning import effect_thresholds
@@ -65,6 +59,40 @@ def _volume_strain(donor_aa: str, human_aa: str) -> Optional[float]:
     if vd is None or vh is None:
         return None
     return abs(vh - vd)
+
+
+# Side-chain formal charge and approximate hydrogen-bond capability, used to
+# catch polar packing changes that a volume-only strain misses (e.g. S->A
+# losing a hydroxyl while staying well within 40 A^3).
+_AA_CHARGE = {"D": -1, "E": -1, "K": 1, "R": 1}
+_AA_HBD = {"S", "T", "Y", "N", "Q", "H", "K", "R", "W"}  # side-chain donors (approx.)
+_AA_HBA = {"D", "E", "N", "Q", "H", "S", "T", "Y"}       # side-chain acceptors (approx.)
+
+
+def _is_disruptive_swap(donor_aa: str, human_aa: str) -> bool:
+    """True when a donor->human swap is NOT near-isosteric for a buried
+    position: large side-chain volume change (>= VOLUME_STRAIN_THRESHOLD),
+    formal charge change, side-chain H-bond donor/acceptor capability change,
+    or proline involvement (backbone phi constraint).
+
+    A donor side chain that H-bonds the CDR is already protected by the
+    functional-contact rule (any bond implies a heavy-atom contact), so the
+    polar checks here cover the remaining intra-FR / solvent cases.
+    """
+    strain = _volume_strain(donor_aa, human_aa)
+    if strain is None:
+        return True  # unknown residue: stay conservative (keep the donor)
+    if strain >= VOLUME_STRAIN_THRESHOLD:
+        return True
+    if _AA_CHARGE.get(donor_aa, 0) != _AA_CHARGE.get(human_aa, 0):
+        return True
+    if (donor_aa in _AA_HBD) != (human_aa in _AA_HBD):
+        return True
+    if (donor_aa in _AA_HBA) != (human_aa in _AA_HBA):
+        return True
+    if donor_aa == "P" or human_aa == "P":
+        return True
+    return False
 
 
 def _pos_num(pos: str) -> int:
@@ -204,6 +232,7 @@ class BackMutationResult:
     v_gene: GermlineGene
     germline_conservation: Dict[str, float] = field(default_factory=dict)
     fr_indels: List = field(default_factory=list)  # List[FRIndel]
+    warnings: List[str] = field(default_factory=list)
 
     def by_tier(self, tier: str) -> List[BackMutationCandidate]:
         return [c for c in self.candidates if c.tier == tier]
@@ -296,6 +325,7 @@ def _evaluate_fr4_structural(
     dmap: dict,
     gmap: dict,
     structure: StructureHints,
+    numbering: str = "kabat",
 ) -> Optional[BackMutationCandidate]:
     """Evaluate if an FR4 position needs reversion to donor based on structure.
 
@@ -335,7 +365,8 @@ def _evaluate_fr4_structural(
         scores.append(FR4_STRUCTURAL_WEIGHTS["buried"])
 
     # 4. VH/VL interface
-    if num in INTERFACE_CORE.get(chain_type, set()):
+    from .schemespec import get_spec
+    if get_spec(numbering).is_interface_core(chain_type, num):
         features.append("interface_core")
         scores.append(FR4_STRUCTURAL_WEIGHTS["interface_core"])
 
@@ -391,6 +422,7 @@ def analyze_backmutations(
     indel_overrides: Optional[Dict[str, str]] = None,
     j_gene: Optional[GermlineGene] = None,
     immunogenicity: Optional[Dict[str, float]] = None,
+    numbering: str = "kabat",
 ) -> BackMutationResult:
     """Score all framework positions where donor != chosen germline.
 
@@ -401,10 +433,21 @@ def analyze_backmutations(
     indel_overrides: dict mapping FR region to user-selected insertion position
                      (e.g. {"FR1": "H6A"})
     j_gene:          human J gene, enabling FR4 structural reversion analysis.
+    numbering:       coordinate space of donor/germline ("kabat" | "imgt").
     """
     chain_type = donor.chain_type
     if v_gene.numbered is None:
         raise ValueError(f"[{chain_type}] germline gene without numbering")
+    from .schemespec import get_spec
+    spec = get_spec(numbering)
+    warnings: List[str] = []
+    if calibration and numbering != "kabat":
+        # Calibration files record Kabat position keys (learning.py); applying
+        # them to IMGT labels would hit unrelated residues with the same name.
+        warnings.append(
+            "calibration is keyed by Kabat positions and was ignored in IMGT "
+            "numbering mode")
+        calibration = None
     dmap = donor.posmap()
     gmap = v_gene.numbered.posmap()
     structure = structure or StructureHints()
@@ -415,13 +458,13 @@ def analyze_backmutations(
         detect_fr_indels,
         update_indel_selection,
     )
-    fr_indels = detect_fr_indels(donor, v_gene)
+    fr_indels = detect_fr_indels(donor, v_gene, numbering)
     if indel_overrides:
         for i, indel in enumerate(fr_indels):
             if indel.fr_region in indel_overrides:
                 fr_indels[i] = update_indel_selection(
                     indel, indel_overrides[indel.fr_region])
-    corr = build_fr_correspondence(donor, v_gene, fr_indels)
+    corr = build_fr_correspondence(donor, v_gene, fr_indels, numbering)
     insertion_set = set(corr.insertion_positions)
 
     conservation: Dict[str, float] = {}
@@ -458,18 +501,19 @@ def analyze_backmutations(
             # (scored as an indel candidate, not a substitution)
             continue
         # Structural feature membership and the FR/J boundaries are properties
-        # of the DONOR Kabat numbering (the donor is the antibody being
-        # humanized); the germline label can differ around insertions.
+        # of the DONOR numbering (the donor is the antibody being humanized);
+        # the germline label can differ around insertions.
         num = _pos_num(dpos)
-        if num >= J_ANCHOR[chain_type]:
+        if num >= spec.j_anchor_for(chain_type):
             continue  # FR4 is handled separately (human J region)
         donor_res = donor.residue(dpos)
         if donor_res is None or donor_res.region not in FR_REGIONS:
             continue
-        # H93/H94 carry the first two CDR3-loop residues (strict-Kabat FR3
-        # labels, IMGT CDR3 105-106). They are grafted from the donor as part
-        # of the loop and must never become back-mutation candidates.
-        if chain_type == "H" and num in (93, 94):
+        # The CDR3 stem (Kabat H93/H94, IMGT 105/106) carries the first two
+        # CDR3-loop residues mislabelled FR3 in strict Kabat. They are grafted
+        # from the donor as part of the loop and must never become
+        # back-mutation candidates.
+        if num in spec.cdr3_stem[chain_type]:
             continue
         donor_aa = dmap.get(dpos, "").upper()
         human_aa = gmap.get(gpos, "").upper()
@@ -480,15 +524,15 @@ def analyze_backmutations(
         conservation[pos] = conservation_val
 
         features: List[str] = []
-        if num in INTERFACE_CORE[chain_type]:
+        if spec.is_interface_core(chain_type, num):
             features.append("interface_core")
-        if num in INTERFACE_EXTENDED[chain_type]:
+        if num in spec.interface_extended.get(chain_type, frozenset()):
             features.append("interface_extended")
-        if num in VERNIER_ZONE[chain_type]:
+        if spec.is_vernier(chain_type, num):
             features.append("vernier")
-        if num in CANONICAL[chain_type]:
+        if spec.is_canonical(chain_type, num):
             features.append("canonical")
-        if is_vhh and chain_type == "H" and num in VHH_HALLMARK:
+        if is_vhh and chain_type == "H" and spec.is_vhh_hallmark(num):
             features.append("vhh_hallmark")
         if donor_aa == "C":
             features.append("disulfide_cys")
@@ -579,15 +623,19 @@ def analyze_backmutations(
             * CHEMICAL_EXPOSURE_WEIGHT[_exposure_class(rel_sasa, buried)]
 
         # ---- tier ----
-        # P0: Use structure-aware tier assignment
-        strain = _volume_strain(donor_aa, human_aa)
+        # Structure-aware assignment. When the local confidence is low the
+        # structure-derived signals (contacts, exposure) are neutralized for
+        # the tier decision, so the candidate falls back to the portable
+        # (no-structure) ladder: low-pLDDT structure must neither demote
+        # (gated below) nor promote. Volume/polarity strain is sequence-only
+        # and always applies.
+        strain = _is_disruptive_swap(donor_aa, human_aa)
+        plddt_ok = (plddt_val is None or plddt_val >= 50)
         tier = _assign_tier_with_structure(
-            features, buried, is_vhh, donor_aa, pos,
-            side_chain_contact=sc_contact,
-            cdr_contact=cdr_contact,
-            antigen_contact=ag_contact,
-            volume_strain=strain,
-            dev_risk_score=None  # Will be calculated later
+            features, buried if plddt_ok else None, is_vhh, donor_aa, pos,
+            side_chain_contact=sc_contact if plddt_ok else None,
+            cdr_contact=cdr_contact if plddt_ok else None,
+            antigen_contact=ag_contact if plddt_ok else None,
         )
 
         # ---- Step 3 structure-driven tier adjustment ----
@@ -595,35 +643,39 @@ def analyze_backmutations(
         #
         # (A) "Must-revert" pillars (T1) require *functional* evidence: a
         #     SIDE-CHAIN contact to a CDR/antigen, or a substitution large
-        #     enough to strain buried packing. A buried Vernier/canonical/
-        #     interface-core residue whose only CDR proximity is main-chain
-        #     mediated, and whose donor->human swap is near-isosteric, is a
-        #     literature heuristic rather than a structural necessity: it is
-        #     downgraded T1 -> T2 (still recommended, no longer mandatory).
+        #     enough to strain buried packing (volume, charge, H-bond
+        #     capability - see _is_disruptive_swap). A buried Vernier/
+        #     canonical/interface-core residue whose only CDR proximity is
+        #     main-chain mediated, and whose donor->human swap is
+        #     near-isosteric, is a literature heuristic rather than a
+        #     structural necessity: it is downgraded T1 -> T2 (still
+        #     recommended, no longer mandatory).
         #
         # (B) An exposed, non-contacting framework residue has no structural
         #     reason to stay donor and carries real immunogenicity risk: it
-        #     goes to T3.
+        #     goes to T3. Interface-core positions are exempt (the contact
+        #     detector cannot see the VH/VL partner chain).
         #
+        # Functional side-chain/antigen contacts and interface-core
+        # positions are NEVER demoted here for developability: affinity/
+        # packing evidence outweighs a donor liability (the liability still
+        # shows in the chemical term and the dev-risk rationale).
         # Backbone-only CDR "contacts" are pervasive in the Ig beta-sandwich
         # and are unchanged by a side-chain swap, so they never block (A).
-        # Interface-core positions are still protected from (B) because the
-        # contact detector cannot see the VH/VL partner chain.
         structural_demoted = False
         soft_demoted = False
-        
-        # P0: Calculate developability risk score
-        # Based on sequence motifs that affect developability
+
+        # P0: Developability risk score (sequence motifs; reported on the
+        # candidate - it no longer drives tier changes on its own, see above)
         dev_risk_score = _calculate_dev_risk_score(donor_aa, pos, donor, chain_type)
-        
+
         if structure.data and tier in ("T1", "T2"):
             sc_partners = structure.cdr_partners_sc(pos)
             functional_contact = (
                 sc_contact is True or ag_contact is True
                 or bool(sc_partners)
             )
-            strained = strain is not None and strain >= VOLUME_STRAIN_THRESHOLD
-            plddt_ok = (plddt_val is None or plddt_val >= 50)
+            strained = strain
             if plddt_ok and not functional_contact:
                 if buried is False and "interface_core" not in features:
                     # exposed, no functional contact: no reason to stay donor
@@ -632,19 +684,11 @@ def analyze_backmutations(
                     structural_demoted = True
                 elif tier == "T1" and not strained:
                     # buried core/interface pillar whose side chain does not
-                    # touch the paratope and whose human swap is near-isosteric:
-                    # recommended, but not structurally mandatory
+                    # touch the paratope and whose human swap is
+                    # non-disruptive: recommended, but not structurally
+                    # mandatory
                     tier = "T2"
                     soft_demoted = True
-            
-            # P0: Developability risk filtering for exposed positions
-            # Exposed positions with high developability risk should be demoted
-            if buried is False and dev_risk_score > 0.7 and tier in ("T1", "T2"):
-                tier = "T3"
-                structural_demoted = True
-                rationale_item = f"dev_risk: high developability risk ({dev_risk_score:.2f})"
-                # NOTE: rationale_item is currently unused; the demotion is
-                # described via _rationale_with_structure instead
 
         composite = round(100 * (
             WEIGHTS["blend"][0] * structural
@@ -666,7 +710,8 @@ def analyze_backmutations(
         # human residue (docs/backtest_report.md) are demoted to T3 UNLESS
         # structure data supports burial or CDR contact (AF3 mode overrides).
         demoted_note = ""
-        if (tier in ("T1", "T2") and num in EMPIRICAL_NO_EFFECT[chain_type]
+        if (tier in ("T1", "T2")
+                and spec.is_empirical_no_effect(chain_type, num)
                 and buried is not True and cdr_contact is not True):
             tier = "T3"
             composite = min(composite, 40.0)
@@ -711,12 +756,14 @@ def analyze_backmutations(
                                exposure, conservation_val, donor_aa, human_aa,
                                side_chain_contact=sc_contact, dev_risk_score=dev_risk_score)
         if structural_demoted:
-            rationale.append("structural: exposed and no CDR/antigen contact; "
+            rationale.append("structural: exposed without functional "
+                            "side-chain/antigen contact; "
                             "demoted from T1/T2 to T3")
         if soft_demoted:
             rationale.append(
                 "structural: buried with no side-chain CDR/antigen contact "
-                "and near-isosteric substitution; literature pillar downgraded "
+                "and non-disruptive substitution (volume/charge/H-bond); "
+                "literature pillar downgraded "
                 "from T1 (must revert) to T2 (recommended)")
         if empirical_note:
             rationale.append(empirical_note)
@@ -755,14 +802,15 @@ def analyze_backmutations(
     if j_gene is not None and j_gene.numbered is not None and structure.data:
         jmap = j_gene.numbered.posmap()
         for jpos in sorted(jmap, key=lambda p: (_pos_num(p), p)):
-            if _pos_num(jpos) < J_ANCHOR[chain_type]:
+            if _pos_num(jpos) < spec.j_anchor_for(chain_type):
                 continue
             donor_aa = dmap.get(jpos, "").upper()
             human_aa = jmap.get(jpos, "").upper()
             if donor_aa == human_aa or donor_aa in ("", "X"):
                 continue
             fr4_candidate = _evaluate_fr4_structural(
-                jpos, _pos_num(jpos), chain_type, dmap, jmap, structure)
+                jpos, _pos_num(jpos), chain_type, dmap, jmap, structure,
+                numbering)
             if fr4_candidate:
                 candidates.append(fr4_candidate)
 
@@ -849,6 +897,7 @@ def analyze_backmutations(
         v_gene=v_gene,
         germline_conservation=conservation,
         fr_indels=fr_indels,
+        warnings=warnings,
     )
 
 
@@ -893,11 +942,9 @@ def _annotate_with_functional_conservation(
 
 def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
     """Assign tier based on structural features (pre-structure adjustment).
-    
-    P0 improvement: This is the initial tier assignment.
-    Step 3 structure adjustment will further refine based on:
-    - side_chain_contact (P0: higher priority than backbone contact)
-    - dev_risk_score (P0: developability risk filtering)
+
+    Used for FR-indel candidates; substitution candidates go through
+    _assign_tier_with_structure plus the Step-3 adjustment block.
     """
     if "vhh_hallmark" in features:
         return "KEEP_DONOR"
@@ -924,17 +971,24 @@ def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
 
 def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
                                  side_chain_contact=None, cdr_contact=None,
-                                 antigen_contact=None, volume_strain=None,
-                                 dev_risk_score=None) -> str:
-    """P0 improvement: Assign tier with structure and developability context.
-    
+                                 antigen_contact=None) -> str:
+    """Assign tier with structure context.
+
     Priority order:
     1. KEEP_DONOR (VHH hallmark, disulfide)
     2. T1: side_chain_contact + buried (highest structural priority)
     3. T1: interface_core + buried OR vernier + buried
     4. T2: side_chain_contact + exposed OR backbone_contact + buried
     5. T2: other structural features
-    6. T3: exposed + high dev_risk OR no structural support
+    6. T3: no structural support
+
+    Callers pass ``buried``/contacts as None when the structure is not
+    trustworthy (low pLDDT) or absent, which reduces the result to the
+    portable no-structure ladder - structure evidence must not promote
+    without confidence. Developability is deliberately not tier-deciding
+    here: high dev-risk never outranks a functional contact or an
+    interface-core position (the Step-3 block and the chemical term handle
+    the rest).
     """
     if "vhh_hallmark" in features:
         return "KEEP_DONOR"
@@ -954,16 +1008,10 @@ def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
         if buried is True:
             return "T2"  # Backbone contact + buried = T2
         elif buried is False:
-            # Exposed + backbone contact: check dev_risk first
-            if dev_risk_score is not None and dev_risk_score > 0.7:
-                return "T3"  # High dev_risk overrides backbone contact
+            # Exposed + backbone contact: the Step-3 block demotes it to T3
+            # (no functional contact) unless a partner hint upgrades it
             return "T2"
-    
-    # P0: Developability risk filtering (check early for exposed positions)
-    # Exposed positions with high dev risk should be demoted to T3
-    if buried is False and dev_risk_score is not None and dev_risk_score > 0.7:
-        return "T3"
-    
+
     # Interface core (VH/VL packing)
     if "interface_core" in features:
         if buried is False:

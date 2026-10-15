@@ -6,6 +6,11 @@ Evaluate the humanization degree of antibody sequences by comparing against huma
 
 - **Dual Numbering**: Both Kabat and IMGT numbering schemes
 - **Germline Comparison**: Compare against all human V genes
+- **Druggability Tie-break**: When several germlines give identical (FR, CDR)
+  identity, the tool deterministically prefers established druggable frameworks
+  (VH: IGHV1-69 > IGHV3-23 > IGHV1-46; VK: IGKV1-39 > IGKV3-20 > IGKV4-1),
+  then germline usage frequency, then gene id (see `DRUGGABLE_*_PRIORITY` in
+  `evaluate_humanness.py`)
 - **FR/CDR Identity**: Calculate framework and CDR region identities
 - **Humanization Classification**: Academic estimate based on sequence identity
 - **Batch Processing**: Analyze multiple sequences from FASTA files

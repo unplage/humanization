@@ -50,22 +50,23 @@ def _pos_base(pos: str) -> str:
     return m.group(1) if m else pos
 
 
-def _region_of_num(chain_type: str, num: int) -> Optional[str]:
-    """Get FR region name from position number, or None if in CDR/J."""
-    for region, (lo, hi) in FR_REGIONS[chain_type].items():
-        if lo <= num <= hi:
-            return region
-    return None
+def _region_of_num(chain_type: str, num: int, numbering: str = "kabat") -> Optional[str]:
+    """Get FR region name from position number, or None if in CDR/J.
+
+    The FR boundaries come from the numbering-scheme spec (Kabat ranges for
+    kabat, IMGT ranges for imgt)."""
+    from .schemespec import get_spec
+    return get_spec(numbering).in_fr_region(chain_type, num)
 
 
 def _group_positions_by_region(
-    posmap: Dict[str, str], chain_type: str
+    posmap: Dict[str, str], chain_type: str, numbering: str = "kabat"
 ) -> Dict[str, Dict[str, str]]:
     """Group a posmap by FR region. Returns {region: {pos: aa}}."""
     regions: Dict[str, Dict[str, str]] = {}
     for pos, aa in posmap.items():
         num = _pos_num(pos)
-        region = _region_of_num(chain_type, num)
+        region = _region_of_num(chain_type, num, numbering)
         if region:
             regions.setdefault(region, {})[pos] = aa
     return regions
@@ -113,7 +114,7 @@ class FRIndel:
 
 
 def detect_fr_indels(
-    donor: NumberedChain, v_gene: GermlineGene
+    donor: NumberedChain, v_gene: GermlineGene, numbering: str = "kabat"
 ) -> List[FRIndel]:
     """Detect FR insertions and deletions between donor and germline.
 
@@ -133,8 +134,8 @@ def detect_fr_indels(
     dmap = donor.posmap()
     gmap = v_gene.numbered.posmap()
 
-    d_regions = _group_positions_by_region(dmap, chain_type)
-    g_regions = _group_positions_by_region(gmap, chain_type)
+    d_regions = _group_positions_by_region(dmap, chain_type, numbering)
+    g_regions = _group_positions_by_region(gmap, chain_type, numbering)
 
     indels: List[FRIndel] = []
 
@@ -523,6 +524,7 @@ def build_fr_correspondence(
     donor: NumberedChain,
     v_gene: GermlineGene,
     indels: Optional[List[FRIndel]] = None,
+    numbering: str = "kabat",
 ) -> FRCorrespondence:
     """Build the donor<->germline framework position correspondence.
 
@@ -535,10 +537,10 @@ def build_fr_correspondence(
 
     chain_type = donor.chain_type
     if indels is None:
-        indels = detect_fr_indels(donor, v_gene)
+        indels = detect_fr_indels(donor, v_gene, numbering)
 
-    d_regions = _group_positions_by_region(donor.posmap(), chain_type)
-    g_regions = _group_positions_by_region(v_gene.numbered.posmap(), chain_type)
+    d_regions = _group_positions_by_region(donor.posmap(), chain_type, numbering)
+    g_regions = _group_positions_by_region(v_gene.numbered.posmap(), chain_type, numbering)
 
     for region in ("FR1", "FR2", "FR3"):
         d_set = d_regions.get(region, {})

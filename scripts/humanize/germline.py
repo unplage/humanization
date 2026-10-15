@@ -105,11 +105,24 @@ def _classify_gene(gene_id: str, chain_type: str, kind: str, seq: str) -> Germli
     return g
 
 
-def load_germline_db(db_dir: str) -> GermlineDB:
+def load_germline_db(db_dir: str, numbering: str = "kabat") -> GermlineDB:
     """Load the germline dataset. Priority:
       1. bundled Kabat-space JSON (data/germline/human_germline_kabat.json) - preferred for amino acid sequences
       2. NCBI IgBLAST FASTA files in db_dir (human_gl_*.fasta) - contains nucleotide sequences
+    numbering="imgt" loads the bundled IMGT-space maps instead
+    (data/germline/abnumber_human_imgt.json) and requires that file.
     Returns an empty-ish GermlineDB on total failure (caller falls back)."""
+    if numbering == "imgt":
+        bundled_imgt = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                    "..", "data", "germline",
+                                    "abnumber_human_imgt.json")
+        if os.path.exists(bundled_imgt):
+            return _load_imgt_json(bundled_imgt)
+        raise FileNotFoundError(
+            f"IMGT numbering requires bundled IMGT germline maps at "
+            f"{bundled_imgt}")
+    if numbering != "kabat":
+        raise ValueError(f"unknown numbering: {numbering!r}")
     # bundled JSON source (preferred - contains amino acid sequences)
     bundled = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "data", "germline", "human_germline_kabat.json")
     if os.path.exists(bundled):
@@ -241,16 +254,73 @@ def _load_bundled_json(path: str) -> GermlineDB:
     return db
 
 
-def _chain_from_map(seq: str, pmap: dict, ctype: str) -> Optional[NumberedChain]:
+def _imgt_seq_and_map(pmap: dict) -> Tuple[str, dict]:
+    """Sequence-order (pos -> aa) view of an IMGT map: label sort with gap
+    placeholders ('-', '.') dropped."""
+    items = sorted(pmap.items(),
+                   key=lambda kv: (kv[0][0],
+                                   int("".join(c for c in kv[0] if c.isdigit())),
+                                   kv[0]))
+    clean = [(p, a) for p, a in items if a not in ".-"]
+    return "".join(a for _, a in clean), dict(clean)
+
+
+def _load_imgt_json(path: str) -> GermlineDB:
+    """Load the bundled IMGT-space germline maps as ready-numbered chains.
+
+    The maps are already IMGT-numbered (no external engine needed); regions
+    and CDR segments are derived with IMGT cutoffs. Memory-cached by file
+    content (no disk cache: the source file IS the numbering)."""
+    import hashlib
+    import json
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    key = hashlib.sha1(raw).hexdigest()[:16] + "_imgt"
+    if key in _DB_MEMORY_CACHE:
+        return _DB_MEMORY_CACHE[key]
+    blob = json.loads(raw)
+
+    genes: List[GermlineGene] = []
+    for kind in ("V", "J"):
+        for gene, pmap in blob[kind].items():
+            ctype = "H" if gene.startswith(("IGHV", "IGHJ")) else "L"
+            seq, clean = _imgt_seq_and_map(pmap)
+            g = GermlineGene(gene, ctype, kind, seq)
+            g.numbered = _chain_from_map(seq, clean, ctype, numbering="imgt")
+            genes.append(g)
+    db = GermlineDB(
+        v_genes=[g for g in genes if g.kind == "V"],
+        j_genes=[g for g in genes if g.kind == "J"],
+        source_dir="bundled-imgt:" + path,
+    )
+    _DB_MEMORY_CACHE[key] = db
+    return db
+
+
+def _chain_from_map(seq: str, pmap: dict, ctype: str,
+                    numbering: str = "kabat") -> Optional[NumberedChain]:
     """Reconstruct a NumberedChain from an explicit {pos: aa} map."""
     from .numbering import NumberedChain, NumberedResidue, _cdr_segments
+    if numbering == "imgt":
+        region_fn = _imgt_region_of_pos
+        cdr_scheme = "imgt"
+    else:
+        region_fn = _region_of_pos
+        cdr_scheme = "kabat"
     res = []
     for i, (pos, aa) in enumerate(pmap.items()):
-        region = _region_of_pos(pos)
+        region = region_fn(pos)
         res.append(NumberedResidue(pos, aa, region, i))
     chain = NumberedChain(ctype, seq, res)
-    chain.cdrs = _cdr_segments(chain)
+    chain.cdrs = _cdr_segments(chain, cdr_scheme, numbering)
     return chain
+
+
+def _imgt_region_of_pos(pos: str) -> str:
+    """IMGT region from an IMGT position label (FR1 1-26, CDR1 27-38, ...)."""
+    from .anarci_adapter import _get_imgt_region
+    num = int("".join(c for c in pos if c.isdigit()))
+    return _get_imgt_region(num)
 
 
 def _region_of_pos(pos: str) -> str:
@@ -427,12 +497,15 @@ def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, f
     }
 
 
-def score_j_match(query: NumberedChain, jgene: GermlineGene) -> Tuple[float, int]:
+def score_j_match(query: NumberedChain, jgene: GermlineGene,
+                  numbering: str = "kabat") -> Tuple[float, int]:
     """Identity over the J region (FR4), which must be grafted from the
-    human J gene. Position 103 (H) / 98 (L) onward."""
+    human J gene. Anchor: position 103 (H) / 98 (L) for Kabat numbering,
+    118 for IMGT."""
     if jgene.numbered is None:
         return 0.0, 0
-    anchor_num = 103 if query.chain_type == "H" else 98
+    from .schemespec import get_spec
+    anchor_num = get_spec(numbering).j_anchor_for(query.chain_type)
     q = query.posmap()
     g = jgene.numbered.posmap()
     n = 0
@@ -464,6 +537,7 @@ def choose_germlines(
     db: GermlineDB,
     n_alternatives: int = 5,
     j_pick: str = "identity",
+    numbering: str = "kabat",
 ) -> GermlineChoice:
     """Select the best human germline V and J genes for a query chain.
 
@@ -500,7 +574,7 @@ def choose_germlines(
     j_genes = db.j_for(ctype)
     j_scored = []
     for jg in j_genes:
-        idn, n = score_j_match(query, jg)
+        idn, n = score_j_match(query, jg, numbering)
         freq = get_j_frequency(jg.gene_id)
         j_scored.append((jg, idn, n, freq))
     # Sort by: identity desc, then frequency desc (tiebreaker for similar identity)
