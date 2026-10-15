@@ -40,6 +40,7 @@ def assemble_variants(
     is_vhh: bool = False,
     extra_t3_max: int = 8,
     fr_indels: Optional[list] = None,
+    numbering: str = "kabat",
 ) -> List[Variant]:
     chain_type = donor.chain_type
     if fr_indels is None:
@@ -58,7 +59,7 @@ def assemble_variants(
         positions = _dedupe(positions)
         g = graft_variant(donor, v_gene, j_gene, scheme, positions,
                           is_vhh=is_vhh, exclude_indel=exclude_indel,
-                          fr_indels=fr_indels)
+                          fr_indels=fr_indels, numbering=numbering)
         return Variant(name=name, description=desc, graft=g, backmutations=positions)
 
     # FR insertion positions (donor-only, not in germline)
@@ -162,6 +163,7 @@ def structure_guided_panel(
     structure=None,
     is_vhh: bool = False,
     n_extra: int = 3,
+    numbering: str = "kabat",
 ) -> List[Variant]:
     """Graded multi-objective panel on top of V2.
 
@@ -233,7 +235,7 @@ def structure_guided_panel(
         positions = _dedupe(base + ordered[:i])
         graft = graft_variant(
             donor, v_gene, j_gene, scheme, positions,
-            is_vhh=is_vhh, fr_indels=backmut.fr_indels,
+            is_vhh=is_vhh, fr_indels=backmut.fr_indels, numbering=numbering,
         )
         panel.append(Variant(
             name=f"{chain_type}_V_opt{i}",

@@ -30,6 +30,50 @@ from scripts.humanize.imgt_numbering import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Tie-breaking for germline selection
+# ---------------------------------------------------------------------------
+# When several germlines give identical (FR, CDR) identity, the previous sort
+# fell through to the germline database file order - effectively an arbitrary
+# choice. Prefer well-established, druggable frameworks instead. Cascade:
+#   1. curated druggable priority (lists below, in the listed order);
+#   2. germline usage frequency from scripts/humanize/germline_frequency
+#      (Adimab/OAS-style therapeutic usage data - a broader druggability
+#      signal that also covers genes outside the curated lists);
+#   3. gene id (deterministic; never order-dependent).
+# Extend the lists as new clinical/developability evidence appears.
+DRUGGABLE_VH_PRIORITY = ("IGHV1-69", "IGHV3-23", "IGHV1-46")
+DRUGGABLE_VK_PRIORITY = ("IGKV1-39", "IGKV3-20", "IGKV4-1")
+
+
+def _germline_tiebreak_key(chain_type: str, gene_id: str) -> tuple:
+    """Sort key appended AFTER (FR identity, CDR identity); smaller wins.
+
+    Only ever consulted for exact identity ties, so the primary ranking is
+    unchanged.
+    """
+    from scripts.humanize.germline_frequency import get_frequency
+    family = gene_id.split("*")[0]
+    priority = DRUGGABLE_VH_PRIORITY if chain_type == "H" else DRUGGABLE_VK_PRIORITY
+    try:
+        rank = priority.index(family)
+    except ValueError:
+        rank = len(priority)
+    freq = get_frequency(chain_type, gene_id) or 0.0
+    return (rank, -freq, gene_id)
+
+
+def _sort_scored(chain_type: str, scored: list) -> list:
+    """Sort (gene, scores) pairs by FR identity, then CDR identity, then the
+    druggability tie-break (see _germline_tiebreak_key)."""
+    scored.sort(key=lambda t: (
+        -t[1]["fr_identity"],
+        -t[1]["cdr_identity"],
+        *_germline_tiebreak_key(chain_type, t[0].gene_id),
+    ))
+    return scored
+
+
 def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
     """Evaluate a single chain against human germline."""
     from scripts.humanize.numbering import number_heavy, number_light
@@ -55,8 +99,10 @@ def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
         scores = compare_to_germline(numbered, gene)
         scored.append((gene, scores))
 
-    # Sort by FR identity (primary) and CDR identity (secondary)
-    scored.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"]))
+    # Sort by FR identity (primary), CDR identity (secondary), then the
+    # druggability tie-break for exact ties (germline selection must be
+    # deterministic and prefer developable frameworks)
+    _sort_scored(chain_type, scored)
 
     return scored, numbered
 
@@ -125,8 +171,9 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
             scores = compare_imgt_posmaps_direct(query_imgt, gene._imgt_posmap)
             scored.append((gene, scores))
 
-    # Sort by FR identity (primary) and CDR identity (secondary)
-    scored.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"]))
+    # Sort by FR identity (primary), CDR identity (secondary), then the
+    # druggability tie-break for exact ties (same cascade as the Kabat path)
+    _sort_scored(chain_type, scored)
 
     return scored, numbered
 

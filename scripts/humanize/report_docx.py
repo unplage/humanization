@@ -127,8 +127,10 @@ def build_docx(result: RunResult, out_path: str) -> str:
          align=WD_ALIGN_PARAGRAPH.CENTER, space_after=24)
     para(f"Report generated: {date.today().isoformat()}", size=12,
          align=WD_ALIGN_PARAGRAPH.CENTER, space_after=4)
+    _num_space = (cfg.numbering if cfg else "kabat")
     para(f"Format: {str(result.format).upper()} | "
-         f"CDR scheme (variants): {cfg.cdr_scheme if cfg else 'kabat'}",
+         f"CDR scheme (variants): {cfg.cdr_scheme if cfg else 'kabat'} | "
+         f"Numbering: {_num_space}",
          size=12, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=4)
     para("Antibody humanization pipeline - opencode/humanization",
          italic=True, size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
@@ -182,9 +184,14 @@ def build_docx(result: RunResult, out_path: str) -> str:
                 para(f"  warning: {w}", size=9, italic=True)
 
     # ============================ 3. NUMBERING ============================
-    h1("3. Kabat Numbering and Region Annotation (编号与区域注释)")
-    para("All positions in this report use Kabat numbering (anchor-based "
-         "portable engine; cross-validated with ANARCI on the server).", size=9.5)
+    h1(f"3. {_num_space.upper()} Numbering and Region Annotation (编号与区域注释)")
+    if _num_space == "imgt":
+        para("All positions in this report use IMGT numbering (ANARCI).",
+             size=9.5)
+    else:
+        para("All positions in this report use Kabat numbering (anchor-based "
+             "portable engine; cross-validated with ANARCI on the server).",
+             size=9.5)
     for rep in result.chains:
         c = rep.input_chain
         h3(f"{c.name}")
@@ -410,7 +417,7 @@ def build_docx(result: RunResult, out_path: str) -> str:
             seq_para(v.name, v.sequence, size=8.5)
 
     # ============================ APPENDIX B: POSITION MAP ============================
-    h1("Appendix B. Per-position Kabat Map (逐位点对照)")
+    h1(f"Appendix B. Per-position {_num_space.upper()} Map (逐位点对照)")
     para("d = donor (non-human), g = human germline V, j = human J region.",
          size=9)
     for rep in result.chains:

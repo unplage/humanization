@@ -39,6 +39,7 @@ class PipelineConfig:
     germline_strategy: str = "auto"    # fr_best|cdr_best|composite|cvi_best|min_backmutations|current|adimab_frequency|pioneer_frequency|composite_3axis|auto
     forced_germlines: Dict[str, str] = field(default_factory=dict)  # {"H": "IGHV1-3*01", "L": "IGKV1-39*01"}
     cdr_scheme: str = "kabat"          # kabat|chothia|abm|imgt (graft def)
+    numbering: str = "kabat"           # kabat|imgt (coordinate space; imgt requires ANARCI)
     report_schemes: List[str] = field(default_factory=lambda: ["kabat", "chothia", "imgt"])
     format: str = "auto"               # auto|fab|vhh
     af3: AF3Config = field(default_factory=AF3Config)
@@ -62,6 +63,16 @@ class PipelineConfig:
     def __post_init__(self):
         if self.cdr_scheme not in ("kabat", "chothia", "abm", "imgt"):
             raise ValueError(f"unknown CDR scheme: {self.cdr_scheme}")
+        if self.numbering not in ("kabat", "imgt"):
+            raise ValueError(f"unknown numbering: {self.numbering}")
+        if self.numbering == "imgt":
+            # IMGT numbering uses the native IMGT CDR windows only; the other
+            # three schemes are Kabat-backbone windows and would mix spaces.
+            if self.cdr_scheme != "imgt":
+                raise ValueError(
+                    f"--numbering imgt requires CDR scheme 'imgt' "
+                    f"(got {self.cdr_scheme!r})")
+            self.report_schemes = ["imgt"]
 
 
 @dataclass
@@ -125,7 +136,8 @@ def run_pipeline(
     outdir: str = "outputs",
 ) -> RunResult:
     os.makedirs(outdir, exist_ok=True)
-    fmt, chains = parse_input(input_path, config.format)
+    fmt, chains = parse_input(input_path, config.format,
+                              numbering=config.numbering)
     warnings: List[str] = []
     for c in chains:
         warnings.extend(c.warnings)
@@ -137,12 +149,14 @@ def run_pipeline(
 
     # germline DB (bundled Kabat-space JSON preferred, NCBI FASTA fallback)
     try:
-        db = load_germline_db(config.germline_dir or _default_germline_dir())
+        db = load_germline_db(config.germline_dir or _default_germline_dir(),
+                              numbering=config.numbering)
     except FileNotFoundError as e:
         raise RuntimeError(
             f"germline database unavailable: {e}\n"
             "  run:  python3 scripts/humanize/cli.py setup-germline  (server)"
         ) from e
+    _validate_numbering_space(chains, db, config)
 
     reports: List[ChainReport] = []
     for chain in chains:
@@ -171,6 +185,34 @@ def _default_germline_dir() -> str:
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "data", "germline",
     )
+
+
+def _validate_numbering_space(chains: List[InputChain], db: GermlineDB,
+                              config: PipelineConfig) -> None:
+    """Fail fast when donor chains or the germline DB are not in the
+    configured coordinate space (IMGT mode only; Kabat keeps historical
+    lenient behaviour)."""
+    if config.numbering != "imgt":
+        return
+    from .schemespec import cdr_windows, get_spec
+    if "imgt" not in (db.source_dir or ""):
+        raise RuntimeError(
+            f"IMGT numbering requested but the germline DB is not IMGT-space "
+            f"({db.source_dir!r})")
+    spec = get_spec(config.numbering)
+    windows = cdr_windows(config.numbering, config.cdr_scheme)
+    for c in chains:
+        n = c.numbered
+        if n is None:
+            continue
+        ct = n.chain_type
+        probes = (f"{ct}{windows[ct]['CDR1'][0]}",
+                  f"{ct}{spec.j_anchor_for(ct)}")
+        missing = [lab for lab in probes if n.residue(lab) is None]
+        if missing:
+            raise RuntimeError(
+                f"[{c.name}] numbering space mismatch: --numbering imgt but "
+                f"residues {missing} absent (chain is not IMGT-numbered)")
 
 
 def _top_homologous_germlines(
@@ -262,7 +304,7 @@ def _process_chain(
         j_genes = db.j_for(ctype)
         j_scored = []
         for jg in j_genes:
-            idn, n = score_j_match(donor, jg)
+            idn, n = score_j_match(donor, jg, config.numbering)
             j_scored.append((jg, idn, n))
         j_scored.sort(key=lambda t: (-t[1], -t[2]))
         j_gene = j_scored[0][0] if j_scored else None
@@ -281,7 +323,8 @@ def _process_chain(
         )
         
         # Also create multi_result for report compatibility
-        multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
+        multi_result = choose_germlines_multi_strategy(
+            donor, db, is_vhh=is_vhh, numbering=config.numbering)
     else:
         # Use strategy-based selection
         strategy = config.germline_strategy
@@ -289,12 +332,13 @@ def _process_chain(
             # 自动策略：VH 使用 adimab_frequency（回测最优），VL 使用 current（VL 最优）
             strategy = "adimab_frequency" if ctype == "H" else "current"
         
-        multi_result = choose_germlines_multi_strategy(donor, db, is_vhh=is_vhh)
+        multi_result = choose_germlines_multi_strategy(
+            donor, db, is_vhh=is_vhh, numbering=config.numbering)
         candidate = multi_result.get_best(strategy)
         
         if candidate is None:
             # 回退到默认策略
-            choice = choose_germlines(donor, db)
+            choice = choose_germlines(donor, db, numbering=config.numbering)
             v_gene, j_gene = choice.v_gene, choice.j_gene
         else:
             v_gene = candidate.gene
@@ -303,7 +347,7 @@ def _process_chain(
             j_genes = db.j_for(ctype)
             j_scored = []
             for jg in j_genes:
-                idn, n = score_j_match(donor, jg)
+                idn, n = score_j_match(donor, jg, config.numbering)
                 j_scored.append((jg, idn, n))
             j_scored.sort(key=lambda t: (-t[1], -t[2]))
             j_gene = j_scored[0][0] if j_scored else None
@@ -408,7 +452,9 @@ def _process_chain(
                 donor_struct = (model, label, all_pos)
                 from .graft import is_cdr_loop_position
                 cdrs = {p: n for p, n in all_pos.items()
-                        if is_cdr_loop_position(ctype, int("".join(c for c in p if c.isdigit())))}
+                        if is_cdr_loop_position(
+                            ctype, int("".join(c for c in p if c.isdigit())),
+                            config.cdr_scheme, config.numbering)}
                 # B-factor is only a pLDDT score for AF3 predictions; an
                 # experimental `--donor-structure` carries a temperature factor.
                 use_plddt = from_af3
@@ -435,7 +481,7 @@ def _process_chain(
     # ---- FR indel detection and interactive selection ----
     from .fr_indel import detect_fr_indels, select_insertion_interactive, update_indel_selection
     
-    fr_indels = detect_fr_indels(donor, v_gene)
+    fr_indels = detect_fr_indels(donor, v_gene, config.numbering)
     indel_overrides: Dict[str, str] = {}  # region -> selected position
     
     if config.interactive_indel and fr_indels:
@@ -460,8 +506,17 @@ def _process_chain(
     # Optional per-position immunogenicity (MHC-II epitope) refinement
     immunogenicity = None
     if config.immunogenicity_path and os.path.exists(config.immunogenicity_path):
-        from .immunogenicity import load_scores_json
-        immunogenicity = load_scores_json(config.immunogenicity_path)
+        if config.numbering != "kabat":
+            # Precomputed maps are keyed by Kabat positions; IMGT labels with
+            # the same name are different residues. Live NetMHCIIpan below is
+            # numbering-safe (mapped via sequence index).
+            chain.warnings.append(
+                f"[{chain.name}] precomputed immunogenicity map is Kabat-keyed "
+                f"and ignored in IMGT numbering mode (use --netmhciipan-binary "
+                f"for a live, numbering-safe run)")
+        else:
+            from .immunogenicity import load_scores_json
+            immunogenicity = load_scores_json(config.immunogenicity_path)
     elif config.netmhciipan_binary:
         from .immunogenicity import netmhciipan_scores
         immunogenicity = netmhciipan_scores(
@@ -477,6 +532,7 @@ def _process_chain(
         donor, v_gene, is_vhh=is_vhh, structure=hints, top_germlines=top,
         calibration=calibration, indel_overrides=indel_overrides,
         j_gene=j_gene, immunogenicity=immunogenicity,
+        numbering=config.numbering,
     )
     
     # P1: Annotate with functional conservation scores
@@ -497,15 +553,16 @@ def _process_chain(
     if config.antigen_seq:
         sdr_graft = build_paratope_variant(
             donor, v_gene, j_gene, config.cdr_scheme, backmut, hints,
-            is_vhh=is_vhh,
+            is_vhh=is_vhh, numbering=config.numbering,
         )
-    cvi = cvi_homology(donor, v_gene)
+    cvi = cvi_homology(donor, v_gene, config.numbering)
     matrix: List[MatrixEntry] = []
     matrix_alts = _matrix_alternatives(donor, v_gene, db)
     if matrix_alts:
         matrix = matrix_alternatives(
             donor, matrix_alts, j_gene, config.cdr_scheme,
             is_vhh=is_vhh, n=min(3, len(matrix_alts)),
+            numbering=config.numbering,
         )
 
     # ---- grafts (all requested schemes, for reporting) ----
@@ -514,7 +571,7 @@ def _process_chain(
         try:
             grafts[scheme] = graft_chain(
                 donor, v_gene, j_gene, scheme, is_vhh,
-                fr_indels=backmut.fr_indels)
+                fr_indels=backmut.fr_indels, numbering=config.numbering)
         except ValueError as e:
             # InputChain always carries a warnings list; run_pipeline extends
             # RunResult.warnings from it, so the failure surfaces in the CLI
@@ -525,6 +582,7 @@ def _process_chain(
     # ---- variant ladder (main scheme) ----
     variants = assemble_variants(
         donor, v_gene, j_gene, config.cdr_scheme, backmut, is_vhh=is_vhh,
+        numbering=config.numbering,
     )
     # append the affinity-preserving minimal variant (V2 + V_min comparison)
     if minrev.positions and set(minrev.positions) != set(backmut.revert_positions(("T1", "T2"))):
@@ -533,6 +591,7 @@ def _process_chain(
         g_min = graft_variant(
             donor, v_gene, j_gene, config.cdr_scheme, minrev.positions,
             is_vhh=is_vhh, fr_indels=backmut.fr_indels,
+            numbering=config.numbering,
         )
         variants.append(Variant(
             name=f"{ctype}_Vmin",
@@ -556,6 +615,7 @@ def _process_chain(
         variants.extend(structure_guided_panel(
             donor, v_gene, j_gene, config.cdr_scheme, backmut,
             structure=hints, is_vhh=is_vhh, n_extra=config.design_panel_steps,
+            numbering=config.numbering,
         ))
 
     # ---- human-likeness ----
@@ -603,6 +663,7 @@ def _process_chain(
                     config.mpnn, structure_path or "", donor, risks,
                     structure_hints=hints,  # Pass Step 3 structure data
                     is_vhh=is_vhh, top_germlines=top,
+                    numbering=config.numbering,
                 )
             else:
                 # MPNN mode off - still classify positions for reporting
@@ -610,6 +671,7 @@ def _process_chain(
                     MPNNConfig(mode="off"), "", donor, risks,
                     structure_hints=hints,  # Pass Step 3 structure data
                     is_vhh=is_vhh, top_germlines=top,
+                    numbering=config.numbering,
                 )
 
     return ChainReport(
@@ -632,19 +694,19 @@ def _process_chain(
 
 
 def build_cdr_framework_sets(
-    numbered: NumberedChain, scheme: str = "kabat"
+    numbered: NumberedChain, scheme: str = "kabat", numbering: str = "kabat"
 ):
-    """Return (cdr_sets, framework_positions) as Kabat position-label sets.
+    """Return (cdr_sets, framework_positions) as position-label sets.
 
     ``cdr_sets`` maps the scheme CDR name (CDR1/CDR2/CDR3) to its position
     labels; ``framework_positions`` is FR1-FR3 excluding any CDR-loop residue
     (e.g. H93/H94 are labelled FR3 in the strict numbering scheme but belong
-    to the CDR3 loop set used here (graft.CDR_POS_SETS), so they must not
+    to the CDR3 loop set used here (graft windows), so they must not
     enter the fit).
     """
-    from .graft import CDR_POS_SETS
+    from .schemespec import cdr_windows
     ctype = numbered.chain_type
-    bounds = CDR_POS_SETS[scheme][ctype]
+    bounds = cdr_windows(numbering, scheme)[ctype]
     cdr_sets: Dict[str, set] = {name: set() for name in bounds}
     for r in numbered.residues:
         num = int("".join(c for c in r.pos if c.isdigit()) or -1)
@@ -721,7 +783,8 @@ def _measure_variant(donor_struct, config: PipelineConfig, donor_numbered,
     """CDR-RMSD + clashes + CDR pLDDT for one variant chain vs its donor."""
     from .structure import count_clashes, structure_rmsd
     donor_model, donor_label, donor_pos = donor_struct
-    cdr_sets, framework = build_cdr_framework_sets(donor_numbered, config.cdr_scheme)
+    cdr_sets, framework = build_cdr_framework_sets(
+        donor_numbered, config.cdr_scheme, config.numbering)
     vpos = pdb_chain_pos_map(vmodel, vlabel, variant.graft.numbered)
     # Use only high-confidence framework residues for the superposition so a
     # flexible/low-pLDDT loop or terminus cannot drag the whole fit.

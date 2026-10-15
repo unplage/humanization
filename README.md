@@ -140,7 +140,28 @@ python3 tests/test_pipeline.py
 1. **VL 链类型检测**：通过 ANARCI HMM 分类结果（chain_type='K'/'L'）自动识别轻链，避免误分类为重链
 2. **VL CDR3 编号**：内置引擎正确处理 L89-L95，ANARCI 有已知 bug
 
-### 安装 ANARCI（可选）
+### IMGT 编号人源化模式（可选坐标空间）
+
+整条流水线可以在 **IMGT 坐标空间**运行（与默认 Kabat 空间二选一，单次运行内绝不混用）：
+
+```bash
+# Step 1：同坐标空间比较 9 种策略
+python3 scripts/humanize/cli.py compare --input <fasta> --numbering imgt
+
+# Step 2：正式运行（强制 --scheme imgt，输出 IMGT 标签报告）
+python3 scripts/humanize/cli.py run --input <fasta> --numbering imgt --outdir outputs
+```
+
+- **要求 ANARCI**（`pip install anarci`），IMGT 模式无便携回退，ANARCI 不可用时直接报错
+- 种系使用内置 IMGT 种系数据（`data/germline/abnumber_human_imgt.json`，375 V + 28 J）
+- 位点集（vernier/interface/canonical/VHH hallmark 42/49/50/52/J 锚点 118）由
+  `scripts/build_imgt_positions.py` 从两份同源种系文件推导的 Kabat↔IMGT 对应表翻译
+  （产物 `data/germline/kabat_imgt_positions.json`）
+- 已知限制：`rmsd` 子命令与 `humanize learn` 实验校准仍为 Kabat 空间；IMGT 模式下
+  Kabat 键的预计算 immunogenicity JSON / calibration 自动忽略并告警（NetMHCIIpan
+  实时跑不受影响）
+
+### 安装 ANARCI（可选；IMGT 编号模式必选）
 
 ```bash
 # 服务器模式自动安装

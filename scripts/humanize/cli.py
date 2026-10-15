@@ -30,6 +30,12 @@ from humanize.mpnn import MPNNConfig
 
 
 def cmd_run(args):
+    # IMGT numbering uses the native IMGT CDR windows; other --scheme values
+    # are Kabat-backbone windows and would mix coordinate spaces.
+    if args.numbering == "imgt" and args.scheme != "imgt":
+        print(f"[humanize] --numbering imgt overrides --scheme {args.scheme} "
+              f"(IMGT coordinate space uses the native IMGT CDR scheme)")
+        args.scheme = "imgt"
     # Parse forced germlines
     forced_germlines = {}
     if args.force_germline:
@@ -45,6 +51,7 @@ def cmd_run(args):
         germline_strategy=args.germline_strategy or "auto",
         forced_germlines=forced_germlines,
         cdr_scheme=args.scheme,
+        numbering=args.numbering,
         report_schemes=["kabat", "chothia", "abm", "imgt"],
         format=args.format,
         antigen_seq=args.antigen,
@@ -404,7 +411,7 @@ def cmd_compare(args):
     candidates for each of the 9 strategies.
     """
     from humanize.sequences import parse_input
-    from humanize.numbering import number_heavy, number_light
+    from humanize.numbering import number_heavy, number_light, number_heavy_imgt, number_light_imgt
     from humanize.germline import load_germline_db
     from humanize.multi_strategy_germline import choose_germlines_multi_strategy, format_multi_strategy_report
     
@@ -413,24 +420,30 @@ def cmd_compare(args):
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "data", "germline"
     )
-    db = load_germline_db(germline_dir)
+    db = load_germline_db(germline_dir, numbering=args.numbering)
     
     # Parse input sequences
-    fmt, chains = parse_input(args.input, args.format)
+    fmt, chains = parse_input(args.input, args.format,
+                              numbering=args.numbering)
     
     print(f"\n{'='*100}")
-    print(f"Germline Comparison Report (Step 1)")
+    print(f"Germline Comparison Report (Step 1) [numbering: {args.numbering}]")
     print(f"{'='*100}\n")
     
+    if args.numbering == "imgt":
+        _num_h, _num_l = number_heavy_imgt, number_light_imgt
+    else:
+        _num_h, _num_l = number_heavy, number_light
     for chain in chains:
         ctype = chain.chain_type
         if ctype == 'H':
-            numbered = number_heavy(chain.sequence)
+            numbered = _num_h(chain.sequence)
         else:
-            numbered = number_light(chain.sequence)
+            numbered = _num_l(chain.sequence)
         
         # Run multi-strategy germline selection (single pass, all 9 strategies)
-        result = choose_germlines_multi_strategy(numbered, db, is_vhh=chain.is_vhh)
+        result = choose_germlines_multi_strategy(
+            numbered, db, is_vhh=chain.is_vhh, numbering=args.numbering)
         
         # Display comparison table
         print(format_multi_strategy_report(result))
@@ -456,6 +469,11 @@ def main(argv=None):
     p_run.add_argument("--scheme", default="kabat",
                        choices=["kabat", "chothia", "abm", "imgt"],
                        help="CDR definition used for the variant ladder")
+    p_run.add_argument("--numbering", default="kabat",
+                       choices=["kabat", "imgt"],
+                       help="numbering coordinate space: kabat (default, "
+                            "portable) or imgt (ANARCI required; forces "
+                            "--scheme imgt)")
     p_run.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
     p_run.add_argument("--germline-strategy", default="auto",
                        choices=["fr_best", "cdr_best", "composite", "cvi_best", 
@@ -509,6 +527,10 @@ def main(argv=None):
     p_compare.add_argument("--input", required=True, help="input FASTA (VH+VL or VHH)")
     p_compare.add_argument("--format", default="auto", choices=["auto", "fab", "vhh"])
     p_compare.add_argument("--germline-dir", default="", help="NCBI germline FASTA dir")
+    p_compare.add_argument("--numbering", default="kabat",
+                           choices=["kabat", "imgt"],
+                           help="numbering coordinate space (must match the "
+                                "later 'run --numbering')")
     p_compare.set_defaults(func=cmd_compare)
 
     # ---- rmsd: compare external variant structures to a donor structure ----

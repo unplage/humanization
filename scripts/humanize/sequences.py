@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .numbering import NumberedChain, is_vhh, number_heavy, number_light
+from .numbering import NumberedChain, is_vhh
 
 
 class InputError(ValueError):
@@ -79,7 +79,26 @@ def _anarci_chain_type(s: str) -> Optional[str]:
         return None
 
 
-def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
+def classify_sequences(records: List[Tuple[str, str]],
+                       numbering: str = "kabat") -> List[InputChain]:
+    """Classify and number input sequences.
+
+    numbering: "kabat" (ANARCI kabat -> built-in) or "imgt" (ANARCI IMGT,
+    required -- fails fast when ANARCI is unavailable).
+    """
+    if numbering not in ("kabat", "imgt"):
+        raise InputError(f"unknown numbering: {numbering!r}")
+    if numbering == "imgt":
+        from .anarci_adapter import is_anarci_available
+        if not is_anarci_available():
+            raise InputError(
+                "[IMGT numbering] ANARCI is required but not installed "
+                "(pip install anarci); IMGT mode has no portable fallback")
+        from .numbering import number_heavy_imgt as _num_h
+        from .numbering import number_light_imgt as _num_l
+    else:
+        from .numbering import number_heavy as _num_h
+        from .numbering import number_light as _num_l
     """Number every record and classify as VH/VHH or VL."""
     chains: List[InputChain] = []
     seen_names: Dict[str, int] = {}
@@ -100,13 +119,13 @@ def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
         ct = _anarci_chain_type(s)
         if ct in ("K", "L"):
             try:
-                chain = number_light(s)
+                chain = _num_l(s)
                 chain_type = chain.chain_type
             except ValueError as e:
                 errors.append(str(e))
         elif ct == "H":
             try:
-                chain = number_heavy(s)
+                chain = _num_h(s)
                 chain_type = chain.chain_type
             except ValueError as e:
                 errors.append(str(e))
@@ -114,12 +133,12 @@ def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
         #    light chain), then light.
         if chain is None:
             try:
-                chain = number_heavy(s)
+                chain = _num_h(s)
                 chain_type = chain.chain_type
             except ValueError as e:
                 errors.append(str(e))
                 try:
-                    chain = number_light(s)
+                    chain = _num_l(s)
                     chain_type = chain.chain_type
                 except ValueError as e2:
                     errors.append(str(e2))
@@ -135,7 +154,7 @@ def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
                 # a light chain.
                 if chain is not None and not any(r.pos == "H103" for r in chain.residues):
                     try:
-                        light = number_light(s)
+                        light = _num_l(s)
                         if any(r.pos == "L98" for r in light.residues):
                             chain, chain_type = light, light.chain_type
                     except ValueError:
@@ -152,7 +171,7 @@ def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
             warnings=list(chain.warnings),
         )
         if chain_type == "H":
-            ic.is_vhh, _score, _ = is_vhh(chain)
+            ic.is_vhh, _score, _ = is_vhh(chain, numbering)
             ic.vhh_score = _score
         chains.append(ic)
     return chains
@@ -181,11 +200,12 @@ def detect_format(chains: List[InputChain], explicit: Optional[str] = None) -> s
     )
 
 
-def parse_input(path: str, explicit_format: Optional[str] = None) -> Tuple[str, List[InputChain]]:
+def parse_input(path: str, explicit_format: Optional[str] = None,
+                numbering: str = "kabat") -> Tuple[str, List[InputChain]]:
     """Full input pipeline: parse FASTA, classify, detect format."""
     records = parse_fasta(path)
     if not records:
         raise InputError(f"no sequences found in {path}")
-    chains = classify_sequences(records)
+    chains = classify_sequences(records, numbering=numbering)
     fmt = detect_format(chains, explicit_format)
     return fmt, chains

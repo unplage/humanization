@@ -22,7 +22,6 @@ from .germline import (
     compare_to_germline,
     score_j_match,
 )
-from .config import CVI
 from .germline_frequency import (
     get_frequency,
     is_recommended,
@@ -77,24 +76,26 @@ class MultiStrategyResult:
         return "\n".join(lines)
 
 
-def _calculate_cvi_score(query: NumberedChain, gene: GermlineGene) -> float:
+def _calculate_cvi_score(query: NumberedChain, gene: GermlineGene,
+                         numbering: str = "kabat") -> float:
     """计算 CVI (canonical + vernier + interface) 同源性
     
     基于 BI 2024 研究：CVI 同源性与表达量和亲和力保留显著相关。
-    位置集来自 config.CVI（与 minimal.cvi_homology 共用，避免口径漂移）。
+    位置集来自 schemespec（Kabat 即 config.CVI；IMGT 为对应表翻译，
+    与 minimal.cvi_homology 共用，避免口径漂移）。
     """
     if gene.numbered is None:
         return 0.0
+    from .schemespec import get_spec
+    cvi_positions = get_spec(numbering).cvi.get(query.chain_type, frozenset())
     
     q = query.posmap()
     g = gene.numbered.posmap()
     ctype = query.chain_type
     
-    all_cvi_positions = CVI.get(ctype, set())
-    
     n = 0
     same = 0
-    for pos in all_cvi_positions:
+    for pos in cvi_positions:
         pos_str = f"{ctype}{pos}"
         if pos_str in q and pos_str in g:
             if q[pos_str] and g[pos_str]:
@@ -109,6 +110,7 @@ def _estimate_n_backmutations(
     query: NumberedChain,
     gene: GermlineGene,
     is_vhh: bool = False,
+    numbering: str = "kabat",
 ) -> int:
     """估计回复突变数量（基于实际的 tier 分析）。
 
@@ -121,7 +123,8 @@ def _estimate_n_backmutations(
         return 999
     try:
         from .backmut import analyze_backmutations
-        bm = analyze_backmutations(query, gene, is_vhh=is_vhh)
+        bm = analyze_backmutations(query, gene, is_vhh=is_vhh,
+                                   numbering=numbering)
         return sum(1 for c in bm.candidates if c.tier in ("T1", "T2"))
     except Exception:
         return 999
@@ -132,6 +135,7 @@ def choose_germlines_multi_strategy(
     db: GermlineDB,
     n_alternatives: int = 5,
     is_vhh: bool = False,
+    numbering: str = "kabat",
 ) -> MultiStrategyResult:
     """多策略 Germline 选择
     
@@ -153,8 +157,9 @@ def choose_germlines_multi_strategy(
     scored = []
     for g in v_genes:
         s = compare_to_germline(query, g)
-        cvi = _calculate_cvi_score(query, g)
-        n_backmut = _estimate_n_backmutations(query, g, is_vhh=is_vhh)
+        cvi = _calculate_cvi_score(query, g, numbering)
+        n_backmut = _estimate_n_backmutations(query, g, is_vhh=is_vhh,
+                                              numbering=numbering)
         composite = 0.7 * s['fr_identity'] + 0.3 * s['cdr_identity']
         
         scored.append({

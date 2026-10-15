@@ -14,6 +14,12 @@ from .numbering import NumberedChain
 from .pipeline import ChainReport, RunResult
 
 
+def _primary_graft(rep: ChainReport):
+    """V0 graft for reports: the Kabat graft when present (historical
+    default), otherwise the run's only graft (IMGT-numbering mode)."""
+    return rep.grafts.get("kabat") or next(iter(rep.grafts.values()), None)
+
+
 # PTM 风险模式
 PTM_PATTERNS = {
     'ptm_cys': r'C',
@@ -461,7 +467,7 @@ def generate_hotspot_summary(
         chain_type = rep.input_chain.chain_type
         
         # V0: 扫描纯移植序列
-        graft = rep.grafts.get("kabat")
+        graft = _primary_graft(rep)
         if graft is not None:
             v0_count, v0_sites = _scan_high_risk(graft.numbered)
         else:
@@ -521,7 +527,7 @@ def generate_humanized_sequences(
         lines.append(rep.input_chain.sequence)
         
         # V0: 纯移植
-        graft = rep.grafts.get("kabat")
+        graft = _primary_graft(rep)
         if graft is not None:
             lines.append(f">{chain_type}1 Graft({v_gene})")
             lines.append(graft.sequence)
@@ -583,8 +589,10 @@ def generate_enhanced_report(
     
     lines.append("")
     
-    # 3.1 KABAT Numbering Mutation Summary
-    lines.append("3.1 KABAT Numbering Mutation Summary")
+    # 3.1 Position-numbering mutation summary (scheme of the run)
+    _cfg = getattr(result, "config", None)
+    _num_name = _cfg.numbering.upper() if _cfg is not None else "KABAT"
+    lines.append(f"3.1 {_num_name} Numbering Mutation Summary")
     lines.append("-" * 80)
     lines.append(generate_kabat_mutation_summary(result.chains))
     
@@ -842,7 +850,7 @@ def write_enhanced_docx(
         seq_run.font.size = Pt(8)
         
         # V0: 纯移植
-        graft = rep.grafts.get("kabat")
+        graft = _primary_graft(rep)
         if graft is not None:
             doc.add_heading(f">{chain_type}1 Graft({v_gene})", level=2)
             seq_para = doc.add_paragraph()
@@ -1126,7 +1134,7 @@ def _generate_full_length_summary_table_data(rep: ChainReport) -> List[List[str]
     rows.append(["ID", "High risk #", "High risk sites", "Humanness (FV)", "Humanness (FR)"])
     
     # V0: 扫描纯移植序列
-    graft = rep.grafts.get("kabat")
+    graft = _primary_graft(rep)
     if graft is not None:
         v0_count, v0_sites = _scan_high_risk(graft.numbered)
     else:

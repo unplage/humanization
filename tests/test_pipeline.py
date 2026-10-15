@@ -816,6 +816,44 @@ def test_germline_and_graft():
                   f"donor={donor_seg} graft={graft_seg}")
 
 
+def test_scheme_arg_threading():
+    """Sentinels: the scheme argument must actually reach (a) CDR loop
+    membership, (b) graft .cdrs segments, (c) paratope filtering. Guards the
+    three call sites that used to drop the scheme (pipeline structure hints,
+    graft chain_from_origin_map, minimal paratope)."""
+    print("scheme argument threading")
+    from humanize.graft import is_cdr_loop_position
+    from humanize.minimal import paratope_positions
+    from humanize.backmut import StructureHints
+
+    check("kabat CDR2 includes H65", is_cdr_loop_position("H", 65, "kabat"))
+    check("imgt window excludes H65", not is_cdr_loop_position("H", 65, "imgt"))
+    check("imgt window includes H51", is_cdr_loop_position("H", 51, "imgt"))
+    check("imgt CDR3 graft window includes H93", is_cdr_loop_position("H", 93, "imgt"))
+
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    _, chains = parse_input(os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"))
+    donor = chains[0].numbered  # 4D5 VH
+    choice = choose_germlines(donor, db)
+    g_k = graft_chain(donor, choice.v_gene, choice.j_gene, "kabat")
+    g_i = graft_chain(donor, choice.v_gene, choice.j_gene, "imgt")
+    c1k = g_k.numbered.cdrs.get("CDR1")
+    c1i = g_i.numbered.cdrs.get("CDR1")
+    check("kabat graft .cdrs CDR1 starts H31", c1k is not None and c1k[0] == "H31", str(c1k))
+    check("imgt graft .cdrs CDR1 starts H26 (stem)",
+          c1i is not None and c1i[0] == "H26", str(c1i))
+    check("imgt graft .cdrs CDR1 ends at H35 label",
+          c1i is not None and c1i[1].startswith("H35"), str(c1i))
+    check("graft .cdrs differ between schemes", g_k.numbered.cdrs != g_i.numbered.cdrs)
+
+    # paratope: H58 is in the Kabat CDR2 but outside the imgt-approx window
+    hints = StructureHints({"antigen_contact": {"H58": True, "H51": True}})
+    p_k = paratope_positions(donor, hints, "kabat")
+    p_i = paratope_positions(donor, hints, "imgt")
+    check("paratope kabat includes H58", "H58" in p_k, str(p_k))
+    check("paratope imgt excludes H58", "H58" not in p_i and "H51" in p_i, str(p_i))
+
+
 def test_backmut_variants():
     print("back-mutations + variants")
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
@@ -1165,16 +1203,32 @@ def test_step3_structure_tier_rules():
     """Step 3: structure-driven tier adjustment is symmetric and safe.
 
     * explicit exposure with no functional contact -> demote T1/T2 -> T3
-    * buried, no SIDE-CHAIN contact, near-isosteric swap -> T1 -> T2
+    * buried, no SIDE-CHAIN contact, NON-disruptive swap -> T1 -> T2
       (literature 'must revert' downgraded to 'recommended': backbone-only
        CDR proximity is fixed beta-sheet geometry)
+    * buried + disruptive swap (volume OR charge OR H-bond capability) ->
+      T1 retained even without contact
     * buried + side-chain CDR contact -> T1 retained
     * CDR-contact evidence -> promote to T1/T2
+    * low pLDDT blocks both demotion and promotion (tier == portable ladder)
+    * high dev-risk never demotes a functional contact or interface-core
+      position (and never fires under low pLDDT)
     """
     print("Step 3 structure tier rules")
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
     ch = number_heavy(M4D5_VH)
     vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+    from humanize.backmut import _is_disruptive_swap
+
+    # polar-aware strain: volume alone is not the only disruption signal
+    check("S->A counts as disruptive (loses hydroxyl)", _is_disruptive_swap("S", "A"))
+    check("D->K counts as disruptive (charge change)", _is_disruptive_swap("D", "K"))
+    check("Y->F counts as disruptive (H-bond capability change)",
+          _is_disruptive_swap("Y", "F"))
+    check("T->S is non-disruptive (same charge/H-bond class)",
+          not _is_disruptive_swap("T", "S"))
+    check("I->V is non-disruptive (near-isosteric)", not _is_disruptive_swap("I", "V"))
+
     base = analyze_backmutations(ch, vg)
     base_tiers = {c.position: c.tier for c in base.candidates}
     poslist = list(base_tiers)
@@ -1188,12 +1242,17 @@ def test_step3_structure_tier_rules():
     buried = analyze_backmutations(
         ch, vg, structure=StructureHints({"buried": {p: True for p in poslist}}))
     buried_tiers = {c.position: c.tier for c in buried.candidates}
-    # buried but no side-chain paratope contact: an isosteric swap (H27 Y->F)
-    # is downgraded from "must revert" (T1) to "recommended" (T2)...
-    check("buried + isosteric + no side-chain contact downgrades H27 to T2",
-          buried_tiers.get("H27") == "T2")
-    # ...whereas a large buried volume change (H78 A->L, dV ~78 A^3) is a real
-    # packing perturbation and keeps the T1 pillar.
+    # H27 Y->F loses the phenolic hydroxyl: under polar-aware strain it is
+    # disruptive, so the pillar is retained even without a side-chain contact...
+    check("buried + polar-changing swap keeps H27 T1",
+          buried_tiers.get("H27") == "T1", str(buried_tiers.get("H27")))
+    # ...while genuinely non-disruptive swaps still get the T1 -> T2 soft
+    # downgrade (T->S at the vernier H30; I->V at the canonical+vernier H48)
+    check("buried + non-disruptive H30 (T->S) downgrades to T2",
+          buried_tiers.get("H30") == "T2", str(buried_tiers.get("H30")))
+    check("buried + non-disruptive H48 (I->V) downgrades to T2",
+          buried_tiers.get("H48") == "T2", str(buried_tiers.get("H48")))
+    # ...and a large buried volume change (H78 A->L, dV ~78 A^3) keeps T1
     check("buried + large volume change keeps H78 T1",
           buried_tiers.get("H78") == "T1")
 
@@ -1221,6 +1280,70 @@ def test_step3_structure_tier_rules():
         }))
     lowq_tiers = {c.position: c.tier for c in lowq.candidates}
     check("low pLDDT blocks demotion", lowq_tiers.get("H78") == "T1")
+
+    # ...and must not PROMOTE either: structure signals are neutralized, so
+    # every tier equals the portable (no-structure) ladder
+    lowq_promote = analyze_backmutations(
+        ch, vg, structure=StructureHints({
+            "cdr_contact": {p: True for p in poslist},
+            "plddt": {p: 30.0 for p in poslist},
+        }))
+    promote_tiers = {c.position: c.tier for c in lowq_promote.candidates}
+    check("low pLDDT blocks promotion (tiers == portable ladder)",
+          promote_tiers == base_tiers,
+          str({p: (base_tiers[p], promote_tiers[p])
+               for p in base_tiers if base_tiers[p] != promote_tiers[p]}))
+
+    # ---- dev-risk regressions (synthetic NG motif in the donor FR) ----
+    def _edit(seq, pairs):
+        s = list(seq)
+        for pos, aa in pairs:
+            s[ch.residue(pos).index] = aa
+        return "".join(s)
+
+    # (1) functional side-chain contact outranks a donor NG liability:
+    #     exposed + sc contact + dev-risk 0.8 must stay T2 (was T3)
+    d1 = number_heavy(_edit(M4D5_VH, [("H71", "N"), ("H72", "G")]))
+    c1 = {c.position for c in analyze_backmutations(d1, vg).candidates}
+    r1 = {c.position: c for c in analyze_backmutations(
+        d1, vg, structure=StructureHints({
+            "buried": {p: False for p in c1},
+            "cdr_contact": {p: True for p in c1},
+            "cdr_contact_sc": {p: True for p in c1},
+        })).candidates}
+    h71 = r1.get("H71")
+    check("side-chain contact + dev-risk 0.8 stays T2 (not demoted)",
+          h71 is not None and h71.tier == "T2"
+          and h71.dev_risk_score > 0.7,
+          f"tier={h71.tier if h71 else None} dev={h71.dev_risk_score if h71 else None}")
+    check("no false structural-demote rationale for H71",
+          h71 is not None and not any("demoted from" in x for x in h71.rationale),
+          str(h71.rationale if h71 else None))
+
+    # (2) interface_core is exempt from the dev-risk demotion as well
+    d2 = number_heavy(_edit(M4D5_VH, [("H45", "N"), ("H46", "G")]))
+    base2 = {c.position: c for c in analyze_backmutations(d2, vg).candidates}
+    c2 = {p for p in base2}
+    check("synthetic H45 is an interface_core candidate with dev-risk",
+          "interface_core" in base2["H45"].features
+          and base2["H45"].dev_risk_score > 0.7,
+          f"features={base2['H45'].features} dev={base2['H45'].dev_risk_score}")
+    r2 = {c.position: c for c in analyze_backmutations(
+        d2, vg, structure=StructureHints({"buried": {p: False for p in c2}})).candidates}
+    check("interface_core + exposed + dev-risk stays T2 (exempt)",
+          r2.get("H45") is not None and r2["H45"].tier == "T2",
+          str(r2.get("H45").tier if r2.get("H45") else None))
+
+    # (3) low pLDDT also blocks the dev-risk demotion (tier == portable)
+    base1 = {c.position: c.tier for c in analyze_backmutations(d1, vg).candidates}
+    r3 = {c.position: c.tier for c in analyze_backmutations(
+        d1, vg, structure=StructureHints({
+            "buried": {p: False for p in c1},
+            "plddt": {p: 30.0 for p in c1},
+        })).candidates}
+    check("low pLDDT blocks dev-risk demotion (tiers == portable)",
+          r3 == base1,
+          str({p: (base1[p], r3[p]) for p in base1 if base1[p] != r3[p]}))
 
 
 def test_multi_model_consensus_fields():
@@ -1729,6 +1852,207 @@ def test_end_to_end():
         check("E2E fasta has 13 variants (H:7, L:6)", n_seq == 13, str(n_seq))
 
 
+def test_imgt_numbering_mode():
+    """IMGT-coordinate humanization: spec constants, native windows, guards,
+    germline IMGT DB, long-CDR3 VHH round-trip (111/112 insertion order),
+    VHH hallmark protection, and a full pipeline e2e with CDR preservation."""
+    print("imgt numbering mode")
+    from humanize.schemespec import cdr_windows, get_spec
+    from humanize.numbering import (
+        NATIVE_IMGT_CDRS, is_vhh, number_heavy_imgt, number_light_imgt,
+        _number_imgt,
+    )
+    from humanize.germline import score_j_match
+    from humanize.graft import graft_variant, is_cdr_loop_position
+    from humanize.backmut import BackMutationResult  # noqa: F401
+    from humanize.pipeline import _validate_numbering_space
+
+    # ---- spec constants ----
+    i = get_spec("imgt")
+    k = get_spec("kabat")
+    check("imgt J anchor 118/118", i.j_anchor == {"H": 118, "L": 118},
+          str(i.j_anchor))
+    check("kabat J anchor unchanged", k.j_anchor == {"H": 103, "L": 98},
+          str(k.j_anchor))
+    check("imgt VHH hallmark 42/49/50/52",
+          i.vhh_hallmark == frozenset({42, 49, 50, 52}),
+          str(sorted(i.vhh_hallmark)))
+    check("kabat VHH hallmark unchanged", k.vhh_hallmark == frozenset({37, 44, 45, 47}))
+    check("imgt CDR3 stem 105/106", i.cdr3_stem["H"] == frozenset({105, 106}))
+    w = cdr_windows("imgt", "imgt")
+    check("native imgt CDR windows",
+          w["H"]["CDR1"] == (27, 38) and w["H"]["CDR2"] == (56, 65)
+          and w["H"]["CDR3"] == (105, 117), str(w["H"]))
+    check("display table syncs with spec windows",
+          NATIVE_IMGT_CDRS["H"]["CDR2"] == ("H56", "H65")
+          and tuple(w["L"]["CDR3"]) == (105, 117))
+    try:
+        cdr_windows("imgt", "kabat")
+        _cross = False
+    except ValueError:
+        _cross = True
+    check("cross-space (imgt numbering + kabat scheme) rejected", _cross)
+    check("kabat windows unchanged",
+          cdr_windows("kabat", "kabat")["H"]["CDR2"] == (50, 65))
+    try:
+        PipelineConfig(numbering="imgt")          # cdr_scheme defaults kabat
+        _cfg_ok = False
+    except ValueError:
+        _cfg_ok = True
+    check("imgt numbering with kabat cdr_scheme rejected", _cfg_ok)
+    cfg_i = PipelineConfig(numbering="imgt", cdr_scheme="imgt")
+    check("imgt mode forces report_schemes=[imgt]",
+          cfg_i.report_schemes == ["imgt"], str(cfg_i.report_schemes))
+
+    # ---- ANARCI anchors + numbering-aware VHH detection ----
+    n = number_heavy_imgt(M4D5_VH)
+    check("imgt Cys23/Cys104/Trp41 anchors",
+          n.residue("H23") is not None and n.residue("H23").aa == "C"
+          and n.residue("H104") is not None and n.residue("H104").aa == "C"
+          and n.residue("H41") is not None and n.residue("H41").aa == "W")
+    check("imgt FR4 starts at 118", n.residue("H118") is not None)
+    vhh = number_heavy_imgt(VHH_1BZQ)
+    check("is_vhh detects hallmark in IMGT space", is_vhh(vhh, "imgt")[0])
+    # same chain checked with Kabat labels must NOT be trusted (documented
+    # cross-space hazard): it can only match by coincidence
+    check("imgt donor fails Kabat-space CDR1 probe",
+          number_heavy_imgt(M4D5_VH).residue("H31") is None)
+
+    # ---- IMGT germline DB ----
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"),
+                          numbering="imgt")
+    check("imgt DB loaded", len(db.v_genes) > 300 and "imgt" in db.source_dir,
+          f"V={len(db.v_genes)} src={db.source_dir[-30:]}")
+    j_h = db.j_for("H")[0]
+    check("imgt J spans >=118",
+          any(int("".join(c for c in r.pos if c.isdigit())) >= 118
+              for r in j_h.numbered.residues))
+    db_k = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    check("kabat DB unchanged after imgt load",
+          len(db_k.v_genes) > 300 and "imgt" not in db_k.source_dir)
+    idn, nj = score_j_match(n, j_h, "imgt")
+    check("imgt score_j_match uses anchor 118", nj >= 0, f"n={nj}")
+
+    # ---- guards: space mismatch detection ----
+    _, kabat_chains = parse_input(os.path.join(ROOT, "data", "examples",
+                                               "mouse_4d5_fab.fasta"))
+    try:
+        _validate_numbering_space(kabat_chains, db, cfg_i)
+        _mismatch = False
+    except RuntimeError:
+        _mismatch = True
+    check("kabat donor in imgt mode rejected by validator", _mismatch)
+    try:
+        _validate_numbering_space(kabat_chains, db_k, cfg_i)
+        _dbmm = False
+    except RuntimeError:
+        _dbmm = True
+    check("kabat germline DB in imgt mode rejected by validator", _dbmm)
+
+    # ---- ordering: donor labels follow residue order (111/112 cluster) ----
+    from humanize.graft import _sorted_positions
+    long_vhh = number_heavy_imgt(
+        "VQLVESGGGLVQAGGSLRLSCAASGWTFSSYAMGWFRQAPGKEREFVAAISGSGGSTYYADSVKGR"
+        "FTISRDNAKNTVYLQMNSLKPEDTAVYYCARERLGGTTYNYYGMDVWGQGTTVTVSS")
+    cdr3_labels = [r.pos for r in long_vhh.residues
+                   if 105 <= int("".join(c for c in r.pos if c.isdigit())) <= 117]
+    check("ANARCI emits 112B before 112A (scrambled label order)",
+          cdr3_labels.index("H112B") < cdr3_labels.index("H112A")
+          < cdr3_labels.index("H112"),
+          str(cdr3_labels[-8:]))
+    naive = sorted(cdr3_labels)
+    check("naive label sort would reorder them", naive != cdr3_labels)
+    check("_sorted_positions keeps donor residue order",
+          _sorted_positions(cdr3_labels, long_vhh, "imgt") == cdr3_labels,
+          str(_sorted_positions(cdr3_labels, long_vhh, "imgt")[-6:]))
+    check("kabat ordering unchanged",
+          _sorted_positions(["H6", "H6A", "H7"], n, "kabat")
+          == ["H6", "H6A", "H7"])
+
+    # ---- long-CDR3 VHH: graft + variants round-trip ----
+    choice = choose_germlines(long_vhh, db, numbering="imgt")
+    check("imgt germline chosen for VHH", choice.v_gene is not None
+          and choice.j_gene is not None)
+
+    def _cdrs(c):
+        return tuple("".join(r.aa for r in c.residues if r.region == rg)
+                     for rg in ("CDR1", "CDR2", "CDR3"))
+    donor_cdrs = _cdrs(long_vhh)
+    g = graft_chain(long_vhh, choice.v_gene, choice.j_gene, "imgt",
+                    is_vhh=True, numbering="imgt")
+    check("VHH graft length preserved", len(g.sequence) == len(long_vhh.sequence),
+          f"{len(g.sequence)} vs {len(long_vhh.sequence)}")
+    check("VHH graft CDRs identical", _cdrs(number_heavy_imgt(g.sequence)) == donor_cdrs,
+          str(_cdrs(number_heavy_imgt(g.sequence))))
+    hall = {p: o for p, o in g.origin.items()
+            if p.startswith("H") and int("".join(c for c in p if c.isdigit()))
+            in i.vhh_hallmark}
+    check("VHH hallmark kept donor in imgt graft",
+          hall and all(o == "donor(vhh)" for o in hall.values()), str(hall))
+    bm = analyze_backmutations(long_vhh, choice.v_gene, is_vhh=True,
+                               j_gene=choice.j_gene, numbering="imgt")
+    illegal = [c.position for c in bm.candidates
+               if int("".join(ch for ch in c.position if ch.isdigit())) >= 118
+               or c.position in ("H105", "H106")]
+    check("no FR4/CDR3-stem back-mutation candidates in imgt",
+          not illegal, str(illegal))
+    v2 = graft_variant(long_vhh, choice.v_gene, choice.j_gene, "imgt",
+                       bm.revert_positions(("T1", "T2")), is_vhh=True,
+                       numbering="imgt")
+    check("VHH V2 CDRs identical", _cdrs(number_heavy_imgt(v2.sequence)) == donor_cdrs)
+
+    # ---- calibration silently keyed Kabat -> must be dropped in imgt ----
+    bm_cal = analyze_backmutations(
+        long_vhh, choice.v_gene, is_vhh=True, numbering="imgt",
+        calibration={"H71": {"ddG_kcal": 2.0, "n_variants": 3}})
+    check("imgt mode drops Kabat-keyed calibration with warning",
+          bool(bm_cal.warnings) and "Kabat" in bm_cal.warnings[0],
+          str(bm_cal.warnings))
+
+    # ---- full pipeline e2e (Fab, IMGT coordinates) + reports ----
+    with tempfile.TemporaryDirectory() as td:
+        cfg = PipelineConfig(numbering="imgt", cdr_scheme="imgt")
+        result = run_pipeline(
+            os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"),
+            cfg, outdir=td)
+        from humanize.report import write_all
+        paths = write_all(td, result)
+        check("imgt e2e: both chains processed", len(result.chains) == 2)
+        check("imgt e2e: all report files written",
+              all(os.path.exists(p) for p in paths.values()),
+              str([os.path.basename(p) for p in paths.values()
+                   if not os.path.exists(p)]))
+        seqs = {}
+        for rep in result.chains:
+            ct = rep.input_chain.chain_type
+            donor_c = _cdrs(rep.input_chain.numbered)
+            for v in rep.variants:
+                vc = number_heavy_imgt(v.sequence) if ct == "H" \
+                    else number_light_imgt(v.sequence)
+                if _cdrs(vc) != donor_c:
+                    check(f"imgt e2e: {v.name} preserves CDRs", False,
+                          f"{_cdrs(vc)} != {donor_c}")
+                    break
+            else:
+                check(f"imgt e2e: {ct} variants ({len(rep.variants)}) preserve CDRs",
+                      True)
+            # candidate labels are IMGT-space (>=105 CDR3 / >=118 FR4 absent)
+            bad = [c.position for c in rep.backmut.candidates
+                   if int("".join(ch for ch in c.position if ch.isdigit())) >= 118]
+            check(f"imgt e2e: {ct} back-mutations all below FR4", not bad,
+                  str(bad))
+        nj_path = os.path.join(td, "variants_numbering.json")
+        check("imgt e2e: numbering json written", os.path.exists(nj_path))
+        if os.path.exists(nj_path):
+            import json as _json
+            with open(nj_path) as fh:
+                blob = _json.load(fh)
+            check("numbering json records scheme",
+                  blob.get("numbering_scheme") == "imgt"
+                  and isinstance(blob.get("variants"), dict),
+                  str(list(blob)[:3]))
+
+
 def main():
     test_numbering()
     test_chemical_liability_delta()
@@ -1745,6 +2069,8 @@ def main():
     test_graft_loop_conservation()
     test_vhh_humanization_gold_standard()
     test_germline_and_graft()
+    test_scheme_arg_threading()
+    test_imgt_numbering_mode()
     test_backmut_variants()
     test_vhh_protection()
     test_minimal_reversion()

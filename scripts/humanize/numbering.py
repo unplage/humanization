@@ -117,7 +117,7 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
     Tries ANARCI first (more accurate), then the built-in engine.
     """
     # 1. Try ANARCI first (more accurate for standard Kabat numbering)
-    from .anarci_adapter import is_anarci_available, number_with_anarci_imgt
+    from .anarci_adapter import is_anarci_available
     if is_anarci_available():
         # For Kabat, we still use ANARCI with kabat scheme
         try:
@@ -520,22 +520,48 @@ IMGT_CDRS = {
 }
 CDR_SCHEMES = {"kabat": KABAT_CDRS, "chothia": CHOTHIA_CDRS, "abm": ABM_CDRS, "imgt": IMGT_CDRS}
 
+# Native IMGT CDR boundaries for IMGT-numbered chains (labels in IMGT space;
+# keep in sync with schemespec._IMGT_CDR_WINDOWS -- asserted in tests).
+NATIVE_IMGT_CDRS = {
+    "H": {"CDR1": ("H27", "H38"), "CDR2": ("H56", "H65"), "CDR3": ("H105", "H117")},
+    "L": {"CDR1": ("L27", "L38"), "CDR2": ("L56", "L65"), "CDR3": ("L105", "L117")},
+}
 
-def _cdr_segments(chain: NumberedChain, scheme: str = "kabat") -> Dict[str, Tuple[str, str]]:
+
+def _cdr_segments(chain: NumberedChain, scheme: str = "kabat",
+                  numbering: str = "kabat") -> Dict[str, Tuple[str, str]]:
     """Return {CDR1: (start_pos, end_pos), ...}; end positions include
-    insertion codes (e.g. H35B, H100D)."""
-    cdr_def = CDR_SCHEMES[scheme][chain.chain_type]
-    out = {}
-    for name, (start, _end) in cdr_def.items():
+    insertion codes (e.g. H35B, H100D).
+
+    Walks forward from the scheme's start label while the numeric position
+    base is within [start..end], so insertion labels are included and scheme
+    windows that cross region boundaries (e.g. the IMGT-approx H26-H35 CDR1
+    stem) are honoured regardless of the chain's region labels.
+
+    numbering="imgt" selects the native IMGT boundaries (IMGT-numbered
+    chains); kabat numbering keeps the four CDR_SCHEMES label tables."""
+    if numbering == "imgt":
+        cdr_def = NATIVE_IMGT_CDRS[chain.chain_type]
+    else:
+        cdr_def = CDR_SCHEMES[scheme][chain.chain_type]
+
+    def _num(label: str) -> int:
+        return int("".join(c for c in label if c.isdigit()))
+
+    nums = [_num(r.pos) for r in chain.residues]
+    out: Dict[str, Tuple[str, str]] = {}
+    for name, (start, end) in cdr_def.items():
         start_res = chain.residue(start)
         if start_res is None:
             continue
-        region = start_res.region
+        s_num, e_num = _num(start), _num(end)
+        i0 = chain.residues.index(start_res)
         last = start_res
-        idx = chain.residues.index(start_res)
-        while idx + 1 < len(chain.residues) and chain.residues[idx + 1].region == region:
-            idx += 1
-            last = chain.residues[idx]
+        for i in range(i0, len(chain.residues)):
+            if nums[i] > e_num:
+                break
+            if nums[i] >= s_num:
+                last = chain.residues[i]
         out[name] = (start, last.pos)
     return out
 
@@ -555,13 +581,56 @@ VHH_HALLMARK = {
     47: ("G", "F", "S"),  # 47: W -> G/F/S
 }
 
+# Same residues in IMGT numbering (37->42, 44->49, 45->50, 47->52).
+VHH_HALLMARK_IMGT = {
+    42: ("F", "Y"),
+    49: ("E", "Q"),
+    50: ("R",),
+    52: ("G", "F", "S"),
+}
 
-def is_vhh(chain: NumberedChain) -> Tuple[bool, float, List[str]]:
-    """Detect camelid single-domain (VHH) hallmark in FR2 (Kabat 37/44/45/47).
-    Returns (is_vhh, matched_count, matched_positions)."""
+
+def is_vhh(chain: NumberedChain, numbering: str = "kabat") -> Tuple[bool, float, List[str]]:
+    """Detect camelid single-domain (VHH) hallmark in FR2.
+
+    Kabat numbering checks 37/44/45/47; IMGT numbering checks the same
+    residues at 42/49/50/52. Returns (is_vhh, matched_count, matched_positions)."""
+    table = VHH_HALLMARK_IMGT if numbering == "imgt" else VHH_HALLMARK
     matched = []
-    for pos, allowed in VHH_HALLMARK.items():
+    for pos, allowed in table.items():
         r = chain.residue(f"H{pos}")
         if r is not None and r.aa.upper() in allowed:
             matched.append(f"H{pos}{r.aa}")
     return (len(matched) >= 3, len(matched), matched)
+
+
+# ---------------------------------------------------------------------------
+# IMGT numbering entry points (ANARCI required; no portable fallback)
+# ---------------------------------------------------------------------------
+
+def _number_imgt(seq: str, chain_type: str) -> NumberedChain:
+    from .anarci_adapter import is_anarci_available, number_with_anarci_imgt
+    if not is_anarci_available():
+        raise ValueError(
+            "[IMGT numbering] ANARCI is required but not installed "
+            "(pip install anarci); IMGT mode has no portable fallback")
+    chain = number_with_anarci_imgt(seq, chain_type)
+    if chain is None:
+        raise ValueError(
+            f"[IMGT numbering] ANARCI failed to number the "
+            f"{'heavy' if chain_type == 'H' else 'light'} chain")
+    return chain
+
+
+def number_heavy_imgt(seq: str, species_hint: str = "unknown") -> NumberedChain:
+    """Number a heavy chain (VH/VHH) with IMGT numbering (ANARCI)."""
+    chain = _number_imgt(seq, "H")
+    chain.species_hint = species_hint
+    return chain
+
+
+def number_light_imgt(seq: str, species_hint: str = "unknown") -> NumberedChain:
+    """Number a light chain (kappa/lambda) with IMGT numbering (ANARCI)."""
+    chain = _number_imgt(seq, "L")
+    chain.species_hint = species_hint
+    return chain
