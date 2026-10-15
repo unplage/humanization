@@ -95,9 +95,8 @@ def classify_sequences(records: List[Tuple[str, str]]) -> List[InputChain]:
             raise InputError(f"[{name}] sequence too short ({len(s)} aa) to be a V domain")
         chain, chain_type, errors = None, None, []
         # 1) ANARCI classification (when available): H -> number_heavy,
-        #    K/L -> number_light (built-in engine; AbRSA VL numbering deviates
-        #    from the Kabat L27A-F insertion convention and has no lambda
-        #    support).
+        #    K/L -> number_light (built-in engine, which implements the Kabat
+        #    L27A-F insertion convention and supports lambda chains).
         ct = _anarci_chain_type(s)
         if ct in ("K", "L"):
             try:

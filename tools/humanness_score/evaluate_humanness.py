@@ -23,8 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 # Import from scripts.humanize (absolute imports)
 from scripts.humanize.numbering import number_heavy, number_light
 from scripts.humanize.germline import load_germline_db, compare_to_germline
+from scripts.humanize.anarci_adapter import number_with_anarci_imgt
 from scripts.humanize.imgt_numbering import (
-    number_with_abrsa_imgt, load_imgt_germline, compare_imgt_posmaps_direct,
+    load_imgt_germline, compare_imgt_posmaps_direct,
     kabat_posmap_to_imgt_posmap, format_imgt_region_alignment
 )
 
@@ -63,19 +64,19 @@ def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
 def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
     """Evaluate a single chain against human germline using IMGT numbering.
 
-    Uses AbRSA with IMGT scheme to number the query sequence directly,
+    Uses ANARCI with IMGT scheme to number the query sequence directly,
     then loads IMGT germline database for comparison.
     """
     pass
 
-    # Number the sequence using AbRSA with IMGT scheme
-    numbered = number_with_abrsa_imgt(sequence, chain_type)
+    # Number the sequence using ANARCI with IMGT scheme
+    numbered = number_with_anarci_imgt(sequence, chain_type)
 
     if numbered is not None:
-        # AbRSA succeeded - use IMGT-numbered posmap directly
+        # ANARCI succeeded - use IMGT-numbered posmap directly
         query_imgt = numbered.posmap()
     else:
-        # AbRSA failed - fallback to Kabat numbering + conversion
+        # ANARCI unavailable - fallback to Kabat numbering + conversion
         from scripts.humanize.numbering import number_heavy, number_light
         from scripts.humanize.imgt_numbering import kabat_posmap_to_imgt_posmap
 

@@ -102,7 +102,6 @@ python3 tests/test_pipeline.py
 | **Fab / VHH 双格式** | 自动链型检测；VHH hallmark（Kabat 37/44/45/47）识别并全程保护 |
 | **零依赖便携核心** | anchor-based Kabat 编号引擎（纯标准库）；内置 373 V + 28 J 人源 germline |
 | **ANARCI 编号增强** | 优先调用 [ANARCI](https://github.com/oxford/ANARCI)（Dunbar & Deane 2016）进行 Kabat/IMGT 编号，自动检测链类型（VH/VL/VHH），回退到内置引擎 |
-| **AbRSA 编号增强** | 可选调用 [AbRSA](https://github.com/CAO-Yang-1/AbRSA)（Li et al. 2019）进行 CDR 分区，自动回退到内置引擎；5 模型共识避免单模型偏差 |
 | **多策略 Germline 选择** | 9 种策略（FR/CDR/综合/CVI/最小突变/Adimab频率/Pioneer频率/3轴/自动），基于 BI 2024 和治疗性抗体数据优化 |
 | **多套 CDR 定义** | Kabat / Chothia / AbM / IMGT 四套边界同时报告 |
 | **回复突变量化评分** | 结构（vernier/界面/canonical/接触/埋藏）+ 免疫原性 + 可开发性三维评分 → T1/T2/T3/KEEP_DONOR 分级与逐条依据 |
@@ -126,21 +125,20 @@ python3 tests/test_pipeline.py
 
 | 链类型 | 首选引擎 | Fallback | 说明 |
 |--------|----------|----------|------|
-| **VH** | ANARCI | AbRSA → 内置引擎 | ANARCI HMM 准确识别 CDR2 插入位点（H52A） |
+| **VH** | ANARCI | 内置引擎 | ANARCI HMM 准确识别 CDR2 插入位点（H52A） |
 | **VL** | 内置引擎 | - | ANARCI 有 VL CDR3 bug（L91-L95 错位到 L96-L97） |
-| **VHH** | ANARCI | AbRSA → 内置引擎 | 自动检测 VHH hallmark（Kabat 37/44/45/47） |
+| **VHH** | ANARCI | 内置引擎 | 自动检测 VHH hallmark（Kabat 37/44/45/47） |
 
 ### IMGT 编号
 
 | 链类型 | 首选引擎 | Fallback | 说明 |
 |--------|----------|----------|------|
-| **VH/VL** | ANARCI | AbRSA → Kabat 转换 | ANARCI 原生支持 IMGT，CDR2 gap 处理正确 |
+| **VH/VL** | ANARCI | Kabat 编号 + 转换 | ANARCI 原生支持 IMGT，CDR2 gap 处理正确 |
 
 ### 关键修复
 
-1. **H52A 插入位点**：AbRSA 错误地将 CDR2 插入放在 H56A（非标准），ANARCI 正确放在 H52A
-2. **VL 链类型检测**：通过 ANARCI HMM 分类结果（chain_type='K'/'L'）自动识别轻链，避免误分类为重链
-3. **VL CDR3 编号**：内置引擎正确处理 L89-L95，ANARCI 有已知 bug
+1. **VL 链类型检测**：通过 ANARCI HMM 分类结果（chain_type='K'/'L'）自动识别轻链，避免误分类为重链
+2. **VL CDR3 编号**：内置引擎正确处理 L89-L95，ANARCI 有已知 bug
 
 ### 安装 ANARCI（可选）
 
@@ -437,7 +435,6 @@ grep -A25 "Back-mutation candidates" demo/humanization_report.md
 scripts/humanize/
 ├── numbering.py       # anchor-based Kabat 编号引擎（零依赖，核心）
 ├── anarci_adapter.py  # ANARCI 编号适配器（Kabat/IMGT，自动链类型检测）
-├── abrsa.py           # AbRSA 外部工具封装（可选，CDR 分区增强）
 ├── germline.py        # germline 加载/选择（NCBI FASTA 优先，内置后备）
 ├── graft.py           # CDR 移植（4 方案）+ 变体组装 + FR indel 处理
 ├── backmut.py         # 回复突变候选 + 三维评分 + 分级（核心）
@@ -480,5 +477,3 @@ python3 tests/backtest_large.py     # 大规模 9 策略对比（需 data/benchm
 - 基准数据：HumAb25（TencentAI4S/HuDiff，Zenodo DOI 10.5281/zenodo.16974296）
 - 结构/设计工具：AlphaFold3（Google DeepMind）、ProteinMPNN（Baker Lab）、
   BioPhi/Sapiens（Merck）、ANARCI（OPIG）
-- **CDR 分区**：[AbRSA](https://github.com/CAO-Yang-1/AbRSA)（Li et al. 2019, Protein Science 28:1524-1531）——
-  可选调用，提供基于深度学习的 CDR 边界检测；当 AbRSA 不可用时自动回退到内置 anchor-based 引擎
