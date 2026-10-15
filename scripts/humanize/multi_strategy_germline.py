@@ -130,6 +130,15 @@ def _estimate_n_backmutations(
         return 999
 
 
+def _allele_key(gene_id: str) -> int:
+    """等位编号数值（用于排序 tiebreak：指标全同时取编号最小的等位基因）"""
+    _, _, allele = gene_id.partition('*')
+    try:
+        return int(allele)
+    except ValueError:
+        return 10 ** 6
+
+
 def choose_germlines_multi_strategy(
     query: NumberedChain,
     db: GermlineDB,
@@ -214,44 +223,68 @@ def choose_germlines_multi_strategy(
             frequency_score=item['frequency'],
             composite_3axis=item['composite_3axis'],
         )
-    
+
     def _top_n(items, n=5):
-        return [_make_candidate(x, '') for x in items[:n]]
+        # 同一基因（忽略等位编号）的多个等位基因若各项指标完全一致，
+        # 只保留等位编号最小的代表，并继续向下取后续不同基因补足 n 个，
+        # 避免 IGHV1-69*02/*04/*06/*08/*09 这类冗余占满 top-5 而丢失
+        # IGHV1-46*01 等真正不同的候选。
+        seen = set()
+        out = []
+        for x in items:
+            base = x['gene'].gene_id.split('*')[0]
+            metric_key = (
+                round(x['fr'], 10), round(x['cdr'], 10),
+                round(x['composite'], 10), round(x['cvi'], 10),
+                x['n_backmut'],
+                round(x['frequency'], 10),
+                round(x['composite_3axis'], 10),
+                round(x.get('adimab_score', 0.0), 10),
+                round(x.get('pioneer_score', 0.0), 10),
+            )
+            key = (base, metric_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(_make_candidate(x, ''))
+            if len(out) >= n:
+                break
+        return out
     
     # 策略1: FR 同源性最高（FR 相同时用使用频率作为 tiebreaker）
-    sorted_fr = sorted(scored, key=lambda x: (-x['fr'], -x['frequency']))
+    sorted_fr = sorted(scored, key=lambda x: (-x['fr'], -x['frequency'], _allele_key(x['gene'].gene_id)))
     result.candidates['fr_best'] = _top_n(sorted_fr)
     for c in result.candidates['fr_best']:
         c.strategy = 'fr_best'
     
     # 策略2: CDR 同源性最高（CDR 相同时用使用频率作为 tiebreaker）
-    sorted_cdr = sorted(scored, key=lambda x: (-x['cdr'], -x['frequency']))
+    sorted_cdr = sorted(scored, key=lambda x: (-x['cdr'], -x['frequency'], _allele_key(x['gene'].gene_id)))
     result.candidates['cdr_best'] = _top_n(sorted_cdr)
     for c in result.candidates['cdr_best']:
         c.strategy = 'cdr_best'
     
     # 策略3: 综合评分最高（composite 相同时用使用频率作为 tiebreaker）
-    sorted_composite = sorted(scored, key=lambda x: (-x['composite'], -x['frequency']))
+    sorted_composite = sorted(scored, key=lambda x: (-x['composite'], -x['frequency'], _allele_key(x['gene'].gene_id)))
     result.candidates['composite'] = _top_n(sorted_composite)
     for c in result.candidates['composite']:
         c.strategy = 'composite'
     
     # 策略4: CVI 同源性最高（CVI 相同时用使用频率作为 tiebreaker）
-    sorted_cvi = sorted(scored, key=lambda x: (-x['cvi'], -x['frequency']))
+    sorted_cvi = sorted(scored, key=lambda x: (-x['cvi'], -x['frequency'], _allele_key(x['gene'].gene_id)))
     result.candidates['cvi_best'] = _top_n(sorted_cvi)
     for c in result.candidates['cvi_best']:
         c.strategy = 'cvi_best'
     
     # 策略5: 估计回复突变最少（回突变相同时用使用频率作为 tiebreaker）
-    sorted_min = sorted(scored, key=lambda x: (x['n_backmut'], -x['frequency']))
+    sorted_min = sorted(scored, key=lambda x: (x['n_backmut'], -x['frequency'], _allele_key(x['gene'].gene_id)))
     result.candidates['min_backmutations'] = _top_n(sorted_min)
     for c in result.candidates['min_backmutations']:
         c.strategy = 'min_backmutations'
     
     # 策略6: 当前系统策略 (top 30% FR 中 CDR 最高)
-    sorted_by_fr = sorted(scored, key=lambda x: -x['fr'])
+    sorted_by_fr = sorted(scored, key=lambda x: (-x['fr'], _allele_key(x['gene'].gene_id)))
     top_30 = sorted_by_fr[:max(1, int(len(sorted_by_fr) * 0.3))]
-    sorted_current = sorted(top_30, key=lambda x: (-x['cdr'], -x['frequency']))
+    sorted_current = sorted(top_30, key=lambda x: (-x['cdr'], -x['frequency'], _allele_key(x['gene'].gene_id)))
     result.candidates['current'] = _top_n(sorted_current)
     for c in result.candidates['current']:
         c.strategy = 'current'
@@ -263,19 +296,19 @@ def choose_germlines_multi_strategy(
         item['adimab_score'] = item['frequency'] * (1.2 if is_adimab_rec else 1.0)
         item['pioneer_score'] = item['frequency'] * (1.2 if is_pioneer_rec else 1.0)
     
-    sorted_adimab = sorted(scored, key=lambda x: -x['adimab_score'])
+    sorted_adimab = sorted(scored, key=lambda x: (-x['adimab_score'], _allele_key(x['gene'].gene_id)))
     result.candidates['adimab_frequency'] = _top_n(sorted_adimab)
     for c in result.candidates['adimab_frequency']:
         c.strategy = 'adimab_frequency'
     
     # 策略8: Pioneer 频率优先
-    sorted_pioneer = sorted(scored, key=lambda x: -x['pioneer_score'])
+    sorted_pioneer = sorted(scored, key=lambda x: (-x['pioneer_score'], _allele_key(x['gene'].gene_id)))
     result.candidates['pioneer_frequency'] = _top_n(sorted_pioneer)
     for c in result.candidates['pioneer_frequency']:
         c.strategy = 'pioneer_frequency'
     
     # 策略9: 3 轴综合评分 (CVI + 频率 + FR)
-    sorted_3axis = sorted(scored, key=lambda x: -x['composite_3axis'])
+    sorted_3axis = sorted(scored, key=lambda x: (-x['composite_3axis'], _allele_key(x['gene'].gene_id)))
     result.candidates['composite_3axis'] = _top_n(sorted_3axis)
     for c in result.candidates['composite_3axis']:
         c.strategy = 'composite_3axis'
