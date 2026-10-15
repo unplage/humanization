@@ -19,10 +19,6 @@ total number of residues spanned, so exotic loop lengths and species quirks
 is scheme-accurate for standard V domains; when installed on the server,
 ANARCI is tried first for heavy chains and the built-in engine is the
 portable fallback (see number_heavy/number_light).
-
-When AbRSA is available (data/AbRSA/AbRSA), it is tried after ANARCI for
-heavy chains; the built-in engine remains the portable fallback, and VL
-always uses the built-in engine (see number_light).
 """
 
 from __future__ import annotations
@@ -30,8 +26,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-
-from .abrsa import is_abrsa_available, number_with_abrsa
 
 REGIONS = ("FR1", "CDR1", "FR2", "CDR2", "FR3", "CDR3", "FR4")
 
@@ -120,7 +114,7 @@ def _find_fr2_trp(s: str, start: int, end: int, chain_type: str) -> Optional[int
 def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
     """Number a heavy chain sequence using Kabat numbering.
 
-    Tries ANARCI first (more accurate), then AbRSA, then built-in engine.
+    Tries ANARCI first (more accurate), then the built-in engine.
     """
     # 1. Try ANARCI first (more accurate for standard Kabat numbering)
     from .anarci_adapter import is_anarci_available, number_with_anarci_imgt
@@ -147,18 +141,7 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
         except Exception:
             pass
 
-    # 2. Fallback to AbRSA
-    # Only accept heavy chains: AbRSA numbers VL sequences without error and
-    # returns them chain_type="L" (with L30A-F-style CDR1 insertions that
-    # deviate from the Kabat/ANARCI L27A-F convention), which used to hijack
-    # every kappa VL through classify_sequences' try-heavy-first routing.
-    if is_abrsa_available():
-        result = number_with_abrsa(seq, "H", "kabat")
-        if result is not None and result.chain_type == "H":
-            result.species_hint = species_hint
-            return result
-    
-    # Fallback to built-in anchor-based engine
+    # 2. Fallback to built-in anchor-based engine
     s = seq.upper().strip()
     n = len(s)
     warnings: List[str] = []
@@ -366,7 +349,7 @@ def _find_j_anchor(s: str, start: int, end: int, chain_type: str) -> Optional[in
     # J-consensus stretch (<=3 residues past the CDR3 end). For H require
     # W[GST] so a light chain's in-CDR3 'W' (e.g. lambda ...QVW-DSSS...) is
     # never mistaken for W103 -- otherwise the built-in heavy engine would
-    # swallow lambda VL when ANARCI/AbRSA are unavailable.
+    # swallow lambda VL when ANARCI is unavailable.
     for i in range(start, min(start + 4, end)):
         if chain_type == "H":
             if s[i] == "W" and i + 1 < len(s) and s[i + 1] in "GST":
@@ -385,9 +368,8 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
 
     Uses built-in engine (ANARCI has VL CDR3 bug that shifts positions).
     """
-    # Note: ANARCI has a known bug with VL CDR3 numbering (shifts L91-L95 to L96-L97).
-    # AbRSA also has issues with VL numbering. So we use the built-in engine directly.
-    # The built-in engine correctly handles VL CDR3 at positions L89-L97.
+    # Note: ANARCI has a known bug with VL CDR3 numbering (shifts L91-L95 to L96-L97),
+    # so VL always uses the built-in engine, which correctly handles VL CDR3 at L89-L97.
     s = seq.upper().strip()
     n = len(s)
     warnings: List[str] = []

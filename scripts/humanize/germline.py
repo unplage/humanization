@@ -126,7 +126,9 @@ def load_germline_db(db_dir: str) -> GermlineDB:
 
 # Bump when the numbering output would change (engine behaviour, position
 # fixes); invalidates the on-disk numbered-germline cache.
-_NUMBERING_CACHE_VERSION = 1
+# v2: AbRSA fallback removed — v1 "builtin"-tagged caches may contain
+# AbRSA-numbered labels (e.g. H56A CDR2 insertions) and must not be reused.
+_NUMBERING_CACHE_VERSION = 2
 _DB_MEMORY_CACHE: Dict[str, "GermlineDB"] = {}
 
 

@@ -19,8 +19,9 @@ from docx.oxml.ns import qn
 from evaluate_humanness import (
     evaluate_sequence, evaluate_sequence_imgt
 )
+from scripts.humanize.anarci_adapter import number_with_anarci_imgt
 from scripts.humanize.imgt_numbering import (
-    number_with_abrsa_imgt, load_imgt_germline, compare_imgt_posmaps_direct,
+    load_imgt_germline, compare_imgt_posmaps_direct,
     IMGT_REGIONS
 )
 from scripts.humanize.sequences import parse_fasta
@@ -69,8 +70,8 @@ def get_imgt_region(pos_label):
 
 
 def get_cdr_sequences(sequence, chain_type):
-    """Get CDR sequences using AbRSA IMGT numbering."""
-    numbered = number_with_abrsa_imgt(sequence, chain_type)
+    """Get CDR sequences using ANARCI IMGT numbering."""
+    numbered = number_with_anarci_imgt(sequence, chain_type)
     if not numbered:
         return None
     

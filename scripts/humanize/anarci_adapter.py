@@ -4,8 +4,7 @@ Wraps the ANARCI library to provide IMGT-numbered antibody sequences
 in the same NumberedChain format used by the pipeline.
 
 ANARCI (Antibody Numbering and Antigen Receptor ClassIfication) uses
-HMMER profile searches for robust IMGT numbering. It is more reliable
-than AbRSA for IMGT numbering, especially for VL chains.
+HMMER profile searches for robust IMGT numbering.
 
 Reference:
     Dunbar J, Deane CM. ANARCI: antigen receptor numbering and annotation
@@ -53,7 +52,7 @@ def _detect_lambda_chain(sequence: str) -> bool:
 
     Note: ANARCI correctly handles lambda chains natively. This function
     is kept for compatibility but returns False since ANARCI doesn't need
-    special lambda handling (unlike AbRSA).
+    special lambda handling.
     """
     return False
 

@@ -242,9 +242,9 @@ def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[i
     """Map 1-based residue index -> (Kabat region, IMGT region), plus chain type.
 
     Kabat regions come from the pipeline Kabat numbering engine
-    (ANARCI -> AbRSA -> built-in for VH; built-in for VL).
+    (ANARCI -> built-in for VH; built-in for VL).
     IMGT regions come from the pipeline IMGT numbering engine
-    (ANARCI scheme=imgt -> AbRSA imgt), same engine path as
+    (ANARCI scheme=imgt), same engine path as
     tools/humanness_score. Regions per residue are read directly from the
     NumberedChain.region field, so no static Kabat->IMGT lookup table is
     involved (that table has gaps for insertion-dependent positions).
@@ -266,7 +266,7 @@ def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[i
                 set(CONSERVED_CYS.get("L" if chain.strip().upper() == "L" else "H", set())))
     try:
         from scripts.humanize.numbering import number_heavy, number_light
-        from scripts.humanize.imgt_numbering import number_with_abrsa_imgt
+        from scripts.humanize.anarci_adapter import number_with_anarci_imgt
     except ImportError:
         return fallback
 
@@ -313,7 +313,7 @@ def get_chain_regions(sequence: str, chain: str) -> Tuple[Dict[int, str], Dict[i
     # IMGT numbering (independent engine call, same as humanness_score)
     regions_imgt = {i + 1: "-" for i in range(len(sequence))}
     try:
-        imgt_numbered = number_with_abrsa_imgt(sequence, chain_type)
+        imgt_numbered = number_with_anarci_imgt(sequence, chain_type)
         if imgt_numbered is not None:
             for r in imgt_numbered.residues:
                 idx = r.index

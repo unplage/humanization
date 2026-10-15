@@ -21,7 +21,9 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 from humanize.backmut import StructureHints, analyze_backmutations
 from humanize.germline import choose_germlines, load_germline_db
 from humanize.graft import graft_chain
-from humanize.numbering import CDR_SCHEMES, is_vhh, number_heavy, number_light
+from humanize.numbering import (
+    CDR_SCHEMES, NumberedChain, NumberedResidue, is_vhh, number_heavy, number_light
+)
 from humanize.pipeline import PipelineConfig, run_pipeline
 from humanize.sequences import parse_input
 from humanize.variants import assemble_variants
@@ -48,7 +50,7 @@ def test_numbering():
     h = number_heavy(IGHV3_23)
     check("VH3-23 FR1 = 30 residues", h.residue("H30") is not None and h.residue("H31") is not None)
     check("VH3-23 CDR1 = SYAMS", h.seq_range("H31", "H35") == "SYAMS", h.seq_range("H31", "H35"))
-    # AbRSA uses standard Kabat CDR2 boundary: H50-H65 (16 residues)
+    # standard Kabat CDR2 boundary: H50-H65 incl. H52A (17 residues)
     check("VH3-23 CDR2 correct", h.seq_range("H50", "H65") == "AISGSGGSTYYADSVKG")
     check("VH3-23 FR3 correct", h.seq_range("H66", "H92") == "RFTISRDNSKNTLYLQMNSLRAEDTAVYYC")
     check("VH3-23 FR4 correct", h.seq_range("H103", "H113") == "WGQGTLVTVSS")
@@ -75,7 +77,7 @@ def test_numbering():
           str(amg.cdrs.get("CDR3")))
 
     m4 = number_heavy(M4D5_VH)
-    # AbRSA uses standard Kabat CDR2: H50-H65 without H52A insertion
+    # standard Kabat CDR2: H50-H65 (H52A insertion inside the range)
     check("4D5 VH CDR2 = donor loop", m4.seq_range("H50", "H65") == "YINPYNGVTKYNQKFKG")
     # Standard Kabat: H93/H94 are FR3 (e.g. "S" "R" in ...VYYC S R WGGD...);
     # CDR3 starts at H95.
@@ -275,16 +277,24 @@ def test_rmsd_alignment_pos_map():
                        1.0, 90.0))
             fh.write("END\n")
 
-    # donor via AbRSA directly (L30A-F-style insertions) to reproduce the
-    # cross-engine mismatch cmd_rmsd used to see; portable fallback =
-    # built-in L27A-F on both sides (label branch then self-skips)
-    try:
-        from humanize.abrsa import number_with_abrsa
-        donor_num = number_with_abrsa(donor_l, "L", "kabat")
-        if donor_num is None:
-            raise ValueError("abrsa returned None")
-    except Exception:
-        donor_num = number_light(donor_l)
+    # Reproduce the historical cross-engine mismatch: a donor numbered with
+    # the L30A-F-style CDR1 insertion convention (as an external engine once
+    # produced) vs a variant numbered with the built-in L27A-F convention.
+    # donor_num keeps the built-in per-index aa/region but relabels CDR1
+    # insertions to L30A-F, so label-based pairing misaligns (L28/L29/L30
+    # shift by six residues) while sequence alignment still recovers.
+    donor_base = number_light(donor_l)
+    ins_labels = [f"L{i}" for i in range(1, 31)] + [f"L30{c}" for c in "ABCDEF"]
+    i = 31
+    while len(ins_labels) < len(donor_base.residues):
+        ins_labels.append(f"L{i}")
+        i += 1
+    donor_num = NumberedChain(
+        chain_type="L",
+        sequence=donor_l,
+        residues=[NumberedResidue(pos=lab, aa=r.aa, region=r.region, index=r.index)
+                  for lab, r in zip(ins_labels, donor_base.residues)],
+    )
     var_num = number_light(var_l)
 
     def cdr1_labels(num):
@@ -332,12 +342,11 @@ def test_rmsd_alignment_pos_map():
 
 def test_vl_numbering_unification():
     """VL must always be numbered by the built-in engine (Kabat L27A-F CDR1
-    insertion convention, lambda supported). Guards against three bugs:
-    (1) AbRSA hijacking VL through number_heavy's try-first fallback (it
-    numbers VL without error, chain_type=L, insertions at L28-30);
-    (2) ANARCI-less classify misrouting lambda to the built-in heavy engine;
-    (3) the built-in heavy engine swallowing light chains whose CDR3 'W'
-    hits the loose W103 fallback."""
+    insertion convention, lambda supported). Guards against two bugs:
+    (1) ANARCI-less classify misrouting lambda to the built-in heavy engine;
+    (2) the built-in heavy engine swallowing light chains whose CDR3 'W'
+    hits the loose W103 fallback. (A historical external-engine VL hijack
+    via number_heavy's fallback is gone since that fallback was removed.)"""
     print("vl numbering unification")
     from humanize.sequences import classify_sequences, _anarci_chain_type
     import humanize.sequences as _seq_mod
