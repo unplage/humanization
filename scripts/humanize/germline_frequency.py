@@ -126,31 +126,36 @@ VL_GERMLINE_FREQUENCY = {
 
 
 # 治疗性抗体中 J germline 的使用频率
-# 数据来源：Thera-SAbDab、文献综述（"The germline origin of therapeutic antibodies"）
+# 数据来源：Thera-SAbDab、人源 repertoire HTS 统计（IMGT/LIGM-DB in-frame 分析等）。
+# 共识排序: IGHJ4 (~35-45%) > IGHJ6 (~20-35%) > IGHJ5 ≈ IGHJ1 (~5-10%) > IGHJ3 ≈ IGHJ2 (<5%)
 JH_GERMLINE_FREQUENCY = {
     "IGHJ4": 0.40,   # 最常用（~40%）
-    "IGHJ3": 0.15,
+    "IGHJ6": 0.30,   # 第二常用（长 CDR3 偏好；治疗性抗体中亦为 J4 之后的主流选择）
     "IGHJ1": 0.10,
     "IGHJ5": 0.10,
+    "IGHJ3": 0.05,
     "IGHJ2": 0.05,
-    "IGHJ6": 0.05,
 }
 
 JK_GERMLINE_FREQUENCY = {
-    "IGKJ1": 0.25,
-    "IGKJ2": 0.20,
+    # 共识排序: IGKJ1 (~45-50%, RSS 优势) > IGKJ2 (~25%) > IGKJ4 (~15%)
+    #           > IGKJ3 (~5-10%) > IGKJ5 (~1-3%)
+    "IGKJ1": 0.45,
+    "IGKJ2": 0.25,
     "IGKJ4": 0.15,
     "IGKJ3": 0.10,
     "IGKJ5": 0.05,
 }
 
 JL_GERMLINE_FREQUENCY = {
-    "IGLJ1": 0.20,
-    "IGLJ2": 0.15,
-    "IGLJ3": 0.15,
+    # 共识排序（AIRR/HTS repertoire 统计，如 Berghaus et al. 2022 n>10^4）:
+    #   IGLJ3 (~35%) ≈ IGLJ2 (~34%) >> IGLJ1 (~15%) > IGLJ4 (~10%) > IGLJ5 ≈ IGLJ6 (<5%)
+    "IGLJ3": 0.35,
+    "IGLJ2": 0.34,
+    "IGLJ1": 0.16,
     "IGLJ4": 0.10,
-    "IGLJ5": 0.05,
-    "IGLJ6": 0.05,
+    "IGLJ5": 0.03,
+    "IGLJ6": 0.02,
 }
 
 

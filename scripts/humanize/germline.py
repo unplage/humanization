@@ -550,19 +550,21 @@ def choose_germlines(
     by identity (then frequency).
     """
     ctype = query.chain_type
+    from .germline_frequency import get_frequency
     v_genes = db.human(ctype)
     scored = []
     for g in v_genes:
         s = compare_to_germline(query, g)
-        scored.append((g, s))
-    scored.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"]))
+        scored.append((g, s, get_frequency(ctype, g.gene_id)))
+    # FR id desc, CDR id desc, then usage-frequency desc (repertoire convention tiebreak)
+    scored.sort(key=lambda t: (-t[1]["fr_identity"], -t[1]["cdr_identity"], -t[2]))
     viable = [t for t in scored if t[1]["fr_identity"] >= 0.60]
     if not viable:
         viable = scored
     top_fr = viable[:max(1, int(len(viable) * 0.3) or 1)]
     # within the top-FR set, pick max CDR identity (minimize back-mutations)
-    best = max(top_fr, key=lambda t: (t[1]["cdr_identity"], t[1]["fr_identity"]))
-    v_gene, v_scores = best
+    best = max(top_fr, key=lambda t: (t[1]["cdr_identity"], t[1]["fr_identity"], t[2]))
+    v_gene, v_scores = best[0], best[1]
     runner_up = None
     if len(top_fr) > 1:
         alt = [t for t in top_fr if t[0] is not v_gene]
@@ -587,6 +589,6 @@ def choose_germlines(
         scores=v_scores,
         runner_up=runner_up,
         alternatives=[
-            (g, s) for g, s in scored[:n_alternatives]
+            (g, s) for g, s, _freq in scored[:n_alternatives]
         ],
     )

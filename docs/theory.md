@@ -122,7 +122,9 @@ Selection notes:
 - **FR threshold**: default 60% (graft viability). When no human gene reaches
   it (highly non-human sequences), the threshold auto-degrades
   (50% → 40% → …) with a warning, and the highest-FR feasible gene is chosen.
-- **J gene**: highest FR4 identity, matching CDR3/J junction length.
+- **J gene**: highest FR4 identity; when identity is fully tied, the higher
+  usage-frequency gene wins (repertoire convention, e.g. IGHJ4/IGHJ6 over
+  IGHJ1/IGHJ2), then the longer matched length.
 - The legacy single-strategy "hybrid" (top-30% FR, then max CDR1+2) is kept
   as the `current` strategy for backward compatibility.
 
