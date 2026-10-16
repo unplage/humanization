@@ -301,12 +301,14 @@ def _process_chain(
         
         # Select best J gene
         from .germline import score_j_match
+        from .germline_frequency import get_j_frequency
         j_genes = db.j_for(ctype)
         j_scored = []
         for jg in j_genes:
             idn, n = score_j_match(donor, jg, config.numbering)
-            j_scored.append((jg, idn, n))
-        j_scored.sort(key=lambda t: (-t[1], -t[2]))
+            j_scored.append((jg, idn, n, get_j_frequency(jg.gene_id)))
+        # identity desc, then usage-frequency desc (industry convention tiebreak), then matched length
+        j_scored.sort(key=lambda t: (-t[1], -t[3], -t[2]))
         j_gene = j_scored[0][0] if j_scored else None
         
         # Calculate identity for the forced gene
