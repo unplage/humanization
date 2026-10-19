@@ -54,7 +54,7 @@ class MultiStrategyResult:
         lst = self.candidates.get(strategy, [])
         return lst[0] if lst else None
     
-    def get_top(self, strategy: str, n: int = 5) -> List[GermlineCandidate]:
+    def get_top(self, strategy: str, n: int = 10) -> List[GermlineCandidate]:
         """获取特定策略的前N个候选"""
         return self.candidates.get(strategy, [])[:n]
     
@@ -224,10 +224,10 @@ def choose_germlines_multi_strategy(
             composite_3axis=item['composite_3axis'],
         )
 
-    def _top_n(items, n=5):
+    def _top_n(items, n=10):
         # 同一基因（忽略等位编号）的多个等位基因若各项指标完全一致，
         # 只保留等位编号最小的代表，并继续向下取后续不同基因补足 n 个，
-        # 避免 IGHV1-69*02/*04/*06/*08/*09 这类冗余占满 top-5 而丢失
+        # 避免 IGHV1-69*02/*04/*06/*08/*09 这类冗余占满 top-10 而丢失
         # IGHV1-46*01 等真正不同的候选。
         seen = set()
         out = []
@@ -328,7 +328,7 @@ def format_multi_strategy_report(result: MultiStrategyResult) -> str:
     lines.append("-" * 110)
     
     for strategy, candidate_list in result.candidates.items():
-        for i, c in enumerate(candidate_list[:5], 1):
+        for i, c in enumerate(candidate_list[:10], 1):
             lines.append(
                 f"{strategy:<20} {i:<4} {c.gene.gene_id:<18} "
                 f"{c.fr_identity:<10.4f} {c.cdr_identity:<10.4f} "
