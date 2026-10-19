@@ -47,22 +47,27 @@ python3 tests/backtest_scale.py     # HumAb25: 25 approved mouse antibodies
    python3 scripts/humanize/cli.py compare --input <seq.fasta>
    ```
 
-   This displays a comparison table showing the top 5 candidates for each of the 9 strategies, with columns: strategy, rank, V gene, FR identity, CDR identity, composite, CVI, frequency, 3-axis, and back-mutation count.
+   This displays a comparison table showing the top 10 candidates for each of the 9 strategies, with columns: strategy, rank, V gene, FR identity, CDR identity, composite, CVI, frequency, 3-axis, and back-mutation count.
 
    9 个底层策略: `fr_best` | `cdr_best` | `composite` (0.7*FR+0.3*CDR) | `cvi_best` (canonical+vernier+interface) | `min_backmutations` | `current` (top-30% FR with max CDR) | `adimab_frequency` | `pioneer_frequency` | `composite_3axis` (0.5*CVI+0.3*freq+0.2*FR)。
    `auto` 是默认路由策略（VH=`adimab_frequency`，VL=`current`），不需要单独跑。
 
    **坐标空间**: `--numbering {kabat,imgt}`（默认 kabat）。`compare` 与后续 `run` 必须使用相同值；`imgt` 要求 ANARCI（无便携回退），强制 `--scheme imgt`，整条流水线在 IMGT 空间运行（种系 `abnumber_human_imgt.json`、位点集经 `kabat_imgt_positions.json` 对应表翻译）。限制：`rmsd` 与 `learn` 校准仍为 Kabat；IMGT 模式下 Kabat 键的预计算 immunogenicity/calibration 输入自动忽略并告警。
 
-   **每个策略必须返回 5 个候选**（按评分排序，分数相同时按使用频率排序），格式示例：
+   **每个策略必须返回 10 个候选**（按评分排序，分数相同时按使用频率排序），格式示例：
    ```
    策略: fr_best
    #   V基因              FR     CDR    Composite  CVI    Freq   3axis   回突变
-   1   IGHV3-72*01       0.867  0.440  0.739      0.833  0.003  0.591   1
-   2   IGHV3-73*01       0.853  0.600  0.777      0.833  0.003  0.588   2
-   3   IGHV3-73*02       0.853  0.600  0.777      0.833  0.003  0.588   2
-   4   IGHV3-15*01       0.840  0.480  0.732      0.792  0.003  0.565   1
-   5   IGHV3-15*02       0.840  0.480  0.732      0.792  0.003  0.565   1
+   1   IGHV3-23*01       0.895  0.591  0.804      0.630  0.184  0.549   5
+   2   IGHV3-23*03       0.895  0.545  0.790      0.630  0.184  0.549   5
+   3   IGHV3-23D*01      0.895  0.591  0.804      0.630  0.003  0.495   5
+   4   IGHV3-23*04       0.882  0.591  0.794      0.630  0.184  0.546   5
+   5   IGHV3-66*01       0.882  0.571  0.789      0.667  0.020  0.516   5
+   6   IGHV3-53*01       0.868  0.571  0.779      0.667  0.020  0.513   5
+   7   IGHV3-66*03       0.868  0.524  0.765      0.667  0.020  0.513   5
+   8   IGHV3-74*01       0.868  0.455  0.744      0.593  0.015  0.475   5
+   9   IGHV3-48*01       0.855  0.455  0.735      0.593  0.020  0.474   5
+   10  IGHV3-53*02       0.855  0.571  0.770      0.667  0.020  0.511   5
    ```
 
 2. **Step 2 — 按选定 germline 正式运行**: run once with `--germline-strategy <chosen> --outdir outputs` (or lock exact genes with `--force-germline VH=IGHV1-3*01 VL=IGKV1-39*01`) and deliver the full report set (markdown/docx/json/csv/fasta).

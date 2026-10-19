@@ -407,7 +407,7 @@ def cmd_compare(args):
     """Lightweight germline comparison across 9 strategies (Step 1).
     
     This command only evaluates germline candidates without running the full
-    humanization pipeline. It displays a comparison table showing the top 5
+    humanization pipeline. It displays a comparison table showing the top 10
     candidates for each of the 9 strategies.
     """
     from humanize.sequences import parse_input
