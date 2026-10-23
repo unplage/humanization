@@ -594,9 +594,11 @@ def test_lambda_chain_end_to_end():
     chain = number_light(seq)
     check("IGLV sequence numbers as light chain",
           chain is not None
-          # lambda FR1 is one residue shorter than kappa: the first
-          # conserved Cys sits at Kabat L22 (L23 is a gap), second at L88
-          and chain.residue("L22") is not None and chain.residue("L22").aa == "C"
+          # lambda FR1 is one residue shorter than kappa: Kabat places the
+          # deletion at L10, so the first conserved Cys lands on L23 (not
+          # L22) and the second on L88.
+          and chain.residue("L10") is None
+          and chain.residue("L23") is not None and chain.residue("L23").aa == "C"
           and chain.residue("L88") is not None and chain.residue("L88").aa == "C")
     from humanize.germline import choose_germlines
     choice = choose_germlines(chain, db)

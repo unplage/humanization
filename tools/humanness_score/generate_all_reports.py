@@ -69,88 +69,37 @@ def get_imgt_region(pos_label):
     return "Unknown"
 
 
+def _cdrs_from_numbered(numbered):
+    """Collect CDR sequences from a pipeline NumberedChain in sequence order.
+
+    Region labels come from the pipeline engine (IMGT regions for
+    ``number_with_anarci_imgt``, Kabat regions for ``number_heavy/light``),
+    so boundaries and insertion ordering match the main pipeline exactly.
+    """
+    return {
+        region: "".join(r.aa for r in numbered.residues if r.region == region)
+        for region in ("CDR1", "CDR2", "CDR3")
+    }
+
+
 def get_cdr_sequences(sequence, chain_type):
-    """Get CDR sequences using ANARCI IMGT numbering."""
+    """Get CDR sequences using ANARCI IMGT numbering (pipeline regions)."""
     numbered = number_with_anarci_imgt(sequence, chain_type)
     if not numbered:
         return None
-    
-    posmap = numbered.posmap()
-    
-    cdrs = {}
-    for region, (start, end) in IMGT_REGIONS.items():
-        if region.startswith('CDR'):
-            seq = ''
-            for num in range(start, end + 1):
-                # Use appropriate chain prefix
-                prefix = 'H' if chain_type == 'H' else 'L'
-                label = f'{prefix}{num}'
-                aa = posmap.get(label, '-')
-                if aa != '-':
-                    seq += aa
-                
-                # Add insertions
-                for letter in 'ABCDEFGHIJK':
-                    ins_label = f'{prefix}{num}{letter}'
-                    ins_aa = posmap.get(ins_label, None)
-                    if ins_aa:
-                        seq += ins_aa
-            cdrs[region] = seq
-    
-    return cdrs
+    return _cdrs_from_numbered(numbered)
 
 
 def get_kabat_cdr_sequences(sequence, chain_type):
-    """Get CDR sequences using Kabat numbering."""
+    """Get CDR sequences using Kabat numbering (pipeline regions)."""
     from scripts.humanize.numbering import number_heavy, number_light
-    
+
     if chain_type == 'H':
         numbered = number_heavy(sequence)
     else:
         numbered = number_light(sequence)
-    
-    posmap = numbered.posmap()
-    
-    # Kabat CDR regions
-    if chain_type == 'H':
-        kabat_cdrs = {
-            'CDR1': ('H31', 'H35'),
-            'CDR2': ('H50', 'H65'),
-            'CDR3': ('H95', 'H102'),
-        }
-    else:
-        kabat_cdrs = {
-            'CDR1': ('L24', 'L34'),
-            'CDR2': ('L50', 'L56'),
-            'CDR3': ('L89', 'L97'),
-        }
-    
-    def extract_cdr_seq(posmap, start_label, end_label):
-        """Extract CDR sequence including insertions."""
-        start_num = int(''.join(c for c in start_label if c.isdigit()))
-        end_num = int(''.join(c for c in end_label if c.isdigit()))
-        prefix = start_label[0]
-        
-        seq = ''
-        for num in range(start_num, end_num + 1):
-            label = f'{prefix}{num}'
-            aa = posmap.get(label, '-')
-            if aa != '-':
-                seq += aa
-            
-            for letter in 'ABCDEFGHIJK':
-                ins_label = f'{prefix}{num}{letter}'
-                ins_aa = posmap.get(ins_label, None)
-                if ins_aa:
-                    seq += ins_aa
-        
-        return seq
-    
-    cdrs = {}
-    for region, (start, end) in kabat_cdrs.items():
-        cdrs[region] = extract_cdr_seq(posmap, start, end)
-    
-    return cdrs
+
+    return _cdrs_from_numbered(numbered)
 
 
 def evaluate_antibody(name, sequence, chain_type):

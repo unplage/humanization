@@ -16,33 +16,40 @@ from pathlib import Path
 import pandas as pd
 
 
-def extract_cdrs_from_posmap(posmap: dict, chain_type: str) -> dict:
-    """Extract CDR sequences from IMGT-numbered position map.
+def _position_number(label: str):
+    """Numeric IMGT position of a label like 'H105' or 'H111A'."""
+    digits = "".join(c for c in label[1:] if c.isdigit())
+    return int(digits) if digits else None
 
-    IMGT CDR boundaries (Lefranc 2003):
-        CDR1: 27-38  (12 positions)
-        CDR2: 56-65  (10 positions)
-        CDR3: 105-117 (variable)
+
+def extract_cdrs_from_posmap(posmap: dict, chain_type: str) -> dict:
+    """Extract CDR sequences from an IMGT-numbered position map.
+
+    IMGT CDR boundaries (Lefranc 2003; identical to NATIVE_IMGT_CDRS in
+    ``scripts/humanize/numbering.py``):
+        CDR1: 27-38, CDR2: 56-65, CDR3: 105-117
+
+    The posmap is built in ANARCI sequence order. Iterating it in that order
+    (instead of numeric order with ascending insertion letters) is required
+    for CDR3: IMGT places insertions as 111A, 111B, ... then 112C, 112B,
+    112A and finally the 112 base, so a numeric walk transposes the loop.
     """
     imgt_cdr_ranges = {
         "CDR1": (27, 38),
         "CDR2": (56, 65),
         "CDR3": (105, 117),
     }
-    cdrs = {}
-    for cdr_name, (start, end) in imgt_cdr_ranges.items():
-        seq = ""
-        for pos in range(start, end + 1):
-            label = f"{chain_type}{pos}"
-            aa = posmap.get(label, "-")
-            if aa and aa != "-":
-                seq += aa
-            # handle insertions (CDR3 commonly has them)
-            for letter in "ABCDEFGHIJK":
-                ins_aa = posmap.get(f"{chain_type}{pos}{letter}", None)
-                if ins_aa:
-                    seq += ins_aa
-        cdrs[cdr_name] = seq
+    cdrs = {name: "" for name in imgt_cdr_ranges}
+    for label, aa in posmap.items():
+        if not aa or aa == "-" or not label.startswith(chain_type):
+            continue
+        pos_num = _position_number(label)
+        if pos_num is None:
+            continue
+        for cdr_name, (start, end) in imgt_cdr_ranges.items():
+            if start <= pos_num <= end:
+                cdrs[cdr_name] += aa
+                break
     return cdrs
 
 

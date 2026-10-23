@@ -26,7 +26,7 @@ from scripts.humanize.germline import load_germline_db, compare_to_germline
 from scripts.humanize.anarci_adapter import number_with_anarci_imgt
 from scripts.humanize.imgt_numbering import (
     load_imgt_germline, compare_imgt_posmaps_direct,
-    kabat_posmap_to_imgt_posmap, format_imgt_region_alignment
+    format_imgt_region_alignment
 )
 
 
@@ -111,65 +111,49 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
     """Evaluate a single chain against human germline using IMGT numbering.
 
     Uses ANARCI with IMGT scheme to number the query sequence directly,
-    then loads IMGT germline database for comparison.
+    then loads the IMGT germline database for comparison. Like the main
+    pipeline's ``--numbering imgt`` mode, this requires ANARCI and the
+    bundled IMGT germline DB; when either is missing the function warns and
+    returns ``(None, None)`` instead of emitting approximate converted
+    (Kabat-to-IMGT) numbering.
     """
-    pass
-
-    # Number the sequence using ANARCI with IMGT scheme
+    # Number the sequence using ANARCI with IMGT scheme. The main pipeline
+    # requires ANARCI for IMGT mode (there is no portable fallback), so the
+    # tool does the same instead of emitting approximate converted numbers.
     numbered = number_with_anarci_imgt(sequence, chain_type)
+    if numbered is None:
+        print(
+            "  [WARN] ANARCI IMGT numbering unavailable or failed; skipping "
+            "IMGT scoring (install anarci for IMGT results)",
+            file=sys.stderr,
+        )
+        return None, None
 
-    if numbered is not None:
-        # ANARCI succeeded - use IMGT-numbered posmap directly
-        query_imgt = numbered.posmap()
-    else:
-        # ANARCI unavailable - fallback to Kabat numbering + conversion
-        from scripts.humanize.numbering import number_heavy, number_light
-        from scripts.humanize.imgt_numbering import kabat_posmap_to_imgt_posmap
+    # Use IMGT-numbered posmap directly
+    query_imgt = numbered.posmap()
 
-        if chain_type == "H":
-            numbered_kabat = number_heavy(sequence)
-        else:
-            numbered_kabat = number_light(sequence)
-
-        query_imgt = kabat_posmap_to_imgt_posmap(numbered_kabat.posmap(), chain_type)
-        numbered = numbered_kabat  # For display purposes
-
-    # Load IMGT germline DB (abnumber_human_imgt.json)
+    # Load IMGT germline DB (abnumber_human_imgt.json). The pipeline's
+    # --numbering imgt mode also requires this bundled IMGT database.
     imgt_genes = load_imgt_germline(db_dir)
-
     if not imgt_genes:
-        # Fallback: use Kabat germline with conversion
-        from scripts.humanize.germline import load_germline_db
-        from scripts.humanize.imgt_numbering import kabat_posmap_to_imgt_posmap
+        print(
+            "  [WARN] IMGT germline database unavailable; skipping IMGT "
+            "scoring (expected data/germline/abnumber_human_imgt.json)",
+            file=sys.stderr,
+        )
+        return None, None
 
-        if not db_dir:
-            db_dir = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                "data", "germline"
-            )
-        db = load_germline_db(db_dir)
-        v_genes = db.human(chain_type)
+    scored = []
+    for gene in imgt_genes:
+        # Filter by chain type
+        if chain_type == "H" and not gene.gene_id.startswith("IGHV"):
+            continue
+        if chain_type == "L" and not gene.gene_id.startswith(("IGKV", "IGLV")):
+            continue
 
-        scored = []
-        for gene in v_genes:
-            if gene.numbered is None:
-                continue
-            germline_imgt = kabat_posmap_to_imgt_posmap(gene.numbered.posmap(), chain_type)
-            scores = compare_imgt_posmaps_direct(query_imgt, germline_imgt)
-            scored.append((gene, scores))
-    else:
-        # Use IMGT germline directly
-        scored = []
-        for gene in imgt_genes:
-            # Filter by chain type
-            if chain_type == "H" and not gene.gene_id.startswith("IGHV"):
-                continue
-            if chain_type == "L" and not gene.gene_id.startswith(("IGKV", "IGLV")):
-                continue
-
-            # Compare using direct IMGT comparison
-            scores = compare_imgt_posmaps_direct(query_imgt, gene._imgt_posmap)
-            scored.append((gene, scores))
+        # Compare using direct IMGT comparison
+        scores = compare_imgt_posmaps_direct(query_imgt, gene._imgt_posmap)
+        scored.append((gene, scores))
 
     # Sort by FR identity (primary), CDR identity (secondary), then the
     # druggability tie-break for exact ties (same cascade as the Kabat path)

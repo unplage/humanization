@@ -24,13 +24,19 @@ against the **patent** (IP/engineering) landscape instead of clinical antibodies
 |---|---|
 | Positive hits (igblastp V bitscore >= 40, human germline) | 289,934 |
 | ANARCI-numbered records | 271,114 |
-| After CDR-quality filter + dedup | **122,610** |
-| — VH / VL | 75,448 / 47,162 |
-| Top V germlines | IGHV3-23\*01 (16,625), IGKV1-39\*01 (6,541), IGHV1-46\*01 (5,986) |
+| After CDR-quality filter + dedup | **122,540** |
+| — VH / VL | 75,378 / 47,162 |
+| Top V germlines | IGHV3-23\*01 (16,423), IGKV1-39\*01 (6,487), IGHV1-46\*01 (5,864) |
+
+The quality filter requires CDR1 ≥ 4, CDR2 ≥ 2 and CDR3 4–40 aa. From the
+271,114 numbered records it drops 3,891 with too-short CDRs and 140 with
+CDR3 > 40 aa (mostly toxin/cytokine fusions whose C-terminal partner ANARCI
+numbers as 111/112 insertions), then dedups by CDR triple.
 
 ## Pipeline
 
-`preprocess_pataa.py` — all stages resumable (delete a stage output to re-run):
+`preprocess_pataa.py` — stages are resumable and write outputs atomically
+(delete a stage output to re-run):
 
 ```bash
 # full build (~15 min total on a many-core machine)
@@ -43,7 +49,46 @@ python3 tools/pataa_homology/preprocess_pataa.py detect    # igblastp, human_V, 
 python3 tools/pataa_homology/preprocess_pataa.py extract   # positive sequences
 python3 tools/pataa_homology/preprocess_pataa.py number    # ANARCI IMGT
 python3 tools/pataa_homology/preprocess_pataa.py build     # dedup -> data/pataa_cdrs.json
+
+# after changing CDR extraction: re-extract from cdr_records.jsonl, then build
+python3 tools/pataa_homology/preprocess_pataa.py repair
 ```
+
+`build` trusts the `cdrs` already stored in `cdr_records.jsonl`; `number`
+skips when that file exists. So a CDR-extraction fix is **not** picked up by
+`build` alone. `repair` streams the JSONL, recomputes `cdrs` from the stored
+`numbered` ANARCI posmaps in sequence order, atomically replaces the JSONL,
+and runs `build` — no ANARCI or source BLAST DB needed (~1–2 min). It is not
+part of `all`.
+
+### Fresh machine rebuild
+
+`data/igblast/` and `database/pataa.*` are **gitignored**, so a clean clone
+does not contain them:
+
+```bash
+# 1. ANARCI + HMMER + BioPython (or: pip install anarci biopython + hmmer 3.x)
+bash scripts/install.sh --full
+
+# 2. IgBLAST 1.22.0 (bin/ + internal_data/); either extract under data/igblast/
+#    https://ftp.ncbi.nlm.nih.gov/blast/executables/igblast/release/LATEST/
+mkdir -p data/igblast
+tar xzf ncbi-igblast-1.22.0-x64-linux.tar.gz -C data/igblast
+# ...or point at an existing install:
+export IGBLAST_HOME=/path/to/ncbi-igblast-1.22.0
+
+# 3. PATAA archive; dump auto-extracts pataa.* + taxdb.*
+cp /path/to/pataa.tar.gz tools/pataa_homology/database/
+
+# 4. full rebuild
+python3 tools/pataa_homology/preprocess_pataa.py all --workers 64
+```
+
+`IGBLAST_HOME` may be replaced by `IGDATA`, `BLASTDBCMD`, `IGBLASTP` and
+`GERMLINE_V` individually. A fresh `all` run uses the fixed ANARCI-order CDR
+extraction in `number`, so **`repair` is only needed when reusing a
+`cdr_records.jsonl` produced by an older version** (or delete it and re-run
+`number`). The expected output is ~122,540 entries; `VH_CDR3` is capped at 40 aa.
 
 Measured on 112 cores (wall time):
 
@@ -54,7 +99,7 @@ Measured on 112 cores (wall time):
 | detect | 357 s | 64 workers, `-outfmt 7`, bitscore >= 40 |
 | extract | 5 s | 291,360 sequences |
 | number | 345 s | 64 workers, ANARCI |
-| build | 22 s | filter + dedup |
+| build | 22 s | CDR-length filter + dedup |
 
 ### Why this pipeline
 
@@ -69,8 +114,9 @@ Measured on 112 cores (wall time):
   alignment does not yield the full CDR3 (germline lacks CDR3).
 - **Dedup by CDR triple** merges the heavy patent redundancy.
 
-Required tooling (already present in this repo): igblast 1.22.0
-(`data/igblast/`), ANARCI, BioPython. `IGDATA` is set automatically.
+Required tooling: IgBLAST 1.22.0 (`data/igblast/` or `IGBLAST_HOME`),
+ANARCI + HMMER, BioPython. `IGDATA` is set automatically; see
+**Fresh machine rebuild** above.
 
 ## Query
 
@@ -116,7 +162,7 @@ scan is ~3 s per query instead of minutes.
 ```
 tools/pataa_homology/
 ├── README.md
-├── preprocess_pataa.py   # dump/split/detect/extract/number/build
+├── preprocess_pataa.py   # dump/split/detect/extract/number/repair/build
 ├── query_pataa.py        # CDR homology query + reports
 └── database/             # pataa.tar.gz + extracted BLAST files (gitignored)
 ```

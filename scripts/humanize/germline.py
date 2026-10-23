@@ -141,7 +141,9 @@ def load_germline_db(db_dir: str, numbering: str = "kabat") -> GermlineDB:
 # fixes); invalidates the on-disk numbered-germline cache.
 # v2: AbRSA fallback removed — v1 "builtin"-tagged caches may contain
 # AbRSA-numbered labels (e.g. H56A CDR2 insertions) and must not be reused.
-_NUMBERING_CACHE_VERSION = 2
+# v3: VL FR1 corrected — lambda chains now keep the Kabat L10 gap and put the
+# conserved Cys on L23 (old caches stored L1-L22 sequential, Cys L22).
+_NUMBERING_CACHE_VERSION = 3
 _DB_MEMORY_CACHE: Dict[str, "GermlineDB"] = {}
 
 

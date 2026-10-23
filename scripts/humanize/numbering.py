@@ -265,11 +265,16 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
 
     # ---- CDR3 (95-102 + 100A..) and FR4 (103-113), W103 anchor ----
     j_start = c92_idx + 1
-    w103_idx = _find_j_anchor(s, j_start, min(j_start + 35, n), "H")
+    w103_idx = _find_j_anchor(s, j_start, min(j_start + 45, n), "H")
     if w103_idx is None:
         # V-region-only germline sequence (no J region): treat the tail as
         # CDR3; FR4 stays empty. Callers that need J regions provide them.
+        # Warn loudly: silently swallowing a real J region would fold the
+        # human FR4 into the donor CDR3.
         w103_idx = n
+        warnings.append(
+            "[VH] no Trp103 (J-region) anchor found; the tail was assigned to "
+            "CDR3 and FR4 is empty (V-region-only sequence?)")
     raw_cdr3 = s[j_start:w103_idx]
     # H93/H94 are fixed FR3 tail residues after Cys92 (Kabat):
     # Cys92 -> H93 -> H94 -> CDR3 starts at H95.
@@ -279,13 +284,18 @@ def number_heavy(seq: str, species_hint: str = "unknown") -> NumberedChain:
     cdr3_seq = raw_cdr3[2:]
     cdr3_len = len(cdr3_seq)
     ins = max(0, cdr3_len - 8)
-    for j, aa in enumerate(cdr3_seq):
-        if j < 6:
-            pos = f"H{95 + j}"
-        elif j < 6 + ins:
-            pos = f"H100{_letters(j - 5)[-1]}"
-        else:
-            pos = f"H{101 + j - 6 - ins}"
+    if cdr3_len >= 8:
+        cdr3_positions = [f"H{95 + j}" for j in range(6)]
+        cdr3_positions += [f"H100{_letters(k + 1)[-1]}" for k in range(ins)]
+        cdr3_positions += ["H101", "H102"]
+    else:
+        # Short loop: Kabat deletes from the tip backwards -- 100, 99, 98,
+        # 97, 96, 95, then 101/102 (matches ANARCI's CDR3-H annotation
+        # table). The previous code ended at H101 and dropped H102.
+        deletion_order = (100, 99, 98, 97, 96, 95, 101, 102)
+        keep = sorted(deletion_order[8 - cdr3_len:])
+        cdr3_positions = [f"H{p}" for p in keep]
+    for j, (aa, pos) in enumerate(zip(cdr3_seq, cdr3_positions)):
         res.append(NumberedResidue(pos, aa, "CDR3", j_start + 2 + j))
     fr4 = s[w103_idx : w103_idx + 11]
     if len(fr4) < 11:
@@ -383,11 +393,37 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
             break
     if c_idx is None:
         raise ValueError(f"[VL] no conserved Cys23 anchor found in first 27 residues: {s[:27]}")
-    if c_idx != 22:
-        warnings.append(f"[VL] Cys23 anchor at index {c_idx + 1} (expected 23); FR1 length adjusted")
     fr1_len = c_idx + 1
+    # Kabat VL FR1 spans L1-L23 (Cys23). Extra N-terminal residues (Cys past
+    # 23) are capped so L24 is not double-assigned; CDR1 absorbs the surplus.
+    if fr1_len > 23:
+        warnings.append(
+            f"[VL] Cys23 anchor shifted (C at {c_idx + 1}); FR1 capped to 23 "
+            f"residues, CDR1 absorbs the extra")
+        fr1_len = 23
+    deficit = 23 - fr1_len
+    fr1_labels = list(range(1, 24))
+    if 0 < deficit <= 3:
+        # Lambda (IGLV) FR1 is one residue short of kappa; the canonical
+        # Kabat alignment places the deletion at L10, keeping the conserved
+        # Cys on L23. Do this locally (no ANARCI alignment needed) instead
+        # of letting the whole FR1 shift by one position.
+        for k in range(deficit):
+            lab = 10 + k
+            if lab in fr1_labels:
+                fr1_labels.remove(lab)
+        span = "L10" + (f"-L{9 + deficit}" if deficit > 1 else "")
+        warnings.append(
+            f"[VL] FR1 has {fr1_len} residues before Cys23; Kabat deletion "
+            f"numbered at {span}")
+    elif deficit > 0:
+        # Extreme truncation: number sequentially from L1 (upstream behaviour).
+        fr1_labels = list(range(1, fr1_len + 1))
+        warnings.append(
+            f"[VL] Cys23 anchor at index {c_idx + 1} (expected 23); FR1 "
+            f"numbered sequentially")
     for i, aa in enumerate(s[:fr1_len]):
-        res.append(NumberedResidue(f"L{i + 1}", aa, "FR1", i))
+        res.append(NumberedResidue(f"L{fr1_labels[i]}", aa, "FR1", i))
 
     # ---- CDR1 (24-34 + 27A..) and FR2 anchor Trp35 ----
     w_idx = _find_fr2_trp(s, fr1_len, min(fr1_len + 24, n), "L")
@@ -445,10 +481,16 @@ def number_light(seq: str, species_hint: str = "unknown") -> NumberedChain:
 
     # ---- CDR3 (89-97) and FR4 (98-107), Phe98 anchor ----
     j_start = c88_idx + 1
-    f98_idx = _find_j_anchor(s, j_start, min(j_start + 16, n), "L")
+    f98_idx = _find_j_anchor(s, j_start, min(j_start + 45, n), "L")
     if f98_idx is None:
-        # V-region-only germline sequence (no J region): treat the tail as CDR3.
+        # V-region-only germline sequence (no J region): treat the tail as
+        # CDR3. Warn loudly: the J anchor (Phe98 of FGQG/FGGG) generally sits
+        # 11-30 residues past Cys88, so a 16-residue window used to truncate
+        # long CDR3s and silently fold the human FR4 into the donor CDR3.
         f98_idx = n
+        warnings.append(
+            "[VL] no Phe98 (J-region) anchor found; the tail was assigned to "
+            "CDR3 and FR4 is empty (V-region-only sequence?)")
     cdr3_seq = s[j_start:f98_idx]
     # Kabat VL CDR3: base block L89-L97 (9 residues), insertions after L95,
     # L96/L97 stay last. Mirrors the VH logic above (H95-H100 + H100A..).
@@ -502,7 +544,7 @@ KABAT_CDRS = {
     "L": {"CDR1": ("L24", "L34"), "CDR2": ("L50", "L56"), "CDR3": ("L89", "L97")},
 }
 CHOTHIA_CDRS = {
-    "H": {"CDR1": ("H26", "H35"), "CDR2": ("H52", "H56"), "CDR3": ("H95", "H102")},
+    "H": {"CDR1": ("H26", "H32"), "CDR2": ("H52", "H56"), "CDR3": ("H95", "H102")},
     "L": {"CDR1": ("L24", "L34"), "CDR2": ("L50", "L56"), "CDR3": ("L89", "L97")},
 }
 ABM_CDRS = {

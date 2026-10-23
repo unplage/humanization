@@ -188,17 +188,25 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py \
 
 ## Position numbering (FR4 and insertion letters)
 
-`structural_risk.py` matches back-mutation positions from the pipeline CSVs,
-which are **Kabat** labels (`H5`, `H82A`, `H103`, `L100B`, ...). To do this
-exactly it needs the per-residue Kabat labels of each variant. The pipeline
-writes them automatically:
+`structural_risk.py` matches back-mutation positions from the pipeline CSVs
+by their exact label. The label space follows the pipeline run: **Kabat**
+(`H5`, `H82A`, `H103`, `L100B`, ...) for a default run, or **IMGT**
+(`H5`, `H111A`, `H118`, ...) for `--numbering imgt`. To do this exactly it
+needs the per-residue labels of each variant. The pipeline writes them
+automatically:
 
 ```
-outputs/<run>/step3/variants_numbering.json
+outputs/<run>/step3/variants_numbering.json   # Kabat run (flat)
 {
   "H_V0": ["H1", "H2", ..., "H113"],
   "H_V2a": ["H1", "H2", ..., "H113"],
   ...
+}
+
+outputs/<run>/step3/variants_numbering.json   # IMGT run (wrapped)
+{
+  "numbering_scheme": "imgt",
+  "variants": {"H_V0": ["H1", ..., "H128"], ...}
 }
 ```
 
@@ -206,9 +214,13 @@ outputs/<run>/step3/variants_numbering.json
 also pass it explicitly with `--numbering-json`.
 
 Without it, the tool falls back to matching by **sequence index**, which
-diverges from Kabat wherever insertions exist (FR3 82A-C, CDR 27A-/100A-K), so
-FR4 (Kabat 103-113 / 98-107) and insertion-letter back-mutations would be
-missed. A warning is printed in verbose mode.
+diverges from the label wherever insertions exist (Kabat FR3 82A-C / CDR
+27A-/100A-K, IMGT 111A-112F), so FR4 and insertion-letter back-mutations
+would be missed. A warning is printed in verbose mode.
+
+Note: `positions_of_interest` in the sequence report uses **1-based sequence
+indices**, not Kabat/IMGT labels (the MHC backend scores residue offsets).
+Use the structural-risk report for label-aware positions.
 
 **FR4 coverage across the tools:**
 
