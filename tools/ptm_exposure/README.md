@@ -118,7 +118,6 @@ PTM sites are classified as "adjusted risk" based on both sequence pattern and s
 ================================================================================
   Total PTM sites:      4
   High risk (exposed):  1
-  High risk (buried):   0
   Medium risk:          2
   Low risk:             1
 ```
