@@ -931,10 +931,44 @@ def compare_imgt_posmaps_direct(
 ) -> Dict[str, Any]:
     """Compare two IMGT posmaps directly (no Kabat conversion needed).
 
-    This is the correct way to compare IMGT-numbered sequences.
-    Positions where germline has a gap are skipped.
+    This is the correct way to compare IMGT-numbered sequences. Identity is
+    computed over positions present in both maps (the historical behaviour);
+    positions where germline has a gap are skipped. Coverage/query-only/
+    germline-only diagnostics are returned without changing the identity
+    denominator.
     """
     eval_regions = set(IMGT_EVAL_REGIONS)
+
+    def _imgt_position(label: str) -> Optional[int]:
+        num_str = ""
+        for c in label[1:]:
+            if c.isdigit() or c == ".":
+                num_str += c
+        if not num_str:
+            return None
+        try:
+            return int(num_str.split(".")[0])
+        except ValueError:
+            return None
+
+    def _eval_positions(posmap: Dict[str, str]) -> Dict[str, str]:
+        out = {}
+        for label, aa in posmap.items():
+            if not aa or aa == "-":
+                continue
+            num = _imgt_position(label)
+            if num is None:
+                continue
+            if get_imgt_region(num) in eval_regions:
+                out[label] = aa
+        return out
+
+    query_eval = _eval_positions(query_posmap)
+    germline_eval = _eval_positions(germline_posmap)
+    n_query = len(query_eval)
+    n_germline = len(germline_eval)
+    n_query_only = sum(1 for label in query_eval if label not in germline_eval)
+    n_germline_only = sum(1 for label in germline_eval if label not in query_eval)
 
     fr_count = 0
     fr_match = 0
@@ -943,37 +977,14 @@ def compare_imgt_posmaps_direct(
 
     region_stats = {region: {"count": 0, "match": 0} for region in IMGT_EVAL_REGIONS}
 
-    for imgt_label, aa in query_posmap.items():
-        # Extract position number
-        num_str = ""
-        for c in imgt_label[1:]:
-            if c.isdigit() or c == ".":
-                num_str += c
-        if not num_str:
+    for imgt_label, aa in query_eval.items():
+        if imgt_label not in germline_eval:
             continue
-
-        try:
-            if "." in num_str:
-                imgt_num = int(num_str.split(".")[0])
-            else:
-                imgt_num = int(num_str)
-        except ValueError:
+        germline_aa = germline_eval[imgt_label]
+        imgt_num = _imgt_position(imgt_label)
+        if imgt_num is None:
             continue
-
-        # Get IMGT region
         region = get_imgt_region(imgt_num)
-        if region not in eval_regions:
-            continue
-
-        # Check if germline has this position
-        if imgt_label not in germline_posmap:
-            continue
-
-        germline_aa = germline_posmap[imgt_label]
-
-        # Skip positions where germline has a gap (IMGT length variation)
-        if germline_aa == "-":
-            continue
 
         # Update region stats
         region_stats[region]["count"] += 1
@@ -994,6 +1005,7 @@ def compare_imgt_posmaps_direct(
     all_count = fr_count + cdr_count
     all_match = fr_match + cdr_match
     all_identity = all_match / all_count if all_count > 0 else 0.0
+    coverage = all_count / n_query if n_query > 0 else 0.0
 
     # Calculate per-region identity
     imgt_region_stats = {}
@@ -1013,5 +1025,11 @@ def compare_imgt_posmaps_direct(
         "all_identity": round(all_identity, 4),
         "n_fr": fr_count,
         "n_cdr": cdr_count,
+        "n_query": n_query,
+        "n_germline": n_germline,
+        "n_compared": all_count,
+        "n_query_only": n_query_only,
+        "n_germline_only": n_germline_only,
+        "coverage": round(coverage, 4),
         "imgt_region_stats": imgt_region_stats,
     }

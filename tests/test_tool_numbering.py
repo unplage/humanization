@@ -307,6 +307,132 @@ def test_humanness_imgt_requires_anarci():
         e.number_with_anarci_imgt = original
 
 
+def test_humanness_match_counts_and_coverage():
+    print("humanness_score reports exact match counts and coverage")
+    e = load_module("humanness_eval_counts", "tools/humanness_score/evaluate_humanness.py")
+    from humanize.sequences import parse_fasta
+
+    records = parse_fasta(os.path.join(ROOT, "data/examples/mouse_4d5_fab.fasta"))
+    vh = next(seq for name, seq in records if "VH" in name)
+    scored, numbered = e.evaluate_sequence("H", vh)
+    gene, scores = scored[0]
+    q_map = numbered.posmap()
+    g_map = gene.numbered.posmap()
+
+    for region, key in (("FR1", "fr1"), ("FR2", "fr2"), ("FR3", "fr3"),
+                        ("CDR1", "cdr1"), ("CDR2", "cdr2")):
+        positions = [p for p in q_map if p in g_map and numbered.region_of(p) == region]
+        expected = sum(1 for p in positions if q_map[p] == g_map[p])
+        check(f"Kabat {region} match",
+              scores[f"{key}_match"] == expected and scores[f"n_{key}"] == len(positions),
+              f"{scores[f'{key}_match']}/{scores[f'n_{key}']} != {expected}/{len(positions)}")
+    check("4D5 FR2 match is not truncated",
+          scores["fr2_match"] == 8 and scores["n_fr2"] == 14,
+          f"{scores['fr2_match']}/{scores['n_fr2']}")
+    check("Kabat coverage fields",
+          scores["n_query"] == 98 and scores["n_compared"] == 98 and scores["coverage"] == 1.0,
+          f"{scores['n_query']}, {scores['n_compared']}, {scores['coverage']}")
+
+    formatted = e.format_results("H", vh, scored, numbered, top_n=1)
+    fr2_lines = [line for line in formatted.splitlines() if line.strip().startswith("FR2")]
+    check("Kabat FR2 table shows match/total",
+          fr2_lines and "8" in fr2_lines[0] and "14" in fr2_lines[0],
+          fr2_lines[0] if fr2_lines else "missing FR2 line")
+
+    scored_imgt, numbered_imgt = e.evaluate_sequence_imgt("H", vh)
+    if scored_imgt:
+        stats = scored_imgt[0][1].get("imgt_region_stats", {})
+        check("IMGT stats have match fields",
+              all("match" in s and 0 <= s["match"] <= s["count"] for s in stats.values()))
+        check("IMGT coverage fields",
+              "n_query" in scored_imgt[0][1] and "coverage" in scored_imgt[0][1])
+    else:
+        check("IMGT path available", False, "ANARCI/IMGT unavailable")
+
+
+def test_humanness_true_imgt_alignment():
+    print("humanness_score true IMGT alignment preserves insertion order")
+    e = load_module("humanness_eval_imgt_align", "tools/humanness_score/evaluate_humanness.py")
+    seq = VH_CDR2_INS
+    scored, numbered = e.evaluate_sequence_imgt("H", seq)
+    check("IMGT scores available", scored is not None)
+    if not scored:
+        return
+
+    gene = scored[0][0]
+    alignment = e._format_imgt_alignment(numbered, gene._imgt_posmap, "H")
+    cdr2_expected = _cdr_from_chain(numbered, "CDR2")
+    cdr2_lines = [line for line in alignment.splitlines() if line.strip().startswith("CDR2")]
+    check("alignment has CDR2", bool(cdr2_lines), alignment)
+    if cdr2_lines:
+        query_part = cdr2_lines[0].split(":")[1].split("|")[0].strip()
+        check("IMGT CDR2 is complete", query_part == cdr2_expected,
+              f"{query_part} != {cdr2_expected}")
+        pieces = [
+            part.split(":", 1)[-1].strip() if ":" in part else part.strip()
+            for part in cdr2_lines[0].split("|")
+        ]
+        check("alignment columns are equal length",
+              len({len(piece) for piece in pieces}) == 1, cdr2_lines[0])
+
+    kabat_scored, kabat_numbered = e.evaluate_sequence("H", seq)
+    table = e.format_sequence_comparison_table(
+        kabat_numbered, kabat_scored[0][0].numbered, "H")
+    check("approximate IMGT table removed", "IMGT region boundaries" not in table)
+
+
+def test_humanness_word_fallback_and_names():
+    print("humanness_score Word fallback shows N/A and sanitizes names")
+    g = load_module("humanness_reports_na", "tools/humanness_score/generate_all_reports.py")
+    seq = _vh_with_cdr3(13)
+    original = g.evaluate_sequence_imgt
+    tmp = tempfile.mkdtemp(prefix="humanness_na_")
+    try:
+        g.evaluate_sequence_imgt = lambda *args, **kwargs: (None, None)
+        results = g.evaluate_antibody("test", seq, "H")
+        check("IMGT unavailable flag", results["imgt"]["available"] is False)
+        check("IMGT best gene is N/A", results["imgt"]["best_gene"] == "N/A")
+
+        out_path = os.path.join(tmp, "combined.docx")
+        g.create_combined_report([("test", seq, "H", results)], out_path)
+        doc = g.Document(out_path)
+        imgt_row = doc.tables[1].rows[1]
+        check("IMGT summary cells are N/A",
+              all(cell.text == "N/A" for cell in imgt_row.cells[2:]),
+              " | ".join(cell.text for cell in imgt_row.cells))
+    finally:
+        g.evaluate_sequence_imgt = original
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    used = set()
+    first = g._safe_report_stem("a/b c", used)
+    second = g._safe_report_stem("a/b c", used)
+    check("filename sanitized", first == "a_b_c", first)
+    check("duplicate names unique", first != second, f"{first}, {second}")
+
+
+def test_humanness_input_names_and_errors():
+    print("humanness_score input loader deduplicates names and skips bad records")
+    e = load_module("humanness_inputs", "tools/humanness_score/evaluate_humanness.py")
+    tmp = tempfile.mkdtemp(prefix="humanness_input_")
+    fasta_path = os.path.join(tmp, "mixed.fasta")
+    with open(fasta_path, "w") as fh:
+        fh.write(f">dup\n{_vh_with_cdr3(17)}\n")
+        fh.write(">bad\nACDE\n")
+        fh.write(f">dup\n{VL}\n")
+    try:
+        sequences, errors = e.load_sequences(fasta_path, skip_invalid=True)
+        names = [name for name, _, _, _ in sequences]
+        check("duplicate names made unique", names == ["dup", "dup_1"], str(names))
+        check("bad record reported", len(errors) == 1 and errors[0][0] == "bad",
+              str(errors))
+        check("valid records classified",
+              [chain for _, chain, _, _ in sequences] == ["H", "L"],
+              str([(c, n) for n, c, _, _ in sequences]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_cdr_homology_cdr3_order()
     test_cdr2_insertion_order()
@@ -316,6 +442,10 @@ def main():
     test_humanness_report_cdrs()
     test_ptm_exposure_regions()
     test_humanness_imgt_requires_anarci()
+    test_humanness_match_counts_and_coverage()
+    test_humanness_true_imgt_alignment()
+    test_humanness_word_fallback_and_names()
+    test_humanness_input_names_and_errors()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES: {FAILURES}")

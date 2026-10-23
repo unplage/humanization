@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate humanization degree of antibody sequences.
 
-Compares input sequences against human germline V/J genes and reports:
+Compares input sequences against human germline V genes and reports:
   - Best matching germline (by FR identity)
   - FR identity, CDR identity, overall identity (Kabat and IMGT numbering)
   - Humanization level per USAN/WHO standards (IMGT-based)
@@ -13,9 +13,10 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 import os
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -25,8 +26,7 @@ from scripts.humanize.numbering import number_heavy, number_light
 from scripts.humanize.germline import load_germline_db, compare_to_germline
 from scripts.humanize.anarci_adapter import number_with_anarci_imgt
 from scripts.humanize.imgt_numbering import (
-    load_imgt_germline, compare_imgt_posmaps_direct,
-    format_imgt_region_alignment
+    load_imgt_germline, compare_imgt_posmaps_direct
 )
 
 
@@ -74,16 +74,16 @@ def _sort_scored(chain_type: str, scored: list) -> list:
     return scored
 
 
-def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
-    """Evaluate a single chain against human germline."""
-    from scripts.humanize.numbering import number_heavy, number_light
-    from scripts.humanize.germline import load_germline_db, compare_to_germline
+def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = "",
+                     numbered=None):
+    """Evaluate a single chain against human germline.
 
-    # Number the sequence
-    if chain_type == "H":
-        numbered = number_heavy(sequence)
-    else:
-        numbered = number_light(sequence)
+    ``numbered`` may be supplied when the caller already numbered the
+    sequence (e.g. from classify_sequences), avoiding a second numbering pass.
+    """
+    # Number the sequence unless the caller already did it
+    if numbered is None:
+        numbered = number_heavy(sequence) if chain_type == "H" else number_light(sequence)
 
     # Load germline DB
     if not db_dir:
@@ -92,6 +92,8 @@ def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
 
     # Get human V genes for this chain type
     v_genes = db.human(chain_type)
+    if not v_genes:
+        raise ValueError(f"no human V genes found for chain type {chain_type!r}")
 
     # Score each germline (Kabat-based)
     scored = []
@@ -107,7 +109,8 @@ def evaluate_sequence(chain_type: str, sequence: str, db_dir: str = ""):
     return scored, numbered
 
 
-def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
+def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = "",
+                          imgt_genes=None):
     """Evaluate a single chain against human germline using IMGT numbering.
 
     Uses ANARCI with IMGT scheme to number the query sequence directly,
@@ -116,6 +119,9 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
     bundled IMGT germline DB; when either is missing the function warns and
     returns ``(None, None)`` instead of emitting approximate converted
     (Kabat-to-IMGT) numbering.
+
+    ``imgt_genes`` may be supplied by a batch caller to avoid reloading the
+    IMGT germline JSON for every sequence.
     """
     # Number the sequence using ANARCI with IMGT scheme. The main pipeline
     # requires ANARCI for IMGT mode (there is no portable fallback), so the
@@ -134,13 +140,16 @@ def evaluate_sequence_imgt(chain_type: str, sequence: str, db_dir: str = ""):
 
     # Load IMGT germline DB (abnumber_human_imgt.json). The pipeline's
     # --numbering imgt mode also requires this bundled IMGT database.
-    imgt_genes = load_imgt_germline(db_dir)
+    if imgt_genes is None:
+        imgt_genes = load_imgt_germline(db_dir)
+        if not imgt_genes:
+            print(
+                "  [WARN] IMGT germline database unavailable; skipping IMGT "
+                "scoring (expected data/germline/abnumber_human_imgt.json)",
+                file=sys.stderr,
+            )
+            return None, None
     if not imgt_genes:
-        print(
-            "  [WARN] IMGT germline database unavailable; skipping IMGT "
-            "scoring (expected data/germline/abnumber_human_imgt.json)",
-            file=sys.stderr,
-        )
         return None, None
 
     scored = []
@@ -188,15 +197,37 @@ def classify_humanization_level(fr_identity: float) -> str:
         return "Academic: likely Murine-like"
 
 
-def format_sequence_comparison_table(numbered, germline_numbered, chain_type: str):
-    """Generate a table showing sequences under different numbering schemes.
+def _format_imgt_alignment(numbered, germline_posmap: Dict[str, str],
+                           chain_type: str) -> str:
+    """Format a true IMGT alignment using the query's numbered residue order.
 
-    NOTE: both NumberedChain inputs are Kabat-numbered (the caller passes the
-    Kabat result of evaluate_sequence). The Kabat table is therefore exact;
-    the "IMGT" table only re-slices the same Kabat position labels at IMGT
-    numeric boundaries and is an approximate cross-scheme view (see note
-    below). True IMGT scoring/alignment runs on real IMGT posmaps in
-    format_results_imgt() -> compare_imgt_posmaps_direct().
+    Unlike a numeric range walk, this preserves ANARCI insertion order
+    (e.g. 111, 111A.., 112C..112A, 112) and therefore does not drop IMGT
+    insertion residues from CDR1/CDR2/CDR3.
+    """
+    regions_order = ["FR1", "CDR1", "FR2", "CDR2", "FR3", "CDR3", "FR4"]
+    lines = []
+    for region in regions_order:
+        query_residues = [r for r in numbered.residues if r.region == region]
+        if not query_residues:
+            continue
+        q_str = "".join(r.aa for r in query_residues)
+        g_str = "".join(germline_posmap.get(r.pos, "-") for r in query_residues)
+        diff = "".join(
+            "X" if germline_posmap.get(r.pos, "-") not in ("-", r.aa) else "."
+            for r in query_residues
+        )
+        lines.append(f"  {region:5s}: {q_str}  |  {g_str}  |  {diff}")
+    return "\n".join(lines)
+
+
+def format_sequence_comparison_table(numbered, germline_numbered, chain_type: str):
+    """Generate a Kabat comparison table and a label-based diagnostic summary.
+
+    Both NumberedChain inputs are Kabat-numbered (the caller passes the Kabat
+    result of evaluate_sequence). True IMGT alignment is emitted separately in
+    format_results_imgt() from real IMGT posmaps; this function no longer
+    pretends to show IMGT by re-slicing Kabat labels.
 
     Args:
         numbered: NumberedChain object for query sequence (Kabat)
@@ -242,15 +273,8 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
                     seq += posmap[pos]
         return seq
 
-    # Region boundary tables, applied to the Kabat posmap labels above.
-    #   kabat_regions: canonical Kabat definitions, identical to
-    #     KABAT_VH_REGIONS / KABAT_VL_REGIONS in scripts/humanize/imgt_numbering.py.
-    #   imgt_regions: Lefranc 2003 canonical IMGT ranges — VH and VL use the
-    #     SAME definitions (identical to IMGT_REGIONS in imgt_numbering.py).
-    # NOTE: the IMGT table below slices Kabat labels at these IMGT numeric
-    # boundaries. Kabat and IMGT position numbers differ (e.g. Kabat H31-35
-    # CDR1 vs IMGT 27-38), so the residues shown are approximate, not true
-    # IMGT numbering.
+    # Canonical Kabat definitions, identical to KABAT_VH_REGIONS /
+    # KABAT_VL_REGIONS in scripts/humanize/imgt_numbering.py.
     if chain_type == "H":
         kabat_regions = {
             "FR1": (1, 30),
@@ -260,15 +284,6 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
             "FR3": (66, 94),
             "CDR3": (95, 102),
             "FR4": (103, 113),
-        }
-        imgt_regions = {
-            "FR1": (1, 26),
-            "CDR1": (27, 38),
-            "FR2": (39, 55),
-            "CDR2": (56, 65),
-            "FR3": (66, 104),
-            "CDR3": (105, 117),
-            "FR4": (118, 128),
         }
         prefix = "H"
     else:  # VL
@@ -280,15 +295,6 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
             "FR3": (57, 88),
             "CDR3": (89, 97),
             "FR4": (98, 107),
-        }
-        imgt_regions = {
-            "FR1": (1, 26),
-            "CDR1": (27, 38),
-            "FR2": (39, 55),
-            "CDR2": (56, 65),
-            "FR3": (66, 104),
-            "CDR3": (105, 117),
-            "FR4": (118, 128),
         }
         prefix = "L"
 
@@ -307,39 +313,27 @@ def format_sequence_comparison_table(numbered, germline_numbered, chain_type: st
 
         lines.append(f"  {region:<8} {prefix}{start_num}-{prefix}{end_num:<12} {q_display:<30} {g_display:<30}")
 
-    # IMGT-boundary view: same Kabat labels sliced at IMGT ranges
-    # (approximate — see note above; not true IMGT numbering)
-    lines.append(f"\n  IMGT region boundaries (approximate, sliced on Kabat labels):")
-    lines.append(f"  {'Region':<8} {'Positions':<15} {'Query':<30} {'Germline':<30}")
-    lines.append(f"  {'-'*8} {'-'*15} {'-'*30} {'-'*30}")
-
-    for region, (start_num, end_num) in imgt_regions.items():
-        q_seq = get_region_seq(q_map, start_num, end_num, prefix)
-        g_seq = get_region_seq(g_map, start_num, end_num, prefix)
-
-        # Truncate if too long
-        q_display = q_seq[:28] + ".." if len(q_seq) > 30 else q_seq
-        g_display = g_seq[:28] + ".." if len(g_seq) > 30 else g_seq
-
-        lines.append(f"  {region:<8} {prefix}{start_num}-{prefix}{end_num:<12} {q_display:<30} {g_display:<30}")
-
-    # Raw per-region identity over ALL 7 Kabat regions — this diagnostic
-    # table INCLUDES CDR3 and FR4, unlike the headline FR/CDR/overall scores
-    # which exclude both (CDR3 = donor-grafted, FR4 = J-derived; see
-    # compare_to_germline in scripts/humanize/germline.py). The numbers here
-    # therefore will not reconcile with the headline scores.
+    # Raw per-region diagnostic over ALL 7 Kabat regions. This INCLUDES CDR3
+    # and FR4, unlike the headline FR/CDR scores; it is compared by position
+    # label (not by zipping concatenated strings) so insertion/deletion
+    # offsets cannot shift the alignment. Identity uses the same common-
+    # position denominator as compare_to_germline.
     lines.append(f"\n  Sequence identity summary (all regions, incl. CDR3+FR4):")
-    lines.append(f"  {'Region':<10} {'Identity':<12} {'Query Length':<15} {'Germline Length':<15}")
-    lines.append(f"  {'-'*10} {'-'*12} {'-'*15} {'-'*15}")
+    lines.append(f"  {'Region':<10} {'Identity':<10} {'Match':<8} {'Compared':<10} {'QueryOnly':<11} {'GermOnly':<10}")
+    lines.append(f"  {'-'*10} {'-'*10} {'-'*8} {'-'*10} {'-'*11} {'-'*10}")
 
-    for region, (start_num, end_num) in kabat_regions.items():
-        q_seq = get_region_seq(q_map, start_num, end_num, prefix)
-        g_seq = get_region_seq(g_map, start_num, end_num, prefix)
-        q_count = len(q_seq)
-        g_count = len(g_seq)
-        match_count = sum(1 for q_aa, g_aa in zip(q_seq, g_seq) if q_aa == g_aa and g_aa != "-")
-        identity = match_count / q_count if q_count > 0 else 0.0
-        lines.append(f"  {region:<10} {identity:.1%}     {q_count:<15} {g_count:<15}")
+    for region in kabat_regions:
+        q_positions = [p for p in q_map if numbered.region_of(p) == region]
+        g_positions = [p for p in g_map if germline_numbered and germline_numbered.region_of(p) == region]
+        common = [p for p in q_positions if p in g_map]
+        match_count = sum(1 for p in common if q_map[p] == g_map[p])
+        identity = f"{match_count / len(common):.1%}" if common else "N/A"
+        query_only = sum(1 for p in q_positions if p not in g_map)
+        germline_only = sum(1 for p in g_positions if p not in q_map)
+        lines.append(
+            f"  {region:<10} {identity:<10} {match_count:<8} "
+            f"{len(common):<10} {query_only:<11} {germline_only:<10}"
+        )
 
     return "\n".join(lines)
 
@@ -353,6 +347,10 @@ def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int 
 
     # Sequence with region annotation
     lines.append(f"\n  Sequence (first 50 aa): {sequence[:50]}...")
+
+    if not scored:
+        lines.append("\n  [No Kabat-scored germlines available]")
+        return "\n".join(lines)
 
     # Top matches
     lines.append(f"\n  Top {min(top_n, len(scored))} human germline matches (Kabat):")
@@ -373,18 +371,26 @@ def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int 
     lines.append(f"    FR identity:  {best_scores['fr_identity']:.4f} ({best_scores['fr_identity']*100:.1f}%)")
     lines.append(f"    CDR identity: {best_scores['cdr_identity']:.4f} ({best_scores['cdr_identity']*100:.1f}%)")
     lines.append(f"    Overall:      {best_scores['all_identity']:.4f} ({best_scores['all_identity']*100:.1f}%)")
+    lines.append(
+        f"    Compared:     {best_scores.get('n_compared', 0)}/{best_scores.get('n_query', 0)} "
+        f"query positions (coverage {best_scores.get('coverage', 0):.1%}); "
+        f"query-only {best_scores.get('n_query_only', 0)}, "
+        f"germline-only {best_scores.get('n_germline_only', 0)}"
+    )
 
     # Detailed region breakdown
     lines.append(f"\n  Detailed region breakdown (Kabat):")
     lines.append(f"  {'Region':<10} {'Identity':<12} {'Match':<8} {'Total':<8}")
     lines.append(f"  {'-'*10} {'-'*12} {'-'*8} {'-'*8}")
-    lines.append(f"  {'FR1':<10} {best_scores.get('fr1_identity', 0):.1%}     {best_scores.get('n_fr1', 0):<8}")
-    lines.append(f"  {'FR2':<10} {best_scores.get('fr2_identity', 0):.1%}     {best_scores.get('n_fr2', 0):<8}")
-    lines.append(f"  {'FR3':<10} {best_scores.get('fr3_identity', 0):.1%}     {best_scores.get('n_fr3', 0):<8}")
-    lines.append(f"  {'CDR1':<10} {best_scores.get('cdr1_identity', 0):.1%}     {best_scores.get('n_cdr1', 0):<8}")
-    lines.append(f"  {'CDR2':<10} {best_scores.get('cdr2_identity', 0):.1%}     {best_scores.get('n_cdr2', 0):<8}")
+    for region, key in (("FR1", "fr1"), ("FR2", "fr2"), ("FR3", "fr3"),
+                        ("CDR1", "cdr1"), ("CDR2", "cdr2")):
+        lines.append(
+            f"  {region:<10} {best_scores.get(key + '_identity', 0):.1%}     "
+            f"{best_scores.get(key + '_match', 0):<8} {best_scores.get('n_' + key, 0):<8}"
+        )
 
-    # Note: USAN classification is only shown in IMGT mode
+    lines.append(f"\n    Humanization estimate: {classify_humanization_level(best_scores['fr_identity'])}")
+    lines.append("    (Academic estimate only; official USAN/INN naming requires manufacturing-process knowledge)")
 
     # Positions differing from best germline (potential back-mutations)
     q_map = numbered.posmap()
@@ -409,8 +415,6 @@ def format_results(chain_type: str, sequence: str, scored, numbered, top_n: int 
 
 def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, top_n: int = 10):
     """Format IMGT-based results for display."""
-    from scripts.humanize.imgt_numbering import format_imgt_region_alignment
-
     lines = []
     lines.append(f"\n{'='*70}")
     lines.append(f"  {chain_type} chain ({len(sequence)} residues) - IMGT numbering")
@@ -440,6 +444,12 @@ def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, t
     lines.append(f"    FR identity:  {best_scores['fr_identity']:.4f} ({best_scores['fr_identity']*100:.1f}%)")
     lines.append(f"    CDR identity: {best_scores['cdr_identity']:.4f} ({best_scores['cdr_identity']*100:.1f}%)")
     lines.append(f"    Overall:      {best_scores['all_identity']:.4f} ({best_scores['all_identity']*100:.1f}%)")
+    lines.append(
+        f"    Compared:     {best_scores.get('n_compared', 0)}/{best_scores.get('n_query', 0)} "
+        f"query positions (coverage {best_scores.get('coverage', 0):.1%}); "
+        f"query-only {best_scores.get('n_query_only', 0)}, "
+        f"germline-only {best_scores.get('n_germline_only', 0)}"
+    )
 
     # IMGT region breakdown
     if "imgt_region_stats" in best_scores:
@@ -452,41 +462,75 @@ def format_results_imgt(chain_type: str, sequence: str, scored_imgt, numbered, t
         for region in ["FR1", "CDR1", "FR2", "CDR2", "FR3"]:
             stats = best_scores["imgt_region_stats"].get(region, {})
             identity = stats.get("identity", 0)
+            match = stats.get("match", 0)
             count = stats.get("count", 0)
-            lines.append(f"  {region:<10} {identity:.1%}     {count:<8}")
+            lines.append(f"  {region:<10} {identity:.1%}     {match:<8} {count:<8}")
 
-    # Humanization classification (Academic estimate based on sequence identity)
-    # NOTE: Official USAN/INN naming is based on the technology used (transgenic mouse,
-    # CDR grafting, phage display, etc.), NOT on sequence identity thresholds.
-    # This is an academic convention commonly used in literature.
-    fr_id = best_scores["fr_identity"]
-    if fr_id >= 0.95:
-        usan_class = "Academic: likely Human-like"
-        usan_desc = "FR identity >= 95%"
-    elif fr_id >= 0.85:
-        usan_class = "Academic: likely Humanized-like"
-        usan_desc = "FR identity >= 85%"
-    elif fr_id >= 0.70:
-        usan_class = "Academic: likely Chimeric-like"
-        usan_desc = "FR identity >= 70%"
-    else:
-        usan_class = "Academic: likely Murine-like"
-        usan_desc = "FR identity < 70%"
-    lines.append(f"\n    Humanization estimate: {usan_class} ({usan_desc})")
-    lines.append(f"    (Note: Official USAN/INN naming requires knowledge of manufacturing process)")
+    lines.append(f"\n    Humanization estimate: {classify_humanization_level(best_scores['fr_identity'])}")
+    lines.append("    (Academic estimate only; official USAN/INN naming requires manufacturing-process knowledge)")
 
-    # Region alignment
-    if best_gene.numbered:
+    # Region alignment (true IMGT posmaps; preserves insertion order)
+    germline_posmap = getattr(best_gene, "_imgt_posmap", None)
+    if numbered is not None and germline_posmap:
         lines.append(f"\n  Region alignment vs {best_gene.gene_id} (IMGT):")
         lines.append(f"  (X = differs from germline, . = matches)")
-        alignment = format_imgt_region_alignment(
-            numbered.posmap(),
-            best_gene.numbered.posmap(),
-            chain_type,
-        )
-        lines.append(alignment)
+        lines.append(_format_imgt_alignment(numbered, germline_posmap, chain_type))
 
     return "\n".join(lines)
+
+
+def load_sequences(input_path: Optional[str] = None,
+                   vh: Optional[str] = None,
+                   vl: Optional[str] = None,
+                   skip_invalid: bool = False):
+    """Load and classify input sequences.
+
+    Returns (sequences, errors), where each sequence is
+    (name, chain_type, sequence, numbered_or_None). Duplicate FASTA names are
+    made unique. With ``skip_invalid=True`` a bad record is reported in
+    ``errors`` and skipped; otherwise the first bad record raises.
+    """
+    from scripts.humanize.sequences import parse_fasta, classify_sequences
+
+    sequences: List[Tuple[str, str, str, object]] = []
+    errors: List[Tuple[str, str]] = []
+    seen: Dict[str, int] = {}
+
+    def _add(name: str, chain_type: str, sequence: str, numbered) -> None:
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+        sequences.append((name, chain_type, sequence, numbered))
+
+    def _clean(seq: str) -> str:
+        return re.sub(r"[^A-Za-z]", "", seq or "").upper()
+
+    if input_path:
+        records = parse_fasta(input_path)
+        if not records:
+            raise ValueError(f"no sequences found in {input_path}")
+        for raw_name, raw_seq in records:
+            try:
+                chain = classify_sequences([(raw_name, raw_seq)], numbering="kabat")[0]
+            except ValueError as exc:
+                message = str(exc) or exc.__class__.__name__
+                errors.append((raw_name, message))
+                if skip_invalid:
+                    continue
+                raise
+            _add(chain.name, chain.chain_type, chain.sequence, chain.numbered)
+    else:
+        for name, raw_seq in (("query_VH", vh), ("query_VL", vl)):
+            if not raw_seq:
+                continue
+            seq = _clean(raw_seq)
+            if not seq:
+                raise ValueError(f"{name} sequence is empty")
+            _add(name, "H" if name == "query_VH" else "L", seq, None)
+
+    return sequences, errors
 
 
 def main():
@@ -496,89 +540,90 @@ def main():
     parser.add_argument("--vl", help="VL sequence (amino acids)")
     parser.add_argument("--db-dir", help="Germline database directory")
     parser.add_argument("--top", type=int, default=10, help="Number of top germlines to show")
+    parser.add_argument("--no-imgt", action="store_true",
+                        help="Skip IMGT scoring (no ANARCI required)")
     args = parser.parse_args()
 
     if not args.vh and not args.vl and not args.input:
         parser.error("Provide --input (FASTA) or --vh/--vl sequences")
 
-    # Load sequences
-    sequences = {}
-    if args.input:
-        from scripts.humanize.germline import _parse_fasta_text
-        from scripts.humanize.numbering import number_heavy, number_light
-        with open(args.input) as f:
-            for name, seq in _parse_fasta_text(f.read()):
-                # Auto-detect chain type by trying numbering
-                try:
-                    numbered = number_heavy(seq)
-                    if numbered.chain_type == "L":
-                        sequences[name] = ("L", seq)
-                    else:
-                        sequences[name] = ("H", seq)
-                except:
-                    try:
-                        numbered = number_light(seq)
-                        sequences[name] = ("L", seq)
-                    except:
-                        # Fallback to name/length heuristic
-                        name_upper = name.upper()
-                        if "VH" in name_upper or "HEAVY" in name_upper:
-                            sequences[name] = ("H", seq)
-                        elif "VL" in name_upper or "LIGHT" in name_upper or "KAPPA" in name_upper or "LAMBDA" in name_upper:
-                            sequences[name] = ("L", seq)
-                        elif len(seq) > 130:
-                            sequences[name] = ("H", seq)
-                        else:
-                            sequences[name] = ("L", seq)
-    else:
-        if args.vh:
-            sequences["query_VH"] = ("H", args.vh)
-        if args.vl:
-            sequences["query_VL"] = ("L", args.vl)
+    try:
+        sequences, errors = load_sequences(
+            input_path=args.input, vh=args.vh, vl=args.vl, skip_invalid=True)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
-    # Evaluate each sequence with both numbering schemes
-    for name, (chain_type, seq) in sequences.items():
-        # Kabat-based evaluation
-        scored, numbered = evaluate_sequence(chain_type, seq, args.db_dir)
-        result = format_results(chain_type, seq, scored, numbered, args.top)
-        print(result)
+    for name, message in errors:
+        print(f"  [ERROR] {name}: {message}", file=sys.stderr)
+    if not sequences:
+        print("ERROR: no valid antibody sequences to evaluate", file=sys.stderr)
+        return 1
 
-        # Sequence comparison table (Kabat)
+    imgt_genes = None
+    if not args.no_imgt:
+        imgt_genes = load_imgt_germline(args.db_dir or "")
+        if not imgt_genes:
+            print(
+                "  [WARN] IMGT germline database unavailable; IMGT results "
+                "will be N/A (expected data/germline/abnumber_human_imgt.json)",
+                file=sys.stderr,
+            )
+
+    evaluated = []
+    for name, chain_type, seq, numbered in sequences:
+        try:
+            scored, numbered = evaluate_sequence(
+                chain_type, seq, args.db_dir, numbered=numbered)
+        except ValueError as exc:
+            print(f"  [ERROR] {name}: {exc}", file=sys.stderr)
+            errors.append((name, str(exc)))
+            continue
+
+        print(format_results(chain_type, seq, scored, numbered, args.top))
+
         best_gene = scored[0][0]
         if best_gene.numbered:
-            table = format_sequence_comparison_table(numbered, best_gene.numbered, chain_type)
-            print(table)
+            print(format_sequence_comparison_table(
+                numbered, best_gene.numbered, chain_type))
 
-        # IMGT-based evaluation
-        scored_imgt, numbered_imgt = evaluate_sequence_imgt(chain_type, seq, args.db_dir)
-        result_imgt = format_results_imgt(chain_type, seq, scored_imgt, numbered_imgt, args.top)
-        print(result_imgt)
+        scored_imgt = None
+        if not args.no_imgt:
+            scored_imgt, numbered_imgt = evaluate_sequence_imgt(
+                chain_type, seq, args.db_dir, imgt_genes=imgt_genes)
+            print(format_results_imgt(
+                chain_type, seq, scored_imgt, numbered_imgt, args.top))
+
+        evaluated.append((name, chain_type, seq, scored, numbered, scored_imgt))
 
     # Combined summary for Fab
-    if "H" in [c for c, _ in sequences.values()] and "L" in [c for c, _ in sequences.values()]:
+    if any(c == "H" for _, c, _, _, _, _ in evaluated) and \
+            any(c == "L" for _, c, _, _, _, _ in evaluated):
         print(f"\n{'='*70}")
         print(f"  SUMMARY (Fab humanization)")
         print(f"{'='*70}")
-
         print(f"\n  {'Chain':<8} {'Best Kabat Gene':<20} {'FR id':<10} {'Best IMGT Gene':<20} {'FR id':<10}")
         print(f"  {'-'*8} {'-'*20} {'-'*10} {'-'*20} {'-'*10}")
 
-        for name, (chain_type, seq) in sequences.items():
-            scored, numbered = evaluate_sequence(chain_type, seq, args.db_dir)
-            scored_imgt, _ = evaluate_sequence_imgt(chain_type, seq, args.db_dir)
+        for name, chain_type, seq, scored, numbered, scored_imgt in evaluated:
             best_kabat, best_scores_kabat = scored[0]
             if scored_imgt:
                 best_imgt, best_scores_imgt = scored_imgt[0]
-                print(f"  {chain_type+' chain':<8} {best_kabat.gene_id:<20} {best_scores_kabat['fr_identity']:<10.4f} "
-                      f"{best_imgt.gene_id:<20} {best_scores_imgt['fr_identity']:<10.4f}")
+                print(
+                    f"  {chain_type+' chain':<8} {best_kabat.gene_id:<20} "
+                    f"{best_scores_kabat['fr_identity']:<10.4f} "
+                    f"{best_imgt.gene_id:<20} {best_scores_imgt['fr_identity']:<10.4f}"
+                )
             else:
-                print(f"  {chain_type+' chain':<8} {best_kabat.gene_id:<20} {best_scores_kabat['fr_identity']:<10.4f} "
-                      f"{'N/A':<20} {'N/A':<10}")
+                print(
+                    f"  {chain_type+' chain':<8} {best_kabat.gene_id:<20} "
+                    f"{best_scores_kabat['fr_identity']:<10.4f} {'N/A':<20} {'N/A':<10}"
+                )
 
         print(f"\n  Note: IMGT-based evaluation is used for WHO/INN/USAN drug naming.")
         print(f"  Kabat-based evaluation is for internal pipeline use.")
 
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
