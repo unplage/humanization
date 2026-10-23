@@ -56,8 +56,8 @@ Framework support residues (excluding loop residues themselves):
 | L2   | 48, 49, 51, 53, 55, 58, 64 |
 | L3   | 34, 36, 46, 49, 90, 94, 97, 98 |
 
-Note: Chothia CDR definitions graft the H1 stem (Kabat 26-35), so several
-"canonical" H1 residues are carried with the loop in that scheme.
+Note: Chothia defines H1 as Kabat 26-32 (the loop only); AbM/Martin extends it
+to 26-35. Use `--scheme abm` when the H1 stem is wanted.
 
 ### 2.4 VHH hallmark — Muyldermans, J Biotechnol 74:277 (2001)
 

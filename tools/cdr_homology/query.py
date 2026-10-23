@@ -34,20 +34,30 @@ _IMGT_CDR_RANGES = {
 }
 
 
+def _position_number(label: str):
+    """Numeric IMGT position of a label like 'H105' or 'H111A'."""
+    digits = "".join(c for c in label[1:] if c.isdigit())
+    return int(digits) if digits else None
+
+
 def _extract_cdrs_from_posmap(posmap: dict, chain_type: str) -> dict:
-    """Extract CDR1/CDR2/CDR3 from an IMGT position map."""
-    cdrs = {}
-    for cdr_name, (start, end) in _IMGT_CDR_RANGES.items():
-        seq = ""
-        for pos in range(start, end + 1):
-            aa = posmap.get(f"{chain_type}{pos}", None)
-            if aa and aa != "-":
-                seq += aa
-            for letter in "ABCDEFGHIJK":
-                ins_aa = posmap.get(f"{chain_type}{pos}{letter}", None)
-                if ins_aa:
-                    seq += ins_aa
-        cdrs[cdr_name] = seq
+    """Extract CDR1/CDR2/CDR3 from an IMGT position map.
+
+    Iterates the posmap in ANARCI sequence order (not numeric order). IMGT
+    CDR3 insertions run 111, 111A, 111B, ... then 112C, 112B, 112A, 112, so
+    a numeric walk with ascending letters would transpose the loop.
+    """
+    cdrs = {name: "" for name in _IMGT_CDR_RANGES}
+    for label, aa in posmap.items():
+        if not aa or aa == "-" or not label.startswith(chain_type):
+            continue
+        pos_num = _position_number(label)
+        if pos_num is None:
+            continue
+        for cdr_name, (start, end) in _IMGT_CDR_RANGES.items():
+            if start <= pos_num <= end:
+                cdrs[cdr_name] += aa
+                break
     return cdrs
 
 

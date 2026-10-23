@@ -262,18 +262,19 @@ def map_peptide_positions(
         chain_id: chain identifier ("H" or "L")
         structure_data: dict from compute_rel_sasa
         backmutations: list of backmutation dicts from pipeline output
-        position_labels: optional per-residue Kabat labels aligned to
-            ``sequence`` (index 0 -> label of the first residue). When given,
-            backmutations are matched by their exact Kabat label, which is the
-            only way positions that carry insertion letters (FR3 82A-C, CDR
-            100A-K, 27A-) or FR4 (Kabat 103-113 / 98-107) can be matched.
-            Without it the tool falls back to a sequential index, which is
-            approximate whenever Kabat number != sequence index.
+        position_labels: optional per-residue labels aligned to ``sequence``
+            (index 0 -> label of the first residue), in the run's coordinate
+            space (Kabat or IMGT). When given, backmutations are matched by
+            their exact label, which is the only way positions that carry
+            insertion letters (Kabat FR3 82A-C / CDR 100A-K / 27A-, IMGT
+            111A-112F) or FR4 can be matched. Without it the tool falls back
+            to a sequential index, which is approximate whenever the position
+            number != sequence index.
 
     Returns:
         List of PositionBuriedness for positions within the peptide
     """
-    # Build backmutation lookups: exact Kabat label, plus numeric fallback.
+    # Build backmutation lookups: exact label, plus numeric fallback.
     backmut_by_label: Dict[str, Dict] = {}
     backmut_by_num: Dict[int, Dict] = {}
     if backmutations:
@@ -446,7 +447,7 @@ def _rekey_structure_by_label(
     chain_id: str,
     position_labels: List[str],
 ) -> Dict[str, PositionBuriedness]:
-    """Re-key a chain+resseq structure map onto Kabat position labels.
+    """Re-key a chain+resseq structure map onto position labels (Kabat/IMGT).
 
     Residues are matched in resseq order to ``position_labels`` (index 0 =
     first residue), so this works whether the PDB is sequentially numbered
@@ -489,8 +490,9 @@ def assess_variant_structural_risk(
         structure_path: path to variant PDB file
         backmutations: list of backmutation dicts from pipeline
         method: adjustment method
-        position_labels: optional per-residue Kabat labels aligned to
-            ``sequence``; enables exact backmutation/FR4 matching.
+        position_labels: optional per-residue labels aligned to ``sequence``
+            (Kabat or IMGT, matching the pipeline run); enables exact
+            backmutation/FR4 matching.
 
     Returns:
         VariantStructuralRisk with adjusted scores
@@ -922,10 +924,11 @@ def run_structural_risk_assessment(
         output_dir: directory for output files
         method: adjustment method
         verbose: print progress
-        numbering_json: optional ``variants_numbering.json`` path (per-variant
-            Kabat labels). When omitted it is auto-discovered in
+        numbering_json: optional ``variants_numbering.json`` path
+            (per-variant labels in the run's coordinate space, Kabat or
+            IMGT). When omitted it is auto-discovered in
             ``backmutation_csv_dir``. Without it, backmutation/FR4 positions
-            are matched only approximately (sequence index vs Kabat).
+            are matched only approximately (sequence index vs label).
 
     Returns:
         Updated results with structural risk adjustments
@@ -935,7 +938,7 @@ def run_structural_risk_assessment(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Per-variant Kabat labels: explicit path, else auto-discover beside CSVs.
+    # Per-variant labels (Kabat/IMGT): explicit path, else auto-discover.
     if numbering_json is None and backmutation_csv_dir:
         cand = os.path.join(backmutation_csv_dir, 'variants_numbering.json')
         if os.path.isfile(cand):

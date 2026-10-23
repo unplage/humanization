@@ -200,7 +200,13 @@ def compute_immunogenicity_score(metrics: Dict, donor_metrics: Optional[Dict] = 
 def find_positions_of_interest(donor_seq: str, variant_seq: str,
                                donor_epi: Dict,
                                variant_epi: Dict) -> List[Dict]:
-    """Find positions where epitope score changes between donor and variant."""
+    """Find positions where epitope score changes between donor and variant.
+
+    The reported ``position`` is a 1-based index into the chain sequence (the
+    MHC backend scores residue offsets), not a Kabat/IMGT label. Use the
+    structural-risk report (fed by ``variants_numbering.json``) for label-aware
+    back-mutation positions.
+    """
     # Defensive: ensure keys are int (JSON deserializes as strings)
     if donor_epi and isinstance(next(iter(donor_epi)), str):
         donor_epi = {int(k): v for k, v in donor_epi.items()}
@@ -442,6 +448,7 @@ def format_text_report(results: Dict, title: str = "Immunogenicity Analysis") ->
             v = variants[vname]
             if v.get("positions_of_interest"):
                 lines.append(f"  Top epitope-changing positions ({vname}):")
+                lines.append("  (Pos = 1-based sequence index, not Kabat/IMGT)")
                 lines.append(f"  {'Pos':>5} {'Donor':>6} {'Variant':>8} {'ΔEPI':>8} {'Dir':>10}")
                 for p in v["positions_of_interest"][:10]:
                     lines.append(
@@ -514,7 +521,7 @@ def save_markdown_report(results: Dict, output_path: str,
             v = variants[vname]
             if v.get("positions_of_interest"):
                 lines.append(f"### Epitope-changing positions ({vname})\n")
-                lines.append("| Pos | Donor | Variant | ΔEPI | Direction |")
+                lines.append("| Pos (seq idx) | Donor | Variant | ΔEPI | Direction |")
                 lines.append("|-----|-------|---------|------|-----------|")
                 for p in v["positions_of_interest"][:15]:
                     lines.append(
@@ -600,7 +607,7 @@ def save_word_report(results: Dict, output_path: str,
                 doc.add_heading(f"Epitope-changing positions ({vname})", level=2)
                 table2 = doc.add_table(rows=1 + min(15, len(v["positions_of_interest"])), cols=5)
                 table2.style = "Table Grid"
-                for i, h in enumerate(["Pos", "Donor", "Variant", "ΔEPI", "Direction"]):
+                for i, h in enumerate(["Pos (seq idx)", "Donor", "Variant", "ΔEPI", "Direction"]):
                     cell = table2.rows[0].cells[i]
                     cell.text = h
                     for p in cell.paragraphs:

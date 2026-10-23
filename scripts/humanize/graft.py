@@ -42,7 +42,8 @@ CDR_POS_SETS = {
         "L": {"CDR1": (24, 34), "CDR2": (50, 56), "CDR3": (89, 97)},
     },
     "chothia": {
-        "H": {"CDR1": (26, 35), "CDR2": (52, 56), "CDR3": (93, 102)},
+        # Chothia CDR-H1 is 26-32 (not 26-35, which is the AbM/Martin view).
+        "H": {"CDR1": (26, 32), "CDR2": (52, 56), "CDR3": (93, 102)},
         "L": {"CDR1": (24, 34), "CDR2": (50, 56), "CDR3": (89, 97)},
     },
     "abm": {
