@@ -441,13 +441,18 @@ CDR_REGIONS = ("CDR1", "CDR2")
 
 def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, float]:
     """Per-position comparison between query and a germline V gene.
-    Returns identity fractions over FR, CDR1-2, and all, plus per-region breakdown.
+    Returns identity fractions over FR, CDR1-2, and all, plus per-region
+    match/count and coverage diagnostics.
 
     Note: CDR3 (H95-102 / L89-97) and FR4 (H103-113 / L98-107) are both
     excluded by construction — CDR3 is grafted from the donor and has no
     germline V correspondence; FR4 comes from the human J gene (human by
     construction, and too conserved across species to be discriminative).
     Including either would artificially inflate all_identity.
+
+    Identity is computed over positions present in both query and germline
+    (the historical behaviour), while coverage/query-only/germline-only
+    fields expose alignment length differences without changing the metric.
     """
     if gene.numbered is None:
         return {
@@ -456,16 +461,27 @@ def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, f
             "fr1_identity": 0.0, "fr2_identity": 0.0, "fr3_identity": 0.0,
             "cdr1_identity": 0.0, "cdr2_identity": 0.0,
             "n_fr1": 0, "n_fr2": 0, "n_fr3": 0, "n_cdr1": 0, "n_cdr2": 0,
+            "fr_match": 0, "cdr_match": 0, "all_match": 0,
+            "fr1_match": 0, "fr2_match": 0, "fr3_match": 0,
+            "cdr1_match": 0, "cdr2_match": 0,
+            "n_query": 0, "n_germline": 0, "n_compared": 0,
+            "n_query_only": 0, "n_germline_only": 0, "coverage": 0.0,
         }
     q, g = query.posmap(), gene.numbered.posmap()
+    eval_regions = set(FR_REGIONS) | set(CDR_REGIONS)
+    q_eval = [p for p in q if query.region_of(p) in eval_regions]
+    g_eval = [p for p in g if gene.numbered.region_of(p) in eval_regions]
     common_fr = [p for p in q if p in g and query.region_of(p) in FR_REGIONS]
     common_cdr = [p for p in q if p in g and query.region_of(p) in CDR_REGIONS]
 
     # Overall FR and CDR identity
-    fr_id = sum(1 for p in common_fr if q[p] == g[p]) / len(common_fr) if common_fr else 0.0
-    cdr_id = sum(1 for p in common_cdr if q[p] == g[p]) / len(common_cdr) if common_cdr else 0.0
+    fr_match = sum(1 for p in common_fr if q[p] == g[p])
+    cdr_match = sum(1 for p in common_cdr if q[p] == g[p])
+    fr_id = fr_match / len(common_fr) if common_fr else 0.0
+    cdr_id = cdr_match / len(common_cdr) if common_cdr else 0.0
     common = common_fr + common_cdr
-    all_id = sum(1 for p in common if q[p] == g[p]) / len(common) if common else 0.0
+    all_match = sum(1 for p in common if q[p] == g[p])
+    all_id = all_match / len(common) if common else 0.0
 
     # Per-region breakdown
     fr1_pos = [p for p in common_fr if query.region_of(p) == "FR1"]
@@ -474,11 +490,20 @@ def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, f
     cdr1_pos = [p for p in common_cdr if query.region_of(p) == "CDR1"]
     cdr2_pos = [p for p in common_cdr if query.region_of(p) == "CDR2"]
 
-    fr1_id = sum(1 for p in fr1_pos if q[p] == g[p]) / len(fr1_pos) if fr1_pos else 0.0
-    fr2_id = sum(1 for p in fr2_pos if q[p] == g[p]) / len(fr2_pos) if fr2_pos else 0.0
-    fr3_id = sum(1 for p in fr3_pos if q[p] == g[p]) / len(fr3_pos) if fr3_pos else 0.0
-    cdr1_id = sum(1 for p in cdr1_pos if q[p] == g[p]) / len(cdr1_pos) if cdr1_pos else 0.0
-    cdr2_id = sum(1 for p in cdr2_pos if q[p] == g[p]) / len(cdr2_pos) if cdr2_pos else 0.0
+    fr1_match = sum(1 for p in fr1_pos if q[p] == g[p])
+    fr2_match = sum(1 for p in fr2_pos if q[p] == g[p])
+    fr3_match = sum(1 for p in fr3_pos if q[p] == g[p])
+    cdr1_match = sum(1 for p in cdr1_pos if q[p] == g[p])
+    cdr2_match = sum(1 for p in cdr2_pos if q[p] == g[p])
+    fr1_id = fr1_match / len(fr1_pos) if fr1_pos else 0.0
+    fr2_id = fr2_match / len(fr2_pos) if fr2_pos else 0.0
+    fr3_id = fr3_match / len(fr3_pos) if fr3_pos else 0.0
+    cdr1_id = cdr1_match / len(cdr1_pos) if cdr1_pos else 0.0
+    cdr2_id = cdr2_match / len(cdr2_pos) if cdr2_pos else 0.0
+
+    n_query_only = sum(1 for p in q_eval if p not in g)
+    n_germline_only = sum(1 for p in g_eval if p not in q)
+    coverage = len(common) / len(q_eval) if q_eval else 0.0
 
     return {
         "fr_identity": round(fr_id, 4),
@@ -496,6 +521,20 @@ def compare_to_germline(query: NumberedChain, gene: GermlineGene) -> Dict[str, f
         "n_fr3": len(fr3_pos),
         "n_cdr1": len(cdr1_pos),
         "n_cdr2": len(cdr2_pos),
+        "fr_match": fr_match,
+        "cdr_match": cdr_match,
+        "all_match": all_match,
+        "fr1_match": fr1_match,
+        "fr2_match": fr2_match,
+        "fr3_match": fr3_match,
+        "cdr1_match": cdr1_match,
+        "cdr2_match": cdr2_match,
+        "n_query": len(q_eval),
+        "n_germline": len(g_eval),
+        "n_compared": len(common),
+        "n_query_only": n_query_only,
+        "n_germline_only": n_germline_only,
+        "coverage": round(coverage, 4),
     }
 
 

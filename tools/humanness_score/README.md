@@ -1,6 +1,6 @@
 # Humanness Score Tool
 
-Evaluate the humanization degree of antibody sequences by comparing against human germline V/J genes.
+Evaluate the humanization degree of antibody sequences by comparing against human germline V genes (CDR3/FR4 are excluded from headline scores).
 
 ## Features
 
@@ -40,8 +40,14 @@ python3 tools/humanness_score/evaluate_humanness.py \
 ### Batch Processing (Word Reports)
 
 ```bash
+# Positional FASTA (default output: outputs/reports)
 python3 tools/humanness_score/generate_all_reports.py \
     data/examples/antibody_panel.fasta
+
+# Explicit output directory; skip IMGT when ANARCI is not available
+python3 tools/humanness_score/generate_all_reports.py \
+    data/examples/antibody_panel.fasta \
+    --outdir outputs/humanness --no-imgt
 ```
 
 ## Output
@@ -63,15 +69,25 @@ python3 tools/humanness_score/generate_all_reports.py \
   Best match (Kabat): IGHV1-69*01
     FR identity:  0.8500 (85.0%)
     CDR identity: 0.4000 (40.0%)
+    Compared:     98/98 query positions (coverage 100.0%); query-only 0, germline-only 0
 
-  Humanization estimate: Academic: likely Humanized-like (FR identity >= 85%)
-  (Note: Official USAN/INN naming requires knowledge of manufacturing process)
+  Detailed region breakdown (Kabat):
+  Region     Identity     Match    Total
+  ---------- ------------ -------- --------
+  FR1        88.0%     22       25
+  FR2        86.7%     13       15
+
+  Humanization estimate: Academic: likely Humanized-like
+  (Academic estimate only; official USAN/INN naming requires manufacturing-process knowledge)
 ```
 
 ### Word Reports
 
 - Individual report per antibody
 - Combined summary report with all antibodies
+- IMGT cells show `N/A` when ANARCI/IMGT germline is unavailable (never `0.0%`)
+- Report filenames are sanitized; duplicate FASTA names get unique suffixes
+- Invalid FASTA records are skipped and reported; the command exits non-zero if any failed
 
 ## Numbering Schemes
 
@@ -101,8 +117,10 @@ python3 tools/humanness_score/generate_all_reports.py \
 - **Excluded Regions**: CDR3 (donor-grafted) and FR4 (human J gene, highly conserved across species) — both excluded from the headline scores so results stay comparable with published V-region-only humanness metrics
 - **FR Identity**: Identity in framework regions (FR1+FR2+FR3)
 - **CDR Identity**: Identity in CDR1+CDR2 regions
-- **Overall Identity**: Weighted average
-- **Note**: The terminal "Sequence identity summary" table is a raw per-region diagnostic that *includes* CDR3 and FR4, so its numbers will not reconcile with the headline scores
+- **Overall Identity**: Pooled identity over FR1+FR2+FR3+CDR1+CDR2
+- **Match/Count**: Reported region values are exact position counts (`match/total`), not rounded back-computed percentages
+- **Coverage**: Headline identity uses positions present in both query and germline; coverage/query-only/germline-only are reported separately so indels are visible without changing the historical metric
+- **Note**: The terminal "Sequence identity summary" table is a raw per-region diagnostic that *includes* CDR3 and FR4 and is aligned by position label, so its numbers will not reconcile with the headline scores
 
 ## Example Output Files
 
