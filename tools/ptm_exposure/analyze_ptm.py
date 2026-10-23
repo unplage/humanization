@@ -453,7 +453,6 @@ def analyze_structure(pdb_path: str) -> Dict:
             "medium_risk": 0,
             "low_risk": 0,
             "exposed_high_risk": 0,
-            "buried_high_risk": 0,
         }
     }
 
@@ -486,10 +485,7 @@ def analyze_structure(pdb_path: str) -> Dict:
             results["summary"]["total_ptm_sites"] += 1
             if site.adjusted_risk == "high":
                 results["summary"]["high_risk"] += 1
-                if site.is_exposed:
-                    results["summary"]["exposed_high_risk"] += 1
-                else:
-                    results["summary"]["buried_high_risk"] += 1
+                results["summary"]["exposed_high_risk"] += 1
             elif site.adjusted_risk == "medium":
                 results["summary"]["medium_risk"] += 1
             else:
@@ -544,7 +540,6 @@ def format_text_report(results: Dict, title: str = "PTM Exposure Analysis") -> s
     summary = results["summary"]
     lines.append(f"  Total PTM sites:      {summary['total_ptm_sites']}")
     lines.append(f"  High risk (exposed):  {summary['exposed_high_risk']}")
-    lines.append(f"  High risk (buried):   {summary['buried_high_risk']}")
     lines.append(f"  Medium risk:          {summary['medium_risk']}")
     lines.append(f"  Low risk:             {summary['low_risk']}")
     lines.append("")
@@ -587,7 +582,6 @@ def save_markdown_report(results: Dict, output_path: str, title: str = "PTM Expo
     summary = results["summary"]
     lines.append(f"- **Total PTM sites:** {summary['total_ptm_sites']}")
     lines.append(f"- **High risk (exposed):** {summary['exposed_high_risk']}")
-    lines.append(f"- **High risk (buried):** {summary['buried_high_risk']}")
     lines.append(f"- **Medium risk:** {summary['medium_risk']}")
     lines.append(f"- **Low risk:** {summary['low_risk']}")
     lines.append("")
@@ -689,13 +683,12 @@ def save_word_report(results: Dict, output_path: str, title: str = "PTM Exposure
     doc.add_heading('Summary', level=1)
     summary = results["summary"]
     
-    summary_table = doc.add_table(rows=6, cols=2)
+    summary_table = doc.add_table(rows=5, cols=2)
     summary_table.style = 'Light Grid Accent 1'
     
     summary_data = [
         ("Total PTM sites", summary['total_ptm_sites']),
         ("High risk (exposed)", summary['exposed_high_risk']),
-        ("High risk (buried)", summary['buried_high_risk']),
         ("Medium risk", summary['medium_risk']),
         ("Low risk", summary['low_risk']),
     ]
