@@ -15,6 +15,9 @@ inputs/
 data/AbRSA/
 data/ncbi-igblast-1.22.0/
 data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx
+# derived from the TheraSAbDab download above (same licence)
+data/benchmarks/therasabdab_humanized_mabs.fasta
+data/benchmarks/ighv3_23_igkv1_39_pairs.fasta
 
 # PATAA patent antibody database (large; regenerate with preprocess_pataa.py)
 data/pataa_work/

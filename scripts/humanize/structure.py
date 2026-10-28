@@ -19,7 +19,9 @@ import json
 import math
 import os
 import shutil
+import statistics
 import subprocess
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -236,6 +238,90 @@ def _dist(a, b):
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
 
 
+# ---------------------------------------------------------------------------
+# per-loop geometry (D3: loop-class weighting / position-set correction)
+# ---------------------------------------------------------------------------
+
+LOOP_ORDER = ("CDR1", "CDR2", "CDR3")
+
+
+def _dihedral(p0, p1, p2, p3) -> Optional[float]:
+    """Dihedral angle p0-p1-p2-p3 in degrees (None if degenerate)."""
+    b0 = [p0[i] - p1[i] for i in range(3)]
+    b1 = [p2[i] - p1[i] for i in range(3)]
+    b2 = [p3[i] - p2[i] for i in range(3)]
+    n = math.sqrt(sum(x * x for x in b1))
+    if n < 1e-6:
+        return None
+    b1 = [x / n for x in b1]
+    d0 = sum(b0[i] * b1[i] for i in range(3))
+    d2 = sum(b2[i] * b1[i] for i in range(3))
+    v = [b0[i] - d0 * b1[i] for i in range(3)]
+    w = [b2[i] - d2 * b1[i] for i in range(3)]
+    x = sum(v[i] * w[i] for i in range(3))
+    cross = [b1[1] * v[2] - b1[2] * v[1],
+             b1[2] * v[0] - b1[0] * v[2],
+             b1[0] * v[1] - b1[1] * v[0]]
+    y = sum(cross[i] * w[i] for i in range(3))
+    return math.degrees(math.atan2(y, x))
+
+
+def _torsion_class(deg: Optional[float]) -> str:
+    """Coarse main-chain conformational class of a phi angle.
+
+    A = right-handed alpha basin, B = beta basin, L = left-handed (glycine)
+    basin, C = coil/other. Canonical loop classes (Chothia) are defined by
+    this kind of main-chain conformation, so the string of these classes is a
+    structural fingerprint of the loop's actual class.
+    """
+    if deg is None:
+        return "C"
+    if -100.0 <= deg <= -30.0:
+        return "A"
+    if -170.0 <= deg < -100.0:
+        return "B"
+    if 30.0 <= deg <= 100.0:
+        return "L"
+    return "C"
+
+
+def _loop_conformation(by_res, chain_label, loop_resseqs):
+    """Per-loop main-chain conformation fingerprint and regularity.
+
+    ``regularity`` = fraction of loop residues whose phi lies in a standard
+    (alpha/beta/left-handed) basin. Canonical classes only exist for
+    well-ordered backbones; an irregular loop has no class to support, so the
+    canonical-support weight is scaled down (see loopclass.py).
+    """
+    chain_res = sorted(r for (ch, r) in by_res if ch == chain_label)
+    index = {r: i for i, r in enumerate(chain_res)}
+    out = {}
+    for loop, resseqs in loop_resseqs.items():
+        chars = []
+        regular = 0
+        for r in resseqs:
+            i = index.get(r)
+            if i is None or i == 0 or i + 1 >= len(chain_res):
+                continue
+            at = {name: xyz for name, xyz in by_res.get((chain_label, r), [])}
+            ap = {name: xyz for name, xyz
+                  in by_res.get((chain_label, chain_res[i - 1]), [])}
+            if not all(k in at for k in ("N", "CA", "C")) or "C" not in ap:
+                continue
+            phi = _dihedral(ap["C"], at["N"], at["CA"], at["C"])
+            cls = _torsion_class(phi)
+            chars.append(cls)
+            if cls != "C":
+                regular += 1
+        n = len(chars)
+        out[loop] = {
+            "length": len(resseqs),
+            "signature": "".join(chars),
+            "regularity": round(regular / n, 3) if n else 0.0,
+        }
+    return out
+
+
 def _try_freesasa_buriedness(
     pdb_path: str,
     chain_label: str,
@@ -298,6 +384,7 @@ def compute_hints(
     pdb_path: Optional[str] = None,
     literature_positions: Optional[set] = None,
     use_plddt: bool = True,
+    cdr_loops: Optional[Dict[str, str]] = None,
 ) -> StructureHints:
     """Compute per-position hints for a chain in the model.
 
@@ -311,6 +398,10 @@ def compute_hints(
     use_plddt:    Interpret the B-factor column as an AF3 pLDDT score. Must be
                   False for experimental PDB/CIF files, whose B-factor is a
                   crystallographic temperature factor, not a confidence score.
+    cdr_loops:    {CDR pos: "CDR1"|"CDR2"|"CDR3"}, enabling the per-loop
+                  geometry that drives the loop-class position-set correction
+                  (loopclass.py). Without it no loop keys are emitted and the
+                  structure path is byte-identical to the previous behaviour.
     """
     heavy = model.heavy_atoms()
     by_res: Dict[Tuple[str, int], List] = {}
@@ -327,8 +418,51 @@ def compute_hints(
     ag_atoms = ([a for a in heavy if a[0][0] in antigen_chains]
                 if antigen_chains else [])
 
+    # per-loop CDR atom pools (loop-class correction, D3). ``loop_lengths``
+    # is the length DEFINED by the numbering/graft map; only loops whose
+    # residues are all present in the model yield distances. A truncated loop
+    # (fully or partially missing) therefore has no ``loop_min_dist`` entry,
+    # and loopclass.py turns the whole correction into a no-op instead of
+    # calling every framework residue "far" from an incomplete loop.
+    loop_resseqs: Dict[str, set] = {}
+    if cdr_loops:
+        for pos, loop in cdr_loops.items():
+            r = cdr_positions.get(pos)
+            if isinstance(r, int) and loop in LOOP_ORDER:
+                loop_resseqs.setdefault(loop, set()).add(r)
+    loop_atoms: Dict[str, List] = {}
+    loop_resseq_set: Dict[str, set] = {}
+    for loop, rs in loop_resseqs.items():
+        atoms = [a for a in heavy
+                 if a[0][0] == chain_label and a[0][1] in rs]
+        present = {a[0][1] for a in atoms}
+        if present and present == rs:
+            loop_atoms[loop] = atoms
+            loop_resseq_set[loop] = present
+    loop_lengths = {loop: len(rs) for loop, rs in loop_resseqs.items()}
+    # Per-loop mean pLDDT: a canonical class only exists for a reliably
+    # modelled loop, so the canonical claim is scaled by this confidence.
+    loop_plddt: Dict[str, float] = {}
+    loop_classes = _loop_conformation(by_res, chain_label,
+                                      {k: sorted(v) for k, v in loop_resseq_set.items()})
+    loop_min_dist: Dict[str, Dict[str, float]] = {}
+    loop_min_dist_sc: Dict[str, Dict[str, float]] = {}
+    loop_contact_count: Dict[str, Dict[str, int]] = {}
+    loop_contact_sc_count: Dict[str, Dict[str, int]] = {}
+
     # map resseq -> kabat pos
     resseq_to_pos = {v: k for k, v in position_map.items()}
+
+    if use_plddt:
+        plddt_by_resseq: Dict[Tuple[str, int], float] = {}
+        for a in model.atoms:
+            if a.chain == chain_label and a.name == "CA" and a.plddt > 0:
+                plddt_by_resseq.setdefault((chain_label, a.resseq), a.plddt)
+        for loop, rs in loop_resseq_set.items():
+            vals = [plddt_by_resseq[(chain_label, r)] for r in sorted(rs)
+                    if (chain_label, r) in plddt_by_resseq]
+            if vals:
+                loop_plddt[loop] = round(sum(vals) / len(vals), 2)
 
     # Extract pLDDT from model (AF3 B-factor column). Skipped for experimental
     # structures where the B-factor is a temperature factor, not pLDDT.
@@ -417,6 +551,34 @@ def compute_hints(
                 _dist(a2, a1) < 4.5
                 for (r2, _n2, a2) in ag_atoms for (_n1, a1) in atoms
             )
+        # per-loop distance / contact profile (skip the loop's own residues)
+        if loop_atoms:
+            ld: Dict[str, float] = {}
+            lc: Dict[str, int] = {}
+            lc_sc: Dict[str, int] = {}
+            lds: Dict[str, float] = {}
+            for loop, latoms in loop_atoms.items():
+                if resseq in loop_resseq_set[loop] or not atoms:
+                    continue
+                ld[loop] = min(_dist(a1, a2)
+                               for (_n1, a1) in atoms
+                               for (_r2, _n2, a2) in latoms)
+                if sidechain:
+                    lds[loop] = min(_dist(a1, a2)
+                                    for (_n1, a1) in sidechain
+                                    for (_r2, _n2, a2) in latoms)
+                lc[loop] = len({r2[1] for (r2, _n2, a2) in latoms
+                                if any(_dist(a2, a1) < 4.5
+                                       for (_n1, a1) in atoms)})
+                lc_sc[loop] = len({r2[1] for (r2, _n2, a2) in latoms
+                                   if any(_dist(a2, a1) < 4.5
+                                          for (_n1, a1) in sidechain)}) \
+                    if sidechain else 0
+            loop_min_dist[pos] = ld
+            if lds:
+                loop_min_dist_sc[pos] = lds
+            loop_contact_count[pos] = lc
+            loop_contact_sc_count[pos] = lc_sc
 
     # 方案5: 文献交叉验证 - 仅限文献位置集合
     # 如果提供了文献位置集合，仅在这些位置应用结构证据
@@ -433,6 +595,12 @@ def compute_hints(
         for pos in list(ag_contact.keys()):
             if pos not in literature_positions:
                 del ag_contact[pos]
+        for pos in list(loop_min_dist.keys()):
+            if pos not in literature_positions:
+                del loop_min_dist[pos]
+                loop_min_dist_sc.pop(pos, None)
+                loop_contact_count.pop(pos, None)
+                loop_contact_sc_count.pop(pos, None)
 
     return StructureHints({
         "buried": buried,
@@ -443,6 +611,14 @@ def compute_hints(
         "cdr_partners_sc": cdr_partners_sc,
         "plddt": plddt_by_pos,
         "rel_sasa": rel_sasa,
+        "loop_min_dist": loop_min_dist,
+        "loop_min_dist_sc": loop_min_dist_sc,
+        "loop_contacts": loop_contact_count,
+        "loop_contacts_sc": loop_contact_sc_count,
+        "loop_lengths": loop_lengths,
+        "loop_classes": loop_classes,
+        "loop_plddt": loop_plddt,
+        "n_models": 1,
     })
 
 
@@ -454,6 +630,7 @@ def compute_multi_model_consensus(
     antigen_chains: Optional[List[str]] = None,
     min_consensus: int = 3,
     use_plddt: bool = True,
+    cdr_loops: Optional[Dict[str, str]] = None,
 ) -> StructureHints:
     """Compute structure hints from multiple models (e.g., AF3 rank_1-N).
 
@@ -462,6 +639,8 @@ def compute_multi_model_consensus(
     available). CDR partner lists are unioned across models, and pLDDT /
     relSASA are averaged, so the structure-derived features consumed by
     Step 3 (minimal reversion, paratope grafting) are all preserved.
+    Per-loop geometry (``cdr_loops``) is aggregated with medians / votes so
+    the loop-class correction is not driven by a single outlier model.
 
     Args:
         pdb_paths: PDB file paths (e.g. rank_1.pdb ... rank_N.pdb)
@@ -471,9 +650,10 @@ def compute_multi_model_consensus(
         antigen_chains: Optional antigen chain ids
         min_consensus: Minimum number of agreeing models (default: 3)
         use_plddt: Interpret the B-factor column as an AF3 pLDDT score.
+        cdr_loops: {CDR pos: loop} passed through to compute_hints.
 
     Returns:
-        Consensus StructureHints (all six fields populated).
+        Consensus StructureHints (all fields populated when available).
     """
     if not pdb_paths:
         return StructureHints()
@@ -486,6 +666,16 @@ def compute_multi_model_consensus(
     partners_sc_all: Dict[str, set] = {}
     plddt_vals: Dict[str, List[float]] = {}
     sasa_vals: Dict[str, List[float]] = {}
+    loop_dist_vals: Dict[str, Dict[str, List[float]]] = {}
+    loop_dist_sc_vals: Dict[str, Dict[str, List[float]]] = {}
+    loop_cnt_vals: Dict[str, Dict[str, List[int]]] = {}
+    loop_sc_vals: Dict[str, Dict[str, List[int]]] = {}
+    loop_len_vals: Dict[str, List[int]] = {}
+    loop_cls_vals: Dict[str, List[dict]] = {}
+    loop_plddt_vals: Dict[str, List[float]] = {}
+    loop_shell_votes: Dict[str, Dict[str, int]] = {}
+    loop_contact_votes: Dict[str, Dict[str, int]] = {}
+    loop_buried_votes: Dict[str, int] = {}
     n_models = 0
 
     for pdb_path in pdb_paths:
@@ -497,6 +687,7 @@ def compute_multi_model_consensus(
         hints = compute_hints(
             model, chain_label, position_map, cdr_positions,
             antigen_chains, pdb_path=pdb_path, use_plddt=use_plddt,
+            cdr_loops=cdr_loops,
         )
         n_models += 1
         for pos, v in (hints.data.get("buried") or {}).items():
@@ -516,6 +707,36 @@ def compute_multi_model_consensus(
             plddt_vals.setdefault(pos, []).append(v)
         for pos, v in (hints.data.get("rel_sasa") or {}).items():
             sasa_vals.setdefault(pos, []).append(v)
+        for pos, per_loop in (hints.data.get("loop_min_dist") or {}).items():
+            for loop, d in per_loop.items():
+                loop_dist_vals.setdefault(pos, {}).setdefault(loop, []).append(d)
+        for pos, per_loop in (hints.data.get("loop_min_dist_sc") or {}).items():
+            for loop, d in per_loop.items():
+                loop_dist_sc_vals.setdefault(pos, {}).setdefault(loop, []).append(d)
+        for pos, per_loop in (hints.data.get("loop_contacts") or {}).items():
+            for loop, n in per_loop.items():
+                loop_cnt_vals.setdefault(pos, {}).setdefault(loop, []).append(n)
+        for pos, per_loop in (hints.data.get("loop_contacts_sc") or {}).items():
+            for loop, n in per_loop.items():
+                loop_sc_vals.setdefault(pos, {}).setdefault(loop, []).append(n)
+        for loop, n in (hints.data.get("loop_lengths") or {}).items():
+            loop_len_vals.setdefault(loop, []).append(n)
+        for loop, info in (hints.data.get("loop_classes") or {}).items():
+            loop_cls_vals.setdefault(loop, []).append(info)
+        for loop, v in (hints.data.get("loop_plddt") or {}).items():
+            loop_plddt_vals.setdefault(loop, []).append(float(v))
+        # Per-model votes for the measured shell evidence: a residue must be
+        # in the second shell of the same loop in most models, otherwise a
+        # single noisy model could create a feature.
+        from .loopclass import is_buriedish, shell_evidence
+        for pos in (hints.data.get("loop_min_dist_sc") or {}):
+            for loop, kind in shell_evidence(hints, chain_label, pos).items():
+                table = (loop_shell_votes if kind == "shell"
+                         else loop_contact_votes)
+                table.setdefault(pos, {}).setdefault(loop, 0)
+                table[pos][loop] += 1
+            if is_buriedish(hints, chain_label, pos):
+                loop_buried_votes[pos] = loop_buried_votes.get(pos, 0) + 1
 
     if n_models == 0:
         return StructureHints()
@@ -549,6 +770,37 @@ def compute_multi_model_consensus(
     avg_plddt = {p: sum(v) / len(v) for p, v in plddt_vals.items() if v}
     avg_sasa = {p: sum(v) / len(v) for p, v in sasa_vals.items() if v}
 
+    # per-loop geometry: median distance / count, modal length & class
+    consensus_loop_dist = {
+        pos: {loop: statistics.median(ds) for loop, ds in per_loop.items()}
+        for pos, per_loop in loop_dist_vals.items()
+    }
+    consensus_loop_dist_sc = {
+        pos: {loop: statistics.median(ds) for loop, ds in per_loop.items()}
+        for pos, per_loop in loop_dist_sc_vals.items()
+    }
+    consensus_loop_cnt = {
+        pos: {loop: int(statistics.median(ns)) for loop, ns in per_loop.items()}
+        for pos, per_loop in loop_cnt_vals.items()
+    }
+    consensus_loop_sc = {
+        pos: {loop: int(statistics.median(ns)) for loop, ns in per_loop.items()}
+        for pos, per_loop in loop_sc_vals.items()
+    }
+    consensus_loop_len = {
+        loop: Counter(ns).most_common(1)[0][0] for loop, ns in loop_len_vals.items()
+    }
+    consensus_loop_cls: Dict[str, dict] = {}
+    for loop, infos in loop_cls_vals.items():
+        sig = Counter(i.get("signature", "") for i in infos).most_common(1)[0][0]
+        regs = [i.get("regularity", 0.0) for i in infos
+                if i.get("signature", "") == sig]
+        consensus_loop_cls[loop] = {
+            "length": Counter(i.get("length", 0) for i in infos).most_common(1)[0][0],
+            "signature": sig,
+            "regularity": round(statistics.median(regs), 3) if regs else 0.0,
+        }
+
     return StructureHints({
         "buried": consensus_buried,
         "cdr_contact": consensus_cdr,
@@ -558,6 +810,18 @@ def compute_multi_model_consensus(
         "cdr_partners_sc": consensus_partners_sc,
         "plddt": avg_plddt,
         "rel_sasa": avg_sasa,
+        "loop_min_dist": consensus_loop_dist,
+        "loop_min_dist_sc": consensus_loop_dist_sc,
+        "loop_contacts": consensus_loop_cnt,
+        "loop_contacts_sc": consensus_loop_sc,
+        "loop_lengths": consensus_loop_len,
+        "loop_classes": consensus_loop_cls,
+        "loop_plddt": {loop: statistics.median(vs)
+                       for loop, vs in loop_plddt_vals.items()},
+        "loop_shell_votes": loop_shell_votes,
+        "loop_contact_votes": loop_contact_votes,
+        "loop_buried_votes": loop_buried_votes,
+        "n_models": n_models,
     })
 
 

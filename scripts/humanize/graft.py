@@ -83,6 +83,21 @@ def cdr_positions_for(scheme: str, chain_type: str, numbering: str = "kabat") ->
     return out
 
 
+def loop_of_position(chain_type: str, num: int, scheme: str = "kabat",
+                     numbering: str = "kabat") -> Optional[str]:
+    """CDR1/CDR2/CDR3 name for a CDR position number, else None.
+
+    The per-loop name is what the loop-class correction needs: the literature
+    canonical support residues are loop-specific, and only a structure can tell
+    whether this antibody's residue actually supports the loop it is assigned
+    to. ``cdr_windows`` returns disjoint windows ordered CDR1/2/3.
+    """
+    for name, (lo, hi) in cdr_windows(numbering, scheme)[chain_type].items():
+        if lo <= num <= hi:
+            return name
+    return None
+
+
 @dataclass
 class GraftResult:
     scheme: str

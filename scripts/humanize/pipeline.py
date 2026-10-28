@@ -46,6 +46,12 @@ class PipelineConfig:
     mpnn: MPNNConfig = field(default_factory=MPNNConfig)
     antigen_seq: Optional[str] = None  # for AF3 complex prediction
     donor_structure: Optional[str] = None  # PDB/CIF of donor (for CDR RMSD)
+    # Treat the B-factor column of --donor-structure as a pLDDT score. True
+    # for AF3/Boltz predictions (their B-factor IS the pLDDT), false for
+    # experimental crystal/NMR structures (temperature factor). Without this
+    # the pLDDT confidence gate and the structural confidence factor are
+    # inactive for donor models.
+    donor_structure_plddt: bool = False
     calibration_path: Optional[str] = None  # calibration.json from `humanize learn`
     biophi_env: Optional[str] = None        # conda env with biophi (server)
     oasis_db: Optional[str] = None          # OASis 9-mer DB path (server)
@@ -452,14 +458,24 @@ def _process_chain(
                         f"vs {len(donor.residues)} donor residues; assuming "
                         f"sequential numbering")
                 donor_struct = (model, label, all_pos)
-                from .graft import is_cdr_loop_position
+                from .graft import is_cdr_loop_position, loop_of_position
                 cdrs = {p: n for p, n in all_pos.items()
                         if is_cdr_loop_position(
                             ctype, int("".join(c for c in p if c.isdigit())),
                             config.cdr_scheme, config.numbering)}
+                # Per-loop map (CDR1/CDR2/CDR3) for the loop-class correction:
+                # the literature canonical/vernier sets are loop-specific, so
+                # the correction needs to know which loop each position claims.
+                cdr_loops = {}
+                for p in cdrs:
+                    loop = loop_of_position(
+                        ctype, int("".join(c for c in p if c.isdigit())),
+                        config.cdr_scheme, config.numbering)
+                    if loop:
+                        cdr_loops[p] = loop
                 # B-factor is only a pLDDT score for AF3 predictions; an
                 # experimental `--donor-structure` carries a temperature factor.
-                use_plddt = from_af3
+                use_plddt = from_af3 or config.donor_structure_plddt
 
                 # Multi-model consensus over sibling models if available
                 import glob
@@ -473,12 +489,14 @@ def _process_chain(
                     hints = compute_multi_model_consensus(
                         all_pdbs, label, all_pos, cdrs, ag_chains,
                         min_consensus=3, use_plddt=use_plddt,
+                        cdr_loops=cdr_loops,
                     )
                 else:
                     # Single model
                     hints = _compute_hints_with_model(
                         model, label, all_pos, cdrs, ag_chains,
-                        pdb_path=structure_path, use_plddt=use_plddt)
+                        pdb_path=structure_path, use_plddt=use_plddt,
+                        cdr_loops=cdr_loops)
 
     # ---- FR indel detection and interactive selection ----
     from .fr_indel import detect_fr_indels, select_insertion_interactive, update_indel_selection
@@ -908,7 +926,8 @@ def _partner_sequence(chain: InputChain, _all_chains) -> Optional[str]:
 
 
 def _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains,
-                              pdb_path=None, use_plddt=True):
+                              pdb_path=None, use_plddt=True, cdr_loops=None):
     from .structure import compute_hints
     return compute_hints(model, label, all_pos, cdrs, ag_chains,
-                         pdb_path=pdb_path, use_plddt=use_plddt)
+                         pdb_path=pdb_path, use_plddt=use_plddt,
+                         cdr_loops=cdr_loops)
