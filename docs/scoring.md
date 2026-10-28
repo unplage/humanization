@@ -40,6 +40,7 @@ practical range of the composite is therefore ~9-92 rather than the full
 | canonical | 0.80 | Chothia & Lesk 1987 |
 | interface_extended | 0.65 | Vargas-Madrazo 2003 |
 | buried | 0.70 | AF3 structure (relSASA < 0.20) |
+| loop_shell | 0.35 | measured second-shell loop proximity (D3, side chain 4.5-8 A; ranking only) |
 | cdr_contact_sc | 0.85 | AF3 structure: **side-chain** heavy atom < 4.5 A to CDR |
 | cdr_contact_bb | 0.30 | AF3 structure: backbone-only contact (β-sandwich geometry) |
 | antigen_contact | 0.60 | AF3 complex structure |
@@ -49,7 +50,7 @@ practical range of the composite is therefore ~9-92 rather than the full
 The structural score combines the present features with a **noisy-OR**
 (`1 - Π(1 - w_i)`), so independent pieces of evidence reinforce each other
 instead of collapsing to the single strongest feature. It is then made
-**structure-adaptive** (per antibody) in three ways:
+**structure-adaptive** (per antibody) in four ways:
 
 1. **Fractional contacts.** A CDR contact is weighted by how it is formed:
    side-chain-mediated (`cdr_contact_sc` = 0.85) is functional — a side-chain
@@ -64,9 +65,22 @@ instead of collapsing to the single strongest feature. It is then made
 3. **pLDDT factor**: continuous confidence weighting
    (`0.2 + 0.8·clip((pLDDT-50)/40, 0, 1)`, unknown pLDDT = 1.0), so
    low-confidence structural evidence is down-weighted smoothly.
+4. **Per-antibody loop-class correction** (`loopclass.py`, see
+   `docs/theory.md` §2.6): the feature *set* is corrected before scoring, not
+   just reweighted. A `canonical` claim whose predicted loop is > 8 A away is
+   removed; a `vernier` claim > 12 A from every loop is removed; a buried
+   position whose **side chain** lies 4.5-8 A from a loop, absent from every
+   other structural feature, is added as `loop_shell` (0.35, ranking only - a
+   side-chain contact is already `cdr_contact_sc`, and an 8 A proximity is a
+   neighbourhood, not a packing contact). When the canonical claim survives,
+   its weight is scaled by the modelled confidence of the loop it supports
+   (mean pLDDT: 1.0 at >= 80, 0.60 at <= 50).
 
-Without structure all three reduce to identity, so the portable path is
-unchanged.
+Without structure all four reduce to identity, so the portable path is
+unchanged. The correction is skipped for a position whose model is missing a
+whole loop (or part of it), and for pLDDT < 50 positions; the Kabat-only
+membership table is not applied in IMGT mode. In a multi-model consensus the
+measured shell relation must hold in >= 60% of the models.
 
 ### 1.2 Immunogenicity benefit (0-1)
 

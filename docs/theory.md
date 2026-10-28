@@ -59,6 +59,11 @@ Framework support residues (excluding loop residues themselves):
 Note: Chothia defines H1 as Kabat 26-32 (the loop only); AbM/Martin extends it
 to 26-35. Use `--scheme abm` when the H1 stem is wanted.
 
+> **实现说明**：`config.CANONICAL` 是**候选相关**的并集（上表中落在 Kabat
+> CDR 窗口内的位点——H33/H34、L51/L53/L55——是 grafted loop 残基，从不回突变，
+> 故不在此列；另含回测新增的 L37/L45）。`config.CANONICAL_SUPPORT_BY_LOOP`
+> 保留按 loop 的完整映射，供下面的 D3 loop-class 修正使用。
+
 ### 2.4 VHH hallmark — Muyldermans, J Biotechnol 74:277 (2001)
 
 Camelid VHH keep a hydrophilic FR2 patch (no VL partner; the hydrophobic VH3
@@ -79,6 +84,48 @@ these are 42/49/50/52.)
   can affect binding directly; keep donor unless proven neutral.
 - **Disulfide Cys** (e.g. VHH CDR3 disulfide partners in FR): keep donor.
 
+### 2.6 Per-antibody loop-class correction (structure mode only)
+
+文献位置集（2.1-2.3）来自有限的晶体结构集合，回答的是"平均抗体中该位置通常
+是否支撑某个 loop"。个体抗体的 loop 长度和构象类别差异很大，同一个位置可能
+根本不与它"应该"支撑的 loop 接触。因此当有模型（AF3 或实验结构）时，
+`loopclass.py` 在打分**之前**直接修正证据集合。
+
+**实测 loop 几何**（`structure.compute_hints`）：按 graft 窗口取每个 CDR 的残基，
+逐残基计算到每个 loop 的最近重原子距离（全部原子 / 侧链原子）、接触残基数、
+loop 长度、loop 平均 pLDDT。
+
+**三类操作**
+
+1. **canonical 剔除**：若预测其支撑的 loop 距该位点 > 8 Å
+   （`LOOP_CLASS["shell"]`），在本抗体中该 canonical 证据不成立 → 删除该特征。
+2. **canonical 置信度降权**：canonical 类别只对**可靠建模**的 loop 成立，
+   故权重按该 loop 的平均 pLDDT 连续缩放（pLDDT ≥ 80 满权；≤ 50 时降到
+   `canonical_factor_floor` = 0.60），而不是盲目套用文献权重。
+3. **vernier 剔除**：若距**所有** loop 均 > 12 Å（`LOOP_CLASS["far"]`），
+   该位点在本抗体中不处于 CDR 邻域 → 删除 vernier 特征。
+4. **新增二壳层证据**（`loop_shell`，权重 0.35，**不改变 tier**）：文献集均未
+   标注、埋藏（buried 或 relSASA ≤ 0.30）、且**侧链**距某 loop 在 4.5-8 Å
+   之间的位点。只用侧链距离（替换改变的是侧链，骨架相邻的 β-折叠不构成功能
+   支持）；侧链**接触**（< 4.5 Å）已由 `cdr_contact_sc` 覆盖，不重复计入。
+   该证据只用于**排序**，不升级 tier：8 Å 是"邻域"而非"接触"。
+
+**防双计**：埋藏门槛与 `buried` 特征同源，因此 `loop_shell` 只加在**没有任何
+其他结构证据**（含 `buried`）的位点上——否则同一份埋藏+邻近证据会在 noisy-OR
+里被算两次（实测这会让 12-24% 的 FR 位点结构分从 0.70 虚抬到 0.91）。
+
+**多模型投票**：多模型共识时，二壳层关系必须在 ≥ 60% 的模型中成立
+（`LOOP_CLASS["vote_fraction"]`）才被采纳，避免单个噪声模型制造特征。
+
+**参数标定**（`scripts/calibrate_loop_class.py`，198 个真实结构，ANARCI 链型）：
+canonical→其 loop 距离中位 3.6 Å（q75 6.0 Å），仅 7.3% 超过 8 Å、0% 超过
+12 Å；vernier→最近 CDR 中位 3.2 Å，**无一个**超过 8 Å。因此 8 Å 判定只会在
+canonical 声称确实不成立时触发，12 Å 是刻意保守的兜底（实际很少触发）。
+
+**安全边界**：`CANONICAL_SUPPORT_BY_LOOP` 是 Kabat 空间表，仅 Kabat 模式做
+canonical 剔除/降权；模型缺少整条或部分 loop 时整个修正 no-op；pLDDT < 50 的
+位点不修正；无结构时完全不执行（便携路径字节级不变）。
+
 ## 3. Decision logic
 
 Per framework position where donor != human germline:
@@ -87,6 +134,7 @@ Per framework position where donor != human germline:
 2. Interface-core (and buried, or with other structural features) → **T1**.
 3. Vernier + buried, or vernier + canonical → **T1**; vernier alone → **T2**.
 4. Canonical, CDR-contact, antigen-contact, buried, interface-extended → **T2**.
+   (`loop_shell` 实测二壳层证据只参与排序，不升级 tier。)
 5. No structural role → **T3** (optional, immunogenicity).
 6. Fully human-identical → no candidate.
 
@@ -94,8 +142,10 @@ Per framework position where donor != human germline:
 CDR/antigen contact keeps or raises the tier; a *buried* position is retained
 (packing/core); a *surface-exposed* position with no CDR/antigen contact and a
 reliable pLDDT (≥ 50) is demoted T1/T2 → T3. `interface_core` is exempt from
-demotion. This is the symmetric form of the previous (buried-only) demotion and
-avoids dropping structurally required back-mutations.
+demotion. Note that the loop-class correction of §2.6 runs
+*before* scoring, so in structure mode the input feature set itself may differ
+from the portable run (removed canonical/vernier claims, added `loop_shell`)
+— this is intentional per-antibody evidence, not a tier post-processing step.
 
 Recommended production variant: **V2 (T1+T2)**. V1 when framework identity is
 high and risk tolerance low; V3 only when additional humanization is demanded

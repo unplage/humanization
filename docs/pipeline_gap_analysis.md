@@ -68,6 +68,13 @@ Chothia interface core 是"平均化"的 packing 集，但：
 - 某些"interface core"位置在特定抗体中实际暴露或远离 interface
 - 缺少基于实际结构的 per-antibody interface 分析
 
+> **已部分解决 (2026-10-28, D3)**：有结构时 `loopclass.py` 按实测 per-loop
+> 几何修正位置集——文献 canonical/vernier 若与测得的 loop 相距过远则剔除，
+> canonical 权重按该 loop 的平均 pLDDT 连续降权，并新增实测二壳层证据
+> `loop_shell`（弱证据，只参与排序；与 `buried` 互斥以避免 noisy-OR 双计）。
+> 阈值已在 198 个真实结构上标定（`scripts/calibrate_loop_class.py`）。
+> 详见 `docs/theory.md` §2.6。interface core 的 per-antibody 几何仍待做。
+
 ## 三、Germline 选择的不足
 
 ### 3.1 无结构兼容性评估
@@ -204,6 +211,7 @@ t3_exposed = [c.position for c in sorted(
 | **高** | 自动策略路由优化 (VH=adimab_frequency, VL=current) | 回测数据驱动 | 低 | **已完成** (2026-08-29) |
 | **中** | 引入 MHC-II T 细胞表位预测 | 免疫原性的核心机制 | 中（需 NetMHCIIpan） | |
 | **中** | 化学风险乘以 SASA 权重 | 埋藏 motif 不应计同等风险 | 中 | |
+| **高** | 有结构时按实测 loop 类别加权 + 修正位置集 (D3) | 文献位置集是平均抗体，个体 loop 几何差异大 | 中 | **已完成** (2026-10-28) |
 | **中** | 位置间协同效应评估 | 回突变组合可能冲突 | 高（需结构能量计算） | |
 | **低** | ML scoring function | 数据驱动替代规则 | 高（需训练数据） | |
 | **低** | 负面案例回测 | 量化假阳性/假阴性率 | 中 | **已完成** (31 pairs, 9 strategies) |

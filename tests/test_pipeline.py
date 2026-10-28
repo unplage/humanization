@@ -1201,6 +1201,276 @@ def test_fr_insertion_interactive_override():
           v2.sequence.startswith("QVQLVEQSGAE"), v2.sequence[:12])
 
 
+def test_loop_class_weighting():
+    """D3: per-antibody loop-class weighting and position-set correction.
+
+    * per-loop geometry is measured (distance / contacts / length / class)
+    * a literature canonical claim is corrected out when the loop it claims
+      to support is beyond the packing shell in THIS antibody
+    * a literature vernier claim is corrected out when far from every loop
+    * the canonical weight is scaled by the modelled confidence (loop pLDDT)
+    * a buried second-shell loop neighbour absent from every other structural
+      feature is ADDED as weak ``loop_shell`` evidence (ranking only, no tier)
+    * no double counting: the shell evidence is never added on top of
+      ``buried`` (both describe the same burial event)
+    * consensus voting: the shell relation must hold in >= 60% of the models
+    * without per-loop hints (or under low pLDDT) the correction is a no-op
+    """
+    print("loop-class weighting / position-set correction (D3)")
+    from humanize.loopclass import SHELL_FEATURE, apply as loop_apply
+    from humanize.structure import PDBAtom, PDBModel, compute_hints
+
+    # ---- per-loop geometry measurement --------------------------------
+    import math as _math
+
+    def atom(name, rn, resseq, x, y, z):
+        return PDBAtom(name, rn, "H", resseq, x, y, z)
+
+    def rotate(v, axis, ang):
+        """Rodrigues rotation of v around axis (unit vector)."""
+        ax, ay, az = axis
+        n = _math.sqrt(ax * ax + ay * ay + az * az)
+        ax, ay, az = ax / n, ay / n, az / n
+        c, s = _math.cos(ang), _math.sin(ang)
+        vx, vy, vz = v
+        d = ax * vx + ay * vy + az * vz
+        cr = (ay * vz - az * vy, az * vx - ax * vz, ax * vy - ay * vx)
+        return (vx * c + cr[0] * s + ax * d * (1 - c),
+                vy * c + cr[1] * s + ay * d * (1 - c),
+                vz * c + cr[2] * s + az * d * (1 - c))
+
+    # CDR1 residue with a well-defined backbone: the C atom is rotated about
+    # the prev-C -> N axis by 120 deg, which puts phi in the right-handed
+    # alpha basin (a standard, "regular" conformation).
+    def _c3():
+        v = rotate((0.0, 1.52, 0.0), (1.0, 0.0, 0.0), _math.radians(120.0))
+        return (4.0 + v[0], 0.0 + v[1], 1.0 + v[2])
+
+    c3 = _c3()
+    model = PDBModel(atoms=[
+        atom("N", "ALA", 1, -1.0, 0.0, 0.0),
+        atom("CA", "ALA", 1, 0.0, 0.0, 0.0),
+        atom("C", "ALA", 1, 1.0, 0.0, 0.0),
+        atom("N", "ALA", 2, 99.0, 0.0, 0.0),
+        atom("CA", "ALA", 2, 100.0, 0.0, 0.0),
+        atom("C", "ALA", 2, 99.0, 0.0, 0.0),
+        atom("N", "ALA", 3, 3.0, 0.0, 1.0),    # CDR1
+        atom("CA", "ALA", 3, 4.0, 0.0, 1.0),
+        atom("C", "ALA", 3, c3[0], c3[1], c3[2]),
+        atom("N", "ALA", 4, 5.0, 20.0, 1.0),   # CDR2
+        atom("CA", "ALA", 4, 6.0, 20.0, 0.0),
+        atom("C", "ALA", 4, 7.0, 20.0, -1.0),
+        atom("N", "ALA", 5, 6.0, 21.0, 1.0),
+        atom("CA", "ALA", 5, 8.0, 20.0, 0.0),
+        atom("C", "ALA", 5, 9.0, 20.0, -1.0),
+    ])
+    pm = {"H1": 1, "H2": 2, "H3": 3, "H4": 4, "H5": 5}
+    cdr = {"H3": 3, "H4": 4}
+    hints = compute_hints(model, "H", pm, cdr,
+                          cdr_loops={"H3": "CDR1", "H4": "CDR2"})
+    check("loop lengths measured", hints.loop_lengths() == {"CDR1": 1, "CDR2": 1},
+          str(hints.loop_lengths()))
+    check("per-loop contact measured",
+          hints.loop_contacts("H1") == {"CDR1": 1, "CDR2": 0},
+          str(hints.loop_contacts("H1")))
+    check("per-loop min distance measured",
+          hints.loop_min_dist("H2").get("CDR1", 0) > 90
+          and hints.loop_min_dist("H1").get("CDR2", 0) > 15,
+          str(hints.loop_min_dist("H2")))
+    classes = hints.loop_classes()
+    check("loop class fingerprint measured",
+          set(classes) == {"CDR1", "CDR2"}
+          and all(0.0 <= c["regularity"] <= 1.0 for c in classes.values()),
+          str(classes))
+    check("loop backbone fingerprint is non-empty",
+          len(classes["CDR1"]["signature"]) == 1
+          and classes["CDR1"]["signature"] != "C",
+          str(classes["CDR1"]))
+    check("regular loop keeps full canonical weight",
+          classes["CDR1"]["regularity"] >= 0.75,
+          str(classes["CDR1"]))
+    check("no cdr_loops -> no loop geometry (portable unchanged)",
+          not compute_hints(model, "H", pm, cdr).has_loop_geometry())
+
+    # a fully missing loop keeps its expected length but yields no distances
+    pm_missing = dict(pm, H6=6)
+    cdr_missing = dict(cdr, H6=6)
+    hints_missing = compute_hints(
+        model, "H", pm_missing, cdr_missing,
+        cdr_loops={"H3": "CDR1", "H4": "CDR2", "H6": "CDR3"})
+    check("missing loop keeps expected length",
+          hints_missing.loop_lengths() == {"CDR1": 1, "CDR2": 1, "CDR3": 1},
+          str(hints_missing.loop_lengths()))
+    check("missing loop yields no distances",
+          "CDR3" not in hints_missing.loop_min_dist("H1"),
+          str(hints_missing.loop_min_dist("H1")))
+    r = loop_apply(hints_missing, "H", "H78", 78, ["canonical", "vernier"])
+    check("fully missing loop -> no correction",
+          r.features == ["canonical", "vernier"] and not r.applied,
+          str(r.features))
+
+    # a partially missing loop is treated the same way
+    partial = PDBModel(atoms=[a for a in model.atoms if a.resseq != 5])
+    hints_partial = compute_hints(
+        partial, "H", pm, {"H3": 3, "H4": 4, "H5": 5},
+        cdr_loops={"H3": "CDR1", "H4": "CDR2", "H5": "CDR2"})
+    check("partial loop yields no distances",
+          "CDR2" not in hints_partial.loop_min_dist("H1"),
+          str(hints_partial.loop_min_dist("H1")))
+
+    # ---- literature set correction ------------------------------------
+    lengths = {"CDR1": 8, "CDR2": 8, "CDR3": 10}
+
+    far = StructureHints({
+        "loop_min_dist": {"H78": {"CDR1": 15.0, "CDR2": 20.0, "CDR3": 18.0}},
+        "loop_lengths": lengths,
+    })
+    r = loop_apply(far, "H", "H78", 78, ["canonical", "vernier", "buried"])
+    check("far canonical claim corrected out", "canonical" not in r.features,
+          str(r.features))
+    check("far vernier claim corrected out", "vernier" not in r.features,
+          str(r.features))
+    check("non-loop features kept", "buried" in r.features, str(r.features))
+    check("correction is explained", any("loop-class" in n for n in r.notes))
+
+    r_imgt = loop_apply(far, "H", "H78", 78, ["canonical"], numbering="imgt")
+    check("IMGT: Kabat loop membership table not applied",
+          "canonical" in r_imgt.features, str(r_imgt.features))
+
+    corr = StructureHints({
+        "loop_min_dist": {"H78": {"CDR1": 14.0, "CDR2": 6.0, "CDR3": 16.0}},
+        "loop_lengths": lengths,
+        "loop_plddt": {"CDR2": 95.0},
+    })
+    r = loop_apply(corr, "H", "H78", 78, ["canonical", "vernier"])
+    check("measured canonical support kept", "canonical" in r.features,
+          str(r.features))
+    check("confident loop keeps full canonical weight",
+          r.canonical_factor == 1.0, str(r.canonical_factor))
+
+    poor = StructureHints({
+        "loop_min_dist": {"H78": {"CDR1": 14.0, "CDR2": 6.0, "CDR3": 16.0}},
+        "loop_lengths": lengths,
+        "loop_plddt": {"CDR2": 55.0},
+    })
+    r = loop_apply(poor, "H", "H78", 78, ["canonical"])
+    check("poorly modelled loop down-weights canonical",
+          0.6 <= r.canonical_factor < 1.0, str(r.canonical_factor))
+    check("canonical down-weight is explained",
+          any("pLDDT" in n for n in r.notes), str(r.notes))
+
+    # ---- measured second-shell evidence (weak, ranking only) -----------
+    shell = StructureHints({
+        "loop_min_dist": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_min_dist_sc": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_lengths": lengths,
+        "buried": {"H76": True},
+        "rel_sasa": {"H76": 0.08},
+    })
+    r = loop_apply(shell, "H", "H76", 76, [])
+    check("second-shell neighbour recorded", SHELL_FEATURE in r.features,
+          str(r.features))
+
+    # P1: no double counting - a buried position must not get the shell
+    # feature on top of its burial evidence
+    r = loop_apply(shell, "H", "H76", 76, ["buried"])
+    check("no double counting with the buried feature",
+          SHELL_FEATURE not in r.features, str(r.features))
+
+    # a side-chain CONTACT is already reported as cdr_contact_sc
+    contact = StructureHints({
+        "loop_min_dist": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 4.0}},
+        "loop_min_dist_sc": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 4.0}},
+        "loop_lengths": lengths,
+        "buried": {"H76": True},
+        "rel_sasa": {"H76": 0.08},
+    })
+    r = loop_apply(contact, "H", "H76", 76, [])
+    check("side-chain contact is not duplicated as shell evidence",
+          SHELL_FEATURE not in r.features, str(r.features))
+
+    backbone_only = StructureHints({
+        "loop_min_dist": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_lengths": lengths, "buried": {"H76": True},
+        "rel_sasa": {"H76": 0.08},
+    })
+    r = loop_apply(backbone_only, "H", "H76", 76, [])
+    check("backbone-only proximity does not add shell evidence",
+          SHELL_FEATURE not in r.features, str(r.features))
+    r = loop_apply(shell, "H", "H76", 76, ["vernier"])
+    check("no addition when the literature already assigns a role",
+          SHELL_FEATURE not in r.features, str(r.features))
+
+    # P5: consensus voting - the relation must hold in >= 60% of the models
+    votes = StructureHints({
+        "loop_min_dist": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_min_dist_sc": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_lengths": lengths,
+        "buried": {"H76": True},
+        "rel_sasa": {"H76": 0.08},
+        "n_models": 5,
+        "loop_shell_votes": {"H76": {"CDR3": 2}},
+    })
+    r = loop_apply(votes, "H", "H76", 76, [])
+    check("shell evidence needs model agreement (2/5 rejected)",
+          SHELL_FEATURE not in r.features, str(r.features))
+    votes.data["loop_shell_votes"]["H76"]["CDR3"] = 3
+    r = loop_apply(votes, "H", "H76", 76, [])
+    check("shell evidence accepted with 3/5 agreement",
+          SHELL_FEATURE in r.features, str(r.features))
+
+    r = loop_apply(StructureHints(), "H", "H78", 78, ["canonical"])
+    check("no loop hints -> exact no-op",
+          r.features == ["canonical"] and not r.applied)
+    truncated = StructureHints({
+        "loop_min_dist": {"H2": {"CDR1": 30.0}},
+        "loop_lengths": {"CDR1": 8, "CDR2": 8},
+    })
+    r = loop_apply(truncated, "H", "H2", 2, ["canonical"])
+    check("truncated model (missing loop) -> no correction",
+          r.features == ["canonical"], str(r.features))
+
+    # ---- integrated through back-mutation analysis ---------------------
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    ch = number_heavy(M4D5_VH)
+    vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
+
+    bm = analyze_backmutations(ch, vg, structure=StructureHints({
+        "loop_min_dist": {"H78": {"CDR1": 15.0, "CDR2": 20.0, "CDR3": 18.0}},
+        "loop_lengths": lengths,
+        "buried": {"H78": False},
+        "rel_sasa": {"H78": 0.60},
+    }))
+    h78 = next(c for c in bm.candidates if c.position == "H78")
+    check("far canonical/vernier H78 -> T3",
+          h78.tier == "T3" and "vernier" not in h78.features,
+          f"{h78.tier} {h78.features}")
+    check("H78 rationale shows the loop-class correction",
+          any("loop-class" in n for n in h78.rationale))
+
+    shell_hints = {
+        "loop_min_dist": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_min_dist_sc": {"H76": {"CDR1": 14.0, "CDR2": 15.0, "CDR3": 6.0}},
+        "loop_lengths": lengths,
+        "rel_sasa": {"H76": 0.08},
+    }
+    bm = analyze_backmutations(ch, vg, structure=StructureHints(shell_hints))
+    h76 = next(c for c in bm.candidates if c.position == "H76")
+    check("shell evidence refines the score but not the tier",
+          SHELL_FEATURE in h76.features and h76.tier == "T3",
+          f"{h76.tier} {h76.features}")
+    check("shell evidence raises the composite score",
+          h76.composite > 15.0, str(h76.composite))
+
+    low = dict(shell_hints)
+    low["plddt"] = {"H76": 30.0}
+    bm = analyze_backmutations(ch, vg, structure=StructureHints(low))
+    h76 = next(c for c in bm.candidates if c.position == "H76")
+    check("low pLDDT blocks the loop-class correction",
+          h76.tier == "T3" and SHELL_FEATURE not in h76.features,
+          f"{h76.tier} {h76.features}")
+
+
 def test_step3_structure_tier_rules():
     """Step 3: structure-driven tier adjustment is symmetric and safe.
 
@@ -1394,13 +1664,24 @@ def test_multi_model_consensus_fields():
             write_pdb(p, shift=k * 0.1)
             paths.append(p)
         cons = compute_multi_model_consensus(
-            paths, "A", pm, {"H6": 6}, antigen_chains=["C"], min_consensus=3)
+            paths, "A", pm, {"H6": 6, "H7": 7}, antigen_chains=["C"],
+            min_consensus=3,
+            cdr_loops={"H6": "CDR1", "H7": "CDR2"})
         check("consensus preserves cdr_partners", bool(cons.data.get("cdr_partners")))
         check("consensus preserves antigen_contact",
               cons.data.get("antigen_contact", {}).get("H3") is True)
         check("consensus preserves plddt", "H6" in cons.data.get("plddt", {}))
         check("consensus relaxes threshold for <3 models",
               cons.data.get("cdr_contact", {}).get("H6") is True)
+        check("consensus preserves loop lengths",
+              cons.data.get("loop_lengths") == {"CDR1": 1, "CDR2": 1},
+              str(cons.data.get("loop_lengths")))
+        check("consensus preserves per-loop distances",
+              "CDR1" in cons.loop_min_dist("H5"),
+              str(cons.loop_min_dist("H5")))
+        check("consensus preserves side-chain loop distances",
+              "CDR1" in cons.loop_min_dist_sc("H5"),
+              str(cons.loop_min_dist_sc("H5")))
 
 
 def test_tool_kabat_mapping():
@@ -2088,6 +2369,7 @@ def main():
     test_fr_indel_detection()
     test_fr_insertion_interactive_override()
     test_step3_structure_tier_rules()
+    test_loop_class_weighting()
     test_multi_model_consensus_fields()
     test_structure_rmsd_engine()
     test_af3_variant_rmsd_wiring()

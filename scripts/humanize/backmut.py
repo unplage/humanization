@@ -30,6 +30,8 @@ from .config import (
 )
 from .learning import effect_thresholds
 from .germline import GermlineDB, GermlineGene
+from .loopclass import LoopCorrection
+from .loopclass import apply as apply_loop_class_correction
 from .numbering import NumberedChain
 
 FR_REGIONS = ("FR1", "FR2", "FR3")
@@ -311,6 +313,49 @@ class StructureHints:
         d = self.data.get("rel_sasa")
         return d.get(pos) if d else None
 
+    # -- per-loop geometry (D3 loop-class correction) -----------------------
+    def loop_min_dist(self, pos: str) -> Dict[str, float]:
+        """Minimum heavy-atom distance from this residue to each CDR loop."""
+        d = self.data.get("loop_min_dist")
+        return dict(d.get(pos) or {}) if d else {}
+
+    def loop_min_dist_sc(self, pos: str) -> Dict[str, float]:
+        """Minimum side-chain-to-loop heavy-atom distance per CDR loop."""
+        d = self.data.get("loop_min_dist_sc")
+        return dict(d.get(pos) or {}) if d else {}
+
+    def loop_contacts(self, pos: str) -> Dict[str, int]:
+        """Number of contacting CDR residues per loop (< 4.5 A)."""
+        d = self.data.get("loop_contacts")
+        return dict(d.get(pos) or {}) if d else {}
+
+    def loop_contacts_sc(self, pos: str) -> Dict[str, int]:
+        """Side-chain-mediated contacting CDR residues per loop (< 4.5 A)."""
+        d = self.data.get("loop_contacts_sc")
+        return dict(d.get(pos) or {}) if d else {}
+
+    def loop_lengths(self) -> Dict[str, int]:
+        """Loop length defined by the numbering map, per CDR.
+
+        A loop listed here but absent from ``loop_min_dist`` is (partly)
+        missing from the model; loopclass.py then disables the correction.
+        """
+        d = self.data.get("loop_lengths")
+        return dict(d) if d else {}
+
+    def loop_classes(self) -> Dict[str, dict]:
+        """Measured loop-class fingerprints: length/signature/regularity."""
+        d = self.data.get("loop_classes")
+        return dict(d) if d else {}
+
+    def loop_plddt(self) -> Dict[str, float]:
+        """Mean pLDDT per CDR loop (model confidence of the loop itself)."""
+        d = self.data.get("loop_plddt")
+        return dict(d) if d else {}
+
+    def has_loop_geometry(self) -> bool:
+        return bool(self.data.get("loop_min_dist"))
+
     def exposure(self, pos: str) -> float:
         b = self.buried("", pos)
         if b is None:
@@ -551,6 +596,20 @@ def analyze_backmutations(
         if ag_contact:
             features.append("antigen_contact")
 
+        # ---- D3: per-antibody loop-class position-set correction ----------
+        # The literature sets are population averages; with a structure of
+        # THIS antibody the measured loop geometry decides whether a literature
+        # claim applies (remove contradicted canonical/vernier claims, add
+        # measured second-shell evidence, confidence-weight canonical claims).
+        # No-op without per-loop hints, so the portable path is unchanged.
+        plddt_val = structure.plddt(pos)
+        plddt_ok = (plddt_val is None or plddt_val >= 50)
+        loop_corr = LoopCorrection(features=list(features))
+        if plddt_ok:
+            loop_corr = apply_loop_class_correction(
+                structure, chain_type, pos, num, features, numbering)
+        features = loop_corr.features
+
         # ---- structural score ----
         # Noisy-OR combination: independent pieces of structural evidence
         # accumulate (multiple weak features reinforce each other) instead of
@@ -565,6 +624,11 @@ def analyze_backmutations(
         for f in features:
             if f == "cdr_contact":
                 evidence.append(_contact_evidence_weight(sc_contact))
+            elif f == "canonical":
+                # class weighting: canonical classes are defined by main-chain
+                # conformation, so an irregular loop carries less class-specific
+                # support (loopclass.py sets the factor)
+                evidence.append(w[f] * loop_corr.canonical_factor)
             elif f in w:
                 evidence.append(w[f])
         structural = _noisy_or(evidence)
@@ -582,7 +646,6 @@ def analyze_backmutations(
         # pLDDT: continuous confidence weighting (not a hard threshold). The
         # structure evidence is scaled smoothly from 0.2 at pLDDT <= 50 to 1.0
         # at pLDDT >= 90; unknown pLDDT leaves the evidence untouched.
-        plddt_val = structure.plddt(pos)
         structural *= _plddt_factor(plddt_val)
 
         # ---- immunogenicity benefit ----
@@ -630,7 +693,6 @@ def analyze_backmutations(
         # (gated below) nor promote. Volume/polarity strain is sequence-only
         # and always applies.
         strain = _is_disruptive_swap(donor_aa, human_aa)
-        plddt_ok = (plddt_val is None or plddt_val >= 50)
         tier = _assign_tier_with_structure(
             features, buried if plddt_ok else None, is_vhh, donor_aa, pos,
             side_chain_contact=sc_contact if plddt_ok else None,
@@ -679,7 +741,7 @@ def analyze_backmutations(
             if plddt_ok and not functional_contact:
                 if buried is False and "interface_core" not in features:
                     # exposed, no functional contact: no reason to stay donor
-                    # (immunogenicity dominates; volume strain irrelevant)
+                    # (immunogenicity dominates; volume strain irrelevant).
                     tier = "T3"
                     structural_demoted = True
                 elif tier == "T1" and not strained:
@@ -755,6 +817,8 @@ def analyze_backmutations(
         rationale = _rationale_with_structure(features, tier, buried, cdr_contact, ag_contact,
                                exposure, conservation_val, donor_aa, human_aa,
                                side_chain_contact=sc_contact, dev_risk_score=dev_risk_score)
+        if loop_corr.notes:
+            rationale.extend(loop_corr.notes)
         if structural_demoted:
             rationale.append("structural: exposed without functional "
                             "side-chain/antigen contact; "
@@ -960,6 +1024,10 @@ def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
         return "T2"
     if "canonical" in features:
         return "T2"
+    # NOTE: measured loop-shell evidence ("loop_shell") is deliberately NOT
+    # tier-deciding: it is weak, ranking-only evidence (side chain in the
+    # second shell of a loop, no side-chain contact). Tier changes require
+    # literature pillars or a measured contact.
     if "cdr_contact" in features or "antigen_contact" in features:
         return "T2"
     if "buried" in features:
@@ -1027,7 +1095,7 @@ def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
     # Canonical structure
     if "canonical" in features:
         return "T2"
-    
+
     # CDR contact (backbone-mediated, lower priority)
     if cdr_contact is True or antigen_contact is True:
         return "T2"

@@ -41,6 +41,24 @@ CANONICAL = {
     "L": {2, 25, 33, 34, 36, 37, 45, 46, 48, 49, 58, 64, 71, 90, 94, 97, 98},
 }
 
+# Per-loop canonical support residues (Chothia & Lesk 1987; Al-Lazikani
+# et al. 1997). Splitting the CANONICAL union into "which loop does this
+# position support" is what makes the per-antibody loop-class correction
+# (loopclass.py) possible: a canonical position only counts when the loop it
+# is supposed to support is actually coupled to it in THIS antibody's
+# structure. Loop names are the grafted CDR windows (kabat/chothia/abm/imgt).
+CANONICAL_SUPPORT_BY_LOOP = {
+    "H": {
+        "CDR1": {24, 26, 27, 29, 33, 34, 94},
+        "CDR2": {47, 48, 49, 57, 58, 71, 78},
+    },
+    "L": {
+        "CDR1": {2, 25, 33, 71},
+        "CDR2": {48, 49, 51, 53, 55, 58, 64},
+        "CDR3": {34, 36, 46, 49, 90, 94, 97, 98},
+    },
+}
+
 # CVI (canonical + vernier + interface) residue set. Single source of truth
 # for the BI 2024 CVI homology metric (see docs/improvement_roadmap.md).
 CVI = {
@@ -86,6 +104,9 @@ WEIGHTS = {
         "canonical": 0.80,
         "interface_extended": 0.65,
         "buried": 0.70,          # needs structure (AF3): relSASA < 0.20
+        "loop_shell": 0.35,      # needs structure: buried second-shell loop
+                                 # proximity ADDED by the loop-class correction
+                                 # (measured; weak evidence, ranking only)
         "cdr_contact": 0.85,     # needs structure: heavy-atom < 4.5 A to CDR
         "antigen_contact": 0.60, # needs structure: heavy-atom < 4.5 A to antigen
         "vhh_hallmark": 1.00,
@@ -146,6 +167,33 @@ STRUCTURAL_EXPOSURE_FACTOR = {
     "buried_bool": 1.10,      # binary hint: buried True
     "exposed_bool": 0.85,     # binary hint: buried False
     "unknown": 1.00,          # no structure
+}
+
+# ---------------------------------------------------------------------------
+# Per-antibody loop-class correction (structure mode, D3)
+# ---------------------------------------------------------------------------
+# The literature position sets are population averages. With a structure of
+# THIS antibody the measured loop geometry decides whether a literature claim
+# applies. Distances are minimum heavy-atom distances between the framework
+# residue and any atom of a CDR loop (loop contacts reuse the 4.5 A CDR-contact
+# cutoff in structure.compute_hints).
+#
+# The cutoffs are calibrated on 198 real antibody structures (scripts/
+# calibrate_loop_class.py, ANARCI chain typing): canonical residues sit 3.6 A
+# (median, q75 6.0 A) from the loop they support and 7.3% exceed the 8 A
+# shell (none exceeds 12 A); vernier residues sit 3.2 A (median) from the
+# nearest CDR and NONE exceeds 8 A. The 8 A shell therefore removes a genuine
+# canonical claim only when it is really unsupported, and the 12 A limit is a
+# deliberately conservative backstop for the vernier rule (it rarely fires).
+LOOP_CLASS = {
+    "direct": 4.5,             # side-chain contact cutoff (as cdr_contact)
+    "shell": 8.0,              # second shell: vernier-like loop packing
+    "far": 12.0,               # beyond this the literature claim is unsupported
+    "shell_rel_sasa": 0.30,    # burial required for measured shell evidence
+    "canonical_plddt_full": 80.0,   # loop pLDDT at which canonical support is full
+    "canonical_plddt_low": 50.0,    # loop pLDDT at which it is minimal
+    "canonical_factor_floor": 0.60,  # canonical weight floor for a poor loop
+    "vote_fraction": 0.60,     # fraction of consensus models that must agree
 }
 
 # Chemical liabilities (deamidation / isomerization / oxidation ...) are
