@@ -1,282 +1,309 @@
 #!/usr/bin/env python3
-"""Preprocess TheraSAbDab database: extract CDRs using ANARCI IMGT numbering.
+"""Preprocess TheraSAbDab: extract CDRs with ANARCI IMGT numbering.
 
 Usage:
     python3 tools/cdr_homology/preprocess.py \
         --database data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx \
         --output data/therasabdab_cdrs.json
+
+Writes two files:
+  * ``--output``            CDR database (JSON)
+  * ``therasabdab_stats.json`` (next to it) with database statistics and the
+    provenance of the source spreadsheet.
 """
 
+from __future__ import annotations
+
 import argparse
-import json
-import sys
 import os
-from pathlib import Path
+import statistics
+import sys
 
-import pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import cdr_core as core  # noqa: E402
 
-def _position_number(label: str):
-    """Numeric IMGT position of a label like 'H105' or 'H111A'."""
-    digits = "".join(c for c in label[1:] if c.isdigit())
-    return int(digits) if digits else None
+# Backwards-compatible names: the numbering/CDR helpers moved into cdr_core.
+_extract_cdrs_from_posmap = core.extract_cdrs_from_posmap
+extract_cdrs_from_posmap = core.extract_cdrs_from_posmap
+extract_cdrs = core.extract_cdrs
+number_sequence_imgt = core.number_sequence_imgt
 
-
-def extract_cdrs_from_posmap(posmap: dict, chain_type: str) -> dict:
-    """Extract CDR sequences from an IMGT-numbered position map.
-
-    IMGT CDR boundaries (Lefranc 2003; identical to NATIVE_IMGT_CDRS in
-    ``scripts/humanize/numbering.py``):
-        CDR1: 27-38, CDR2: 56-65, CDR3: 105-117
-
-    The posmap is built in ANARCI sequence order. Iterating it in that order
-    (instead of numeric order with ascending insertion letters) is required
-    for CDR3: IMGT places insertions as 111A, 111B, ... then 112C, 112B,
-    112A and finally the 112 base, so a numeric walk transposes the loop.
-    """
-    imgt_cdr_ranges = {
-        "CDR1": (27, 38),
-        "CDR2": (56, 65),
-        "CDR3": (105, 117),
-    }
-    cdrs = {name: "" for name in imgt_cdr_ranges}
-    for label, aa in posmap.items():
-        if not aa or aa == "-" or not label.startswith(chain_type):
-            continue
-        pos_num = _position_number(label)
-        if pos_num is None:
-            continue
-        for cdr_name, (start, end) in imgt_cdr_ranges.items():
-            if start <= pos_num <= end:
-                cdrs[cdr_name] += aa
-                break
-    return cdrs
+# Columns that have moved between TheraSAbDab releases are located by prefix.
+COLUMNS = {
+    "name": ("Therapeutic",),
+    "format": ("Format",),
+    "genetics": ("Genetics (Bispecifics delimited with semicolon)",),
+    "target": ("Target",),
+    "tech": ("Development Tech",),
+    "vd_lc": ("VD LC",),
+    "est_status": ("Est. Status",),
+    "conditions": ("Conditions Approved",),
+    "companies": ("Companies",),
+}
+COLUMN_PREFIXES = {
+    "trial": "Highest_Clin_Trial",
+}
+SEQUENCE_COLUMNS = {
+    "H": "HeavySequence",
+    "L": "LightSequence",
+    "H_bispec": "HeavySequence(ifbispec)",
+    "L_bispec": "LightSequence(ifbispec)",
+}
 
 
-def number_sequence_anarci(sequence: str, chain_type: str):
-    """Number a sequence using ANARCI IMGT, return posmap dict."""
+def _clean(value) -> str:
+    """Return a trimmed string; NaN/None become ``''`` rather than ``'nan'``."""
     try:
-        from anarci import anarci
-    except ImportError:
-        print("  [WARN] ANARCI not available, skipping sequence", file=sys.stderr)
-        return None
+        import pandas as pd
+        if value is None or pd.isna(value):
+            return ""
+    except (ImportError, TypeError, ValueError):
+        if value is None:
+            return ""
+    text = str(value).strip()
+    return "" if text.lower() in ("na", "none", "nan", "<na>") else text
 
-    seq = sequence.upper().strip()
-    try:
-        result = anarci(
-            [("query", seq)],
-            scheme="imgt",
-            output=False,
-        )
-    except Exception as e:
-        print(f"  [WARN] ANARCI failed: {e}", file=sys.stderr)
-        return None
 
-    try:
-        numbering_list = result[0][0][0][0]
-    except (IndexError, TypeError):
-        return None
+def _find_column(df, candidates=(), prefix=None):
+    """Locate a spreadsheet column by exact name, then by prefix."""
+    for name in candidates:
+        if name in df.columns:
+            return name
+    if prefix:
+        for name in df.columns:
+            if str(name).startswith(prefix):
+                return name
+    return None
 
-    if not numbering_list:
-        return None
 
-    posmap = {}
-    for (pos_num, ins_flag), aa in numbering_list:
-        if aa == "-":
-            continue
-        if ins_flag and ins_flag != " ":
-            label = f"{chain_type}{pos_num}{ins_flag}"
-        else:
-            label = f"{chain_type}{pos_num}"
-        posmap[label] = aa.upper()
-    return posmap
+def _extract_chain(sequence: str, chain_type: str):
+    """Number a sequence and extract its CDRs, or return ``None``."""
+    posmap = core.number_sequence_imgt(sequence, chain_type)
+    if not posmap:
+        return None
+    return core.extract_cdrs_from_posmap(posmap, chain_type)
 
 
 def preprocess_excel(database_path: str, output_path: str):
-    """Read TheraSAbDab Excel, extract CDRs, write JSON index."""
+    """Read TheraSAbDab Excel, extract CDRs, write the JSON index."""
+    try:
+        import pandas as pd
+    except ImportError:
+        print("Error: pandas is required (pip install pandas openpyxl)",
+              file=sys.stderr)
+        raise SystemExit(1)
+
     print(f"Reading {database_path} ...")
     df = pd.read_excel(database_path)
     print(f"  {len(df)} rows loaded")
 
+    resolved = {key: _find_column(df, names) for key, names in COLUMNS.items()}
+    trial_col = _find_column(df, prefix=COLUMN_PREFIXES["trial"])
+    missing = [k for k, v in resolved.items() if v is None]
+    if missing:
+        print(f"  [WARN] columns not found: {', '.join(missing)}", file=sys.stderr)
+    if trial_col is None:
+        print("  [WARN] no Highest_Clin_Trial column found; trial phase will be blank",
+              file=sys.stderr)
+    else:
+        print(f"  trial column: {trial_col!r}")
+
     database = []
     skipped = 0
+    numbering_failed = 0
+    n_primary = 0
+    n_bispecific = 0
 
     for idx, row in df.iterrows():
-        name = str(row.get("Therapeutic", f"entry_{idx}"))
-        fmt = str(row.get("Format", ""))
-        genetics = str(row.get("Genetics (Bispecifics delimited with semicolon)", ""))
-        target = str(row.get("Target", ""))
-        tech = str(row.get("Development Tech", ""))
-        vd_lc = str(row.get("VD LC", ""))
-        highest_trial = str(row.get("Highest_Clin_Trial (Feb '25)", ""))
-        est_status = str(row.get("Est. Status", ""))
-        conditions = str(row.get("Conditions Approved", ""))
-        companies = str(row.get("Companies", ""))
+        def cell(key, default=""):
+            col = resolved.get(key)
+            if not col:
+                return default
+            return _clean(row.get(col, default))
 
         entry = {
-            "name": name,
-            "format": fmt,
-            "genetics": genetics,
-            "target": target,
-            "development_tech": tech,
-            "vd_lc": vd_lc,
-            "highest_trial": highest_trial,
-            "est_status": est_status,
-            "conditions": conditions,
-            "companies": companies,
+            "name": cell("name") or f"entry_{idx}",
+            "format": cell("format"),
+            "genetics": cell("genetics"),
+            "target": cell("target"),
+            "development_tech": cell("tech"),
+            "vd_lc": cell("vd_lc"),
+            "highest_trial": _clean(row.get(trial_col, "")) if trial_col else "",
+            "est_status": cell("est_status"),
+            "conditions": cell("conditions"),
+            "companies": cell("companies"),
             "chains": {},
         }
 
-        # Primary chains
-        for chain_type, col_name in [("H", "HeavySequence"), ("L", "LightSequence")]:
-            val = row.get(col_name)
-            if pd.notna(val) and str(val).strip().lower() not in ("na", "none", ""):
-                sequence = str(val).strip()
-                posmap = number_sequence_anarci(sequence, chain_type)
-                if posmap:
-                    cdrs = extract_cdrs_from_posmap(posmap, chain_type)
-                    chain_key = "VH" if chain_type == "H" else "VL"
-                    entry["chains"][chain_key] = {
-                        "sequence": sequence,
-                        **cdrs,
-                    }
+        for chain_type, column in (("H", SEQUENCE_COLUMNS["H"]),
+                                   ("L", SEQUENCE_COLUMNS["L"])):
+            sequence = _clean(row.get(column)) if column in df.columns else ""
+            if not sequence:
+                continue
+            cdrs = _extract_chain(sequence, chain_type)
+            if not cdrs:
+                numbering_failed += 1
+                print(f"  [WARN] row {idx} ({entry['name']}): ANARCI could not "
+                      f"number the {'heavy' if chain_type == 'H' else 'light'} chain",
+                      file=sys.stderr)
+                continue
+            chain_key = "VH" if chain_type == "H" else "VL"
+            entry["chains"][chain_key] = {"sequence": sequence, **cdrs}
+            n_primary += 1
 
-        # Bispecific chains
-        bispec = {}
-        for chain_type, col_name in [("H", "HeavySequence(ifbispec)"), ("L", "LightSequence(ifbispec)")]:
-            val = row.get(col_name)
-            if pd.notna(val) and str(val).strip().lower() not in ("na", "none", ""):
-                sequence = str(val).strip()
-                posmap = number_sequence_anarci(sequence, chain_type)
-                if posmap:
-                    cdrs = extract_cdrs_from_posmap(posmap, chain_type)
-                    chain_key = "VH" if chain_type == "H" else "VL"
-                    bispec[chain_key] = {
-                        "sequence": sequence,
-                        **cdrs,
-                    }
-        if bispec:
-            entry["bispecific"] = bispec
+        bispecific = {}
+        for chain_type, column in (("H", SEQUENCE_COLUMNS["H_bispec"]),
+                                   ("L", SEQUENCE_COLUMNS["L_bispec"])):
+            sequence = _clean(row.get(column)) if column in df.columns else ""
+            if not sequence:
+                continue
+            cdrs = _extract_chain(sequence, chain_type)
+            if not cdrs:
+                numbering_failed += 1
+                print(f"  [WARN] row {idx} ({entry['name']}): ANARCI could not "
+                      f"number the bispecific chain", file=sys.stderr)
+                continue
+            chain_key = "VH" if chain_type == "H" else "VL"
+            bispecific[chain_key] = {"sequence": sequence, **cdrs}
+            n_bispecific += 1
+        if bispecific:
+            entry["bispecific"] = bispecific
 
-        if entry["chains"]:
+        if entry["chains"] or entry.get("bispecific"):
             database.append(entry)
         else:
             skipped += 1
 
-    # Write output
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(database, f, indent=2, ensure_ascii=False)
+    payload = database
+    core.write_json(output_path, payload)
 
-    print(f"Done: {len(database)} entries written, {skipped} skipped")
-    return database
+    print(f"Done: {len(database)} entries written, {skipped} skipped, "
+          f"{numbering_failed} chain(s) unnumbered")
+    print(f"  chains: {n_primary} primary, {n_bispecific} bispecific")
+    return database, {
+        "source_file": os.path.basename(database_path),
+        "source_path": os.path.abspath(database_path),
+        "source_sha256": core.file_sha256(database_path),
+        "source_rows": int(len(df)),
+        "generated_at": core.timestamp(),
+        "tool_version": core.TOOL_VERSION,
+        "libraries": core.library_versions(),
+        "n_primary_chains": n_primary,
+        "n_bispecific_chains": n_bispecific,
+        "n_skipped_rows": skipped,
+        "n_unnumbered_chains": numbering_failed,
+    }
 
 
 def build_statistics(database: list) -> dict:
-    """Compute summary statistics from the preprocessed database."""
+    """Compute summary statistics from the preprocessed database.
+
+    CDR length distributions cover **every** chain in the database, primary
+    and bispecific alike, so the appendix sample sizes match the real corpus.
+    """
     stats = {
+        "schema_version": 2,
         "total_entries": len(database),
         "format_counts": {},
         "genetics_counts": {},
         "vd_lc_counts": {},
         "trial_counts": {},
-        "target_list": [],
-        "cdr_lengths": {
-            "VH_CDR1": [],
-            "VH_CDR2": [],
-            "VH_CDR3": [],
-            "VL_CDR1": [],
-            "VL_CDR2": [],
-            "VL_CDR3": [],
-        },
+        "target_counts": {},
+        "cdr_lengths": {f"{c}_{r}": [] for c in ("VH", "VL")
+                        for r in ("CDR1", "CDR2", "CDR3")},
+        "cdr_lengths_primary": {f"{c}_{r}": [] for c in ("VH", "VL")
+                                for r in ("CDR1", "CDR2", "CDR3")},
     }
 
     for entry in database:
-        # Format
-        fmt = entry.get("format", "Unknown")
-        stats["format_counts"][fmt] = stats["format_counts"].get(fmt, 0) + 1
+        stats["format_counts"][entry.get("format") or "Unknown"] = \
+            stats["format_counts"].get(entry.get("format") or "Unknown", 0) + 1
 
-        # Genetics
-        genetics = entry.get("genetics", "Unknown")
-        for g in genetics.split(";"):
-            g = g.strip()
-            if g:
-                stats["genetics_counts"][g] = stats["genetics_counts"].get(g, 0) + 1
+        for value in (entry.get("genetics") or "").split(";"):
+            value = value.strip()
+            if value:
+                stats["genetics_counts"][value] = \
+                    stats["genetics_counts"].get(value, 0) + 1
 
-        # VD LC
-        vd_lc = entry.get("vd_lc", "Unknown")
-        for v in vd_lc.split(";"):
-            v = v.strip()
-            if v:
-                stats["vd_lc_counts"][v] = stats["vd_lc_counts"].get(v, 0) + 1
+        for value in (entry.get("vd_lc") or "").split(";"):
+            value = value.strip()
+            if value:
+                stats["vd_lc_counts"][value] = stats["vd_lc_counts"].get(value, 0) + 1
 
-        # Clinical trial
-        trial = entry.get("highest_trial", "Unknown")
+        trial = entry.get("highest_trial") or "Unknown"
         stats["trial_counts"][trial] = stats["trial_counts"].get(trial, 0) + 1
 
-        # Target
-        target = entry.get("target", "")
-        if target and target not in ("nan", "None", ""):
-            stats["target_list"].append(target)
+        target = entry.get("target") or ""
+        if target:
+            stats["target_counts"][target] = stats["target_counts"].get(target, 0) + 1
 
-        # CDR lengths
-        for chain_key in ["VH", "VL"]:
-            chain = entry.get("chains", {}).get(chain_key)
-            if not chain:
-                continue
-            for cdr in ["CDR1", "CDR2", "CDR3"]:
-                key = f"{chain_key}_{cdr}"
-                seq = chain.get(cdr, "")
-                if seq:
-                    stats["cdr_lengths"][key].append(len(seq))
+        for group, is_primary in ((entry.get("chains", {}), True),
+                                  (entry.get("bispecific", {}), False)):
+            for chain_key, chain in group.items():
+                for cdr in ("CDR1", "CDR2", "CDR3"):
+                    key = f"{chain_key}_{cdr}"
+                    sequence = chain.get(cdr, "")
+                    if not sequence:
+                        continue
+                    stats["cdr_lengths"][key].append(len(sequence))
+                    if is_primary:
+                        stats["cdr_lengths_primary"][key].append(len(sequence))
 
-    # Deduplicate targets
-    stats["unique_targets"] = sorted(set(stats["target_list"]))
-    stats["target_counts"] = {}
-    for t in stats["target_list"]:
-        stats["target_counts"][t] = stats["target_counts"].get(t, 0) + 1
-    del stats["target_list"]
-
-    # CDR length summary
-    stats["cdr_length_summary"] = {}
-    for key, lengths in stats["cdr_lengths"].items():
-        if lengths:
-            stats["cdr_length_summary"][key] = {
-                "min": min(lengths),
-                "max": max(lengths),
-                "mean": round(sum(lengths) / len(lengths), 1),
-                "median": sorted(lengths)[len(lengths) // 2],
-                "count": len(lengths),
-            }
-
+    stats["cdr_length_summary"] = _summarise_lengths(stats["cdr_lengths"])
+    stats["cdr_length_summary_primary"] = _summarise_lengths(
+        stats["cdr_lengths_primary"])
+    del stats["cdr_lengths"], stats["cdr_lengths_primary"]
     return stats
 
 
-def main():
+def _summarise_lengths(lengths_by_key: dict) -> dict:
+    """min/max/mean/median/count per CDR (median via statistics.median)."""
+    summary = {}
+    for key, lengths in lengths_by_key.items():
+        if not lengths:
+            continue
+        summary[key] = {
+            "min": min(lengths),
+            "max": max(lengths),
+            "mean": round(sum(lengths) / len(lengths), 1),
+            "median": statistics.median(lengths),
+            "count": len(lengths),
+        }
+    return summary
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Preprocess TheraSAbDab: extract CDRs with ANARCI IMGT numbering"
-    )
+        description="Preprocess TheraSAbDab: extract CDRs with ANARCI IMGT numbering")
     parser.add_argument(
         "--database",
         default="data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx",
-        help="Path to TheraSAbDab Excel file",
-    )
+        help="Path to the TheraSAbDab Excel file")
     parser.add_argument(
         "--output",
         default="data/therasabdab_cdrs.json",
-        help="Output JSON path",
-    )
+        help="Output CDR database JSON")
     args = parser.parse_args()
 
-    database = preprocess_excel(args.database, args.output)
+    if not os.path.exists(args.database):
+        print(f"Error: database not found: {args.database}", file=sys.stderr)
+        return 1
+    if not core.anarci_available():
+        print("Error: ANARCI is required (pip install anarci) and needs the "
+              "HMMER binaries (hmmsearch/hmmbuild) on PATH", file=sys.stderr)
+        return 1
 
-    # Also save statistics
+    database, provenance = preprocess_excel(args.database, args.output)
+
     stats = build_statistics(database)
-    stats_path = Path(args.output).with_name("therasabdab_stats.json")
-    with open(stats_path, "w") as f:
-        json.dump(stats, f, indent=2, ensure_ascii=False)
+    stats.update(provenance)
+    stats_path = os.path.join(os.path.dirname(os.path.abspath(args.output)),
+                              "therasabdab_stats.json")
+    core.write_json(stats_path, stats)
     print(f"Statistics saved to {stats_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
