@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -286,94 +287,40 @@ def cmd_learn(args):
 
 
 def cmd_stability(args):
-    """Predict protein stability (ΔG/ΔΔG) for antibody structures."""
+    """Predict protein stability (ΔΔG) for antibody structures using ThermoMPNN."""
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
     
-    from stability_predictor.stability_analyzer import (
-        predict_dg_esm3dg, predict_dg_saprodg, predict_ddg, analyze_batch,
-        format_result_text, format_batch_text, format_result_json, format_batch_json,
-        check_esm3dg_available, check_saprodg_available
-    )
+    from stability_predictor.stability_analyzer import main as stability_main
     
-    # Check model availability
-    print("[stability] Checking model availability...")
-    esm3d_available = check_esm3dg_available()
-    saprodg_available = check_saprodg_available()
-    
-    print(f"  ESM3dG: {'available' if esm3d_available else 'NOT INSTALLED'}")
-    print(f"  SaProtΔG: {'available' if saprodg_available else 'NOT INSTALLED'}")
-    
-    if not esm3d_available and not saprodg_available:
-        print("\n[stability] ERROR: No prediction models available!")
-        print("  Install ESM3dG (recommended):")
-        print("    pip install git+https://github.com/yehlincho/absolute-stability-predictor.git")
-        return 1
-    
-    # Determine model
-    model = args.model
-    if model == "ESM3dG" and not esm3d_available:
-        if saprodg_available:
-            print("[stability] ESM3dG not available, using SaProtΔG")
-            model = "SaProtΔG"
-        else:
-            print("[stability] ERROR: No models available")
-            return 1
-    elif model == "SaProtΔG" and not saprodg_available:
-        if esm3d_available:
-            print("[stability] SaProtΔG not available, using ESM3dG")
-            model = "ESM3dG"
-        else:
-            print("[stability] ERROR: No models available")
-            return 1
-    
-    # Run analysis
-    if args.wt and args.mutant:
-        print(f"\n[stability] Predicting ΔΔG: {os.path.basename(args.wt)} -> {os.path.basename(args.mutant)}")
-        result = predict_ddg(args.wt, args.mutant, model)
-        if args.json:
-            print(json.dumps(format_result_json(result), indent=2))
-        else:
-            print(format_result_text(result))
-    elif args.pdb:
-        print(f"\n[stability] Analyzing: {os.path.basename(args.pdb)}")
-        if model == "ESM3dG":
-            result = predict_dg_esm3dg(args.pdb, args.chain)
-        else:
-            result = predict_dg_saprodg(args.pdb, args.chain)
-        if args.json:
-            print(json.dumps(format_result_json(result), indent=2))
-        else:
-            print(format_result_text(result))
-    elif args.pdb_dir:
-        print(f"\n[stability] Batch analyzing: {args.pdb_dir}")
-        batch_result = analyze_batch(args.pdb_dir, model)
-        if args.json:
-            print(json.dumps(format_batch_json(batch_result), indent=2))
-        else:
-            print(format_batch_text(batch_result))
-    
-    # Save results
+    # Convert args to sys.argv for the analyzer's argparse
+    sys.argv = ["stability_analyzer.py"]
+    if args.pdb:
+        sys.argv.extend(["--pdb", args.pdb])
+    if args.pdb_dir:
+        sys.argv.extend(["--pdb-dir", args.pdb_dir])
+    if args.chain:
+        sys.argv.extend(["--chain", args.chain])
+    if args.positions:
+        sys.argv.extend(["--positions", args.positions])
+    if args.thermompnn_dir:
+        sys.argv.extend(["--thermompnn-dir", args.thermompnn_dir])
+    if args.python:
+        sys.argv.extend(["--python", args.python])
     if args.output:
-        os.makedirs(args.output, exist_ok=True)
-        if args.pdb:
-            result = predict_dg_esm3dg(args.pdb, args.chain) if model == "ESM3dG" else predict_dg_saprodg(args.pdb, args.chain)
-            data = format_result_json(result)
-            output_file = os.path.join(args.output, "stability_result.json")
-        elif args.wt and args.mutant:
-            result = predict_ddg(args.wt, args.mutant, model)
-            data = format_result_json(result)
-            output_file = os.path.join(args.output, "stability_result.json")
-        else:
-            batch_result = analyze_batch(args.pdb_dir, model)
-            data = format_batch_json(batch_result)
-            output_file = os.path.join(args.output, "stability_batch_results.json")
-        
-        with open(output_file, "w") as f:
-            json.dump(data, f, indent=2)
-        print(f"\n[stability] Results saved to: {output_file}")
+        sys.argv.extend(["--output", args.output])
+    if args.json:
+        sys.argv.append("--json")
+    if args.markdown:
+        sys.argv.append("--markdown")
+    if args.word:
+        sys.argv.append("--word")
+    if args.all_formats:
+        sys.argv.append("--all-formats")
+    if args.verbose:
+        sys.argv.append("--verbose")
     
-    return 0
+    return stability_main()
 
 
 def cmd_setup_check(args):
@@ -384,6 +331,7 @@ def cmd_setup_check(args):
         ("igblastn", shutil.which("igblastn")),
         ("protein_mpnn.py", shutil.which("protein_mpnn.py")),
         ("run_alphafold.py", shutil.which("run_alphafold.py")),
+        ("ThermoMPNN repo", None),  # Checked separately
     ]
     print("[humanize] setup-check")
     for name, path in checks:
@@ -399,6 +347,27 @@ def cmd_setup_check(args):
                 path = "python module OK"
             except ImportError:
                 path = None
+        if name == "ThermoMPNN repo":
+            # Check common locations
+            tm_paths = [
+                os.path.expanduser("~/ThermoMPNN"),
+                "/opt/ThermoMPNN",
+                "./ThermoMPNN",
+            ]
+            path = None
+            for tm_path in tm_paths:
+                if os.path.exists(os.path.join(tm_path, "analysis", "custom_inference.py")):
+                    # Check for checkpoint
+                    ckpt = list(Path(tm_path).glob("models/*.ckpt")) + \
+                           list(Path(tm_path).glob("models/*.pt")) + \
+                           list(Path(tm_path).glob("vanilla_model_weights/*.pt"))
+                    if ckpt:
+                        path = f"found at {tm_path} (ckpt: {ckpt[0].name})"
+                    else:
+                        path = f"found at {tm_path} (NO CHECKPOINT)"
+                    break
+            if path is None:
+                path = "NOT FOUND (optional)"
         print(f"  {name:20s}: {path or 'NOT FOUND (optional)'}")
     print("\n  portable mode (no external tools) is fully functional.")
     return 0
@@ -575,18 +544,21 @@ def main(argv=None):
     p_l.add_argument("--germline-dir", default="")
     p_l.set_defaults(func=cmd_learn)
 
-    # ---- stability: predict ΔG/ΔΔG for antibody structures ----
+    # ---- stability: predict ΔΔG for antibody structures using ThermoMPNN ----
     p_stab = sub.add_parser(
-        "stability", help="predict protein stability (ΔG/ΔΔG)")
-    p_stab.add_argument("--pdb", help="single PDB file to analyze (ΔG)")
-    p_stab.add_argument("--pdb-dir", help="directory of PDB files for batch analysis")
-    p_stab.add_argument("--wt", help="wildtype PDB file (for ΔΔG)")
-    p_stab.add_argument("--mutant", help="mutant PDB file (for ΔΔG)")
-    p_stab.add_argument("--model", default="ESM3dG", choices=["ESM3dG", "SaProtΔG"],
-                        help="prediction model (default: ESM3dG)")
-    p_stab.add_argument("--chain", default="A", help="chain ID (default: A)")
+        "stability", help="predict protein mutational stability (ΔΔG) using ThermoMPNN")
+    p_stab.add_argument("--pdb", help="single PDB/CIF file to analyze")
+    p_stab.add_argument("--pdb-dir", help="directory of PDB/CIF files for batch analysis")
+    p_stab.add_argument("--chain", default="H", help="chain ID (default: H)")
+    p_stab.add_argument("--positions", help="comma-separated Kabat positions (e.g., '37,44,45' or 'H37,H44')")
+    p_stab.add_argument("--thermompnn-dir", required=True, help="path to ThermoMPNN repo (required)")
+    p_stab.add_argument("--python", required=True, help="Python binary for ThermoMPNN env (e.g., '~/miniconda3/envs/thermoMPNN/bin/python' or 'conda run -n thermoMPNN python')")
     p_stab.add_argument("--output", help="output directory for results")
     p_stab.add_argument("--json", action="store_true", help="output JSON format")
+    p_stab.add_argument("--markdown", action="store_true", help="output Markdown format")
+    p_stab.add_argument("--word", action="store_true", help="output Word format")
+    p_stab.add_argument("--all-formats", action="store_true", help="output all formats")
+    p_stab.add_argument("--verbose", action="store_true", help="verbose ThermoMPNN output")
     p_stab.set_defaults(func=cmd_stability)
 
     args = ap.parse_args(argv)

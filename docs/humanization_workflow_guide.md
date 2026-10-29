@@ -158,58 +158,45 @@ python3 tools/ptm_exposure/analyze_ptm.py \
 
 ### 4. 免疫原性分析 (immunogenicity)
 
-**功能**：MHC-II T 细胞表位预测 + 结构风险调整
+**功能**：MHC-II T 细胞表位预测 + 结构风险调整（两步合一）
 
-**两步流程**：
-1. **序列分析**：HLAIIPred 预测 MHC-II 结合
-2. **结构确认**：FreeSASA 计算 relSASA，调整风险
+**核心指标（新定义）**：
+- **Strong / Weak**：15-mer 滑窗计数，≥ strong_thr / [weak_thr, strong_thr)
+- **Density**：(strong + weak) / 总窗口数
+- **Score**：`100 * variant_mean / reference_mean`，**无 100 封顶**，>100 表示更高风险
+- **参考序列**：提供 `--donor` 时永远用 donor 序列单独打分；否则用精确 `V0 / H_V0 / L_V0 / combo_V0`；可用 `--reference-variant` 显式指定
+- **结构校正**：`--structural-risk` 开启后，**所有变体和参考均用各自结构算调整后均值**，再相对计算 Score；调整后指标覆盖 `mean_epitope_load / n_strong / n_weak / density / immunogenicity_score`
 
-**用法**：
+**推荐单条命令**：
 ```bash
-# Step 1: 序列免疫原性
-python3 tools/immunogenicity/immunogenicity_analyzer.py \
-  --input <fasta> --output <outdir> --all-formats
-
-# Step 2: 结构风险调整
-python3 tools/immunogenicity/structural_risk.py \
-  --immunogenicity-json <json> \
-  --structure-dir <pdb_dir> \
-  --backmutation-dir <csv_dir> \
-  --output-dir <outdir> --method relSASA
-# 注：工具会自动读取 <csv_dir>/variants_numbering.json 以精确对齐 Kabat 位置
-# （含 FR4 与插入位点）；也可显式传 --numbering-json <path>
+python3 tools/immunogenicity/immunogenicity_analyzer.py   --input <fasta> --donor <donor.fasta>   --structural-risk --structure-dir <pdb_dir>   --backmutation-dir <step3_dir>   --allele-panel extended --pep-len 15   --strong-threshold 0.5 --weak-threshold 0.3   --output <outdir> --all-formats
 ```
 
+**关键参数**：
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--allele-panel` | `9common` | `9common`(官方示例) / `extended`(24 alleles，含 DQ/DP) |
+| `--pep-len` | `15` | 9-30 |
+| `--strong-threshold` | `0.5` | Strong 窗口阈值 |
+| `--weak-threshold` | `0.3` | Weak 窗口阈值 |
+| `--reference-variant` | auto | 无 donor 时的精确参考变体名 |
+| `--structural-risk` | off | 开启结构校分并直接改写最终 Score |
+
 **⚠️ 关键注意点**：
-1. **HLAIIPred 安装**：
-   ```bash
-   conda create -n hlapred python=3.11
-   conda activate hlapred
-   pip install torch --index-url https://download.pytorch.org/whl/cpu
-   git clone https://github.com/zaferozk/HLAIIPred.git
-   cd HLAIIPred && pip install -r requirements.txt
-   ```
-2. **Allele Padding**：runner 用 `0` 填充到 14 个 allele
-3. **必须结合结构验证**：仅序列分析会高估免疫原性
-4. **回突变 CSV 必须提供**：否则无法正确评估回突变位点埋藏/暴露状态
+1. **HLAIIPred 运行环境**：见 `tools/immunogenicity/README.md`；若不可用自动回退 heuristic（仅做近似）
+2. **Allele 批次**：HLAIIPred 单次 ≤14 alleles；`extended` 24 个自动分批并用 `0` 填充
+3. **结构匹配**：每个变体需独立 PDB/CIF；文件名支持 `V0.pdb` / `combo_V0_V1.pdb` / `igfold_V0.pdb` 等多种模式
+4. **Position labels**：必须提供 `variants_numbering.json`（Kabat/IMGT 逐残基标签），否则回退到序列索引（插入位点会错位）
+5. **Score 语义改变**：结构校正后 `immunogenicity_score` 为“相对结构校正后参考均值的百分比”，原始序列 Score 保留在 `raw_mean_epitope_load` 等字段
 
-**⚠️ 已知 Bug 及修复**：
-1. **per_residue dict key 类型不匹配**：JSON 字符串 key vs int lookup
-   - 修复：key 归一化为 int
-2. **无 donor 参数时 V0 未自动用作参考**
-   - 修复：添加自动 fallback
-3. **structural_risk.py 只考虑回突变位置**
-   - 修复：无回突变数据时 fallback 到所有位置
-4. **structural_risk.py 位置映射错误（Kabat vs 序列序号）**
-   - 问题：回突变 CSV 是 Kabat 编号，工具却按序列序号匹配；插入位点（FR3 82A-C、CDR 27A-/100A-K）与 FR4 会被错配，且 `int("82A")` 直接崩溃
-   - 修复：pipeline 输出 `variants_numbering.json`（每个变体的逐残基 Kabat 标签），工具自动发现并精确匹配；解析兼容插入字母
-5. **FR4 是否被各工具覆盖**
-   - `ptm_exposure`、`immunogenicity_analyzer` 序列扫描：**整链扫描，包含 FR4**
-   - `structural_risk`：**包含 FR4**（T_FR4 权重 0.9），需 `variants_numbering.json` 才能精确对齐
-   - `igfold`：只做结构预测（模型含 FR4），不做区域分析
-
----
-
+**已修复的历史 Bug**：
+1. `per_residue` key 类型不匹配 → 归一化为 int
+2. 无 donor 时未自动用 V0 → 已实现精确 `V0 / combo_V0` fallback
+3. 结构校正只看回突变位点 → 现为 **所有肽窗口位置 core-weighted**
+4. Kabat 标签映射错误 → `variants_numbering.json` + 精确 label 匹配（兼容 82A/100B 等插入）
+5. FR4 权重硬编码 0.9 → **移除 tier 权重**，改为 core/flank 加权
+6. 缺结构静默给 0.5 → **neutral 1.0**，并标记错误
+7. Strong/Weak 为残基计数 → **肽窗口计数**
 ### 5. TAP 可开发性分析 (tap_profiler)
 
 **功能**：预测 TAP 转运效率
@@ -224,12 +211,24 @@ python3 tools/tap_profiler/tap_analyzer.py \
 
 ### 6. 稳定性预测 (stability_predictor)
 
-**功能**：预测突变对稳定性的影响
+**功能**：使用 ThermoMPNN 预测回复突变对稳定性的影响 (ΔΔG)
 
 **用法**：
 ```bash
+# 单结构分析（指定 Kabat 位点）
 python3 tools/stability_predictor/stability_analyzer.py \
-  --input <fasta> --output <outdir>
+  --pdb <structure.pdb> --chain H \
+  --positions 37,44,45,47,48,49,67,69,71,73,76,78,80,82,87,94 \
+  --thermompnn-dir ~/ThermoMPNN \
+  --python ~/miniconda3/envs/thermoMPNN/bin/python \
+  --output <outdir>
+
+# 批量分析变体目录
+python3 tools/stability_predictor/stability_analyzer.py \
+  --pdb-dir <af3_output_dir> --chain H \
+  --thermompnn-dir ~/ThermoMPNN \
+  --python ~/miniconda3/envs/thermoMPNN/bin/python \
+  --output <outdir> --json
 ```
 
 ---
@@ -335,7 +334,7 @@ python3 scripts/humanize/cli.py setup-check
 1. **PTM 模块**：仅预测常见 PTM（N-糖基化、脱酰胺、氧化），不覆盖所有修饰
 2. **免疫原性模块**：仅使用 9 个常用 DRB1 allele，不覆盖所有 HLA 类型
 3. **结构预测**：IgFold 精度低于 AF3，但速度快 100 倍
-4. **稳定性预测**：基于经验打分，不替代实验验证
+4. **稳定性预测**：使用 ThermoMPNN 预测 ΔΔG，仅反映相对突变效应，不预测绝对折叠稳定性 (ΔG)；不替代实验验证
 
 ---
 
