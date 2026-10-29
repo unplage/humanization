@@ -720,7 +720,7 @@ Examples:
   python3 tools/ptm_exposure/analyze_ptm.py --pdb-dir af3/ --output outputs/ptm_batch/
         """
     )
-    parser.add_argument("--pdb", help="Path to PDB/CIF structure file")
+    parser.add_argument("--pdb", help="Path to PDB structure file (mmCIF not supported; use pdb-tools or biopython to convert)")
     parser.add_argument("--pdb-dir", help="Directory containing PDB files (recursive)")
     parser.add_argument("--output", "-o", default="outputs/ptm_exposure",
                         help="Output directory (default: outputs/ptm_exposure)")
@@ -734,6 +734,8 @@ Examples:
 
     if not args.pdb and not args.pdb_dir:
         parser.error("Either --pdb or --pdb-dir must be specified")
+    if args.pdb and not str(args.pdb).lower().endswith('.pdb'):
+        parser.error("Only PDB format supported (.pdb); mmCIF not supported. Convert with pdb-tools or biopython first.")
 
     # Create output directory
     os.makedirs(args.output, exist_ok=True)
