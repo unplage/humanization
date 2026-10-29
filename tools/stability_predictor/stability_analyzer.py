@@ -1,36 +1,49 @@
 #!/usr/bin/env python3
-"""Protein Stability Predictor - ΔG and ΔΔG analysis for antibody humanization.
+"""Protein Stability Predictor - ΔΔG analysis for antibody humanization using ThermoMPNN.
 
-Predicts absolute folding stability (ΔG) and mutational effects (ΔΔG) on
-antibody variants. Uses ESM3ΔG and SaProtΔG models (MIT license) for
-accurate, free stability prediction.
+Predicts mutational effects (ΔΔG) on antibody variants using ThermoMPNN
+(Kuhlman Lab, MIT license). Focuses on back-mutation stability assessment
+for antibody humanization pipelines.
 
 Features:
-  - Absolute stability ΔG prediction for antibody structures
-  - Mutational effect ΔΔG prediction for back-mutations
+  - Mutational effect (ΔΔG) prediction for back-mutations
   - Batch analysis for V0-V3 variant panels
   - Integration with humanization pipeline
+  - Kabat/IMGT region annotation for each mutation
+  - Multiple output formats (text, JSON, Markdown, Word)
 
 Usage:
-    # Single structure analysis
-    python3 tools/stability_predictor/stability_analyzer.py --pdb structure.pdb
-
-    # Compare wildtype vs mutant
-    python3 tools/stability_predictor/stability_analyzer.py --wt wildtype.pdb --mutant mutant.pdb
+    # Single structure analysis with Kabat positions
+    python3 tools/stability_predictor/stability_analyzer.py \
+        --pdb structure.pdb --chain H \
+        --positions 37,44,45,47,48,49,67,69,71,73,76,78,80,82,87,94 \
+        --thermompnn-dir ~/ThermoMPNN --python ~/miniconda3/envs/thermoMPNN/bin/python
 
     # Batch analysis for variant panel
-    python3 tools/stability_predictor/stability_analyzer.py --pdb-dir variants/ --output results/
+    python3 tools/stability_predictor/stability_analyzer.py \
+        --pdb-dir variants/ --chain H \
+        --thermompnn-dir ~/ThermoMPNN --python ~/miniconda3/envs/thermoMPNN/bin/python \
+        --output results/
 
-    # From humanization pipeline output (pass the AF3 output dir via --pdb-dir)
-    python3 tools/stability_predictor/stability_analyzer.py --pdb-dir outputs/step3/af3/ --output results/
+    # From humanization pipeline output
+    python3 tools/stability_predictor/stability_analyzer.py \
+        --pdb-dir outputs/step3/af3/ --chain H \
+        --thermompnn-dir ~/ThermoMPNN --python ~/miniconda3/envs/thermoMPNN/bin/python \
+        --output outputs/stability/ --json
+
+Requirements:
+    - ThermoMPNN repo cloned locally
+    - Conda environment with ThermoMPNN dependencies (Python 3.10+)
+    - Model checkpoint (.ckpt) in ThermoMPNN/models/
 """
 
 import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Dict, List, Optional
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -38,27 +51,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 @dataclass
 class StabilityResult:
-    """Result of stability prediction."""
+    """Result of stability prediction for a single mutation."""
     pdb_file: str
     chain_id: str = "A"
-    dg: Optional[float] = None  # Absolute stability (kcal/mol)
-    ddg: Optional[float] = None  # Mutational effect (kcal/mol)
-    model: str = "ESM3dG"
+    position_pdb: int = 0          # Sequential position in PDB chain
+    position_kabat: str = ""       # Kabat position (e.g., "H37")
+    wildtype: str = ""             # WT amino acid
+    mutation: str = ""             # Mutant amino acid
+    ddg: Optional[float] = None    # Predicted ΔΔG (kcal/mol)
+    region_kabat: str = ""         # Kabat region
+    region_imgt: str = ""          # IMGT region
+    model: str = "ThermoMPNN"
     error: Optional[str] = None
     
     @property
-    def is_stable(self) -> bool:
-        """Check if structure is predicted to be stable."""
-        if self.dg is not None:
-            return self.dg < 0  # Negative ΔG = stable
-        return True
+    def is_stabilizing(self) -> bool:
+        """Check if mutation is stabilizing (ΔΔG < 0)."""
+        if self.ddg is not None:
+            return self.ddg < 0
+        return False
     
     @property
-    def is_stabilizing(self) -> bool:
-        """Check if mutation is stabilizing."""
+    def is_significant(self) -> bool:
+        """Check if |ΔΔG| >= 1.0 kcal/mol (significant effect)."""
         if self.ddg is not None:
-            return self.ddg < 0  # Negative ΔΔG = stabilizing
-        return True
+            return abs(self.ddg) >= 1.0
+        return False
 
 
 @dataclass
@@ -72,186 +90,56 @@ class BatchStabilityResult:
         self._update_summary()
     
     def _update_summary(self):
-        dg_values = [r.dg for r in self.results if r.dg is not None]
         ddg_values = [r.ddg for r in self.results if r.ddg is not None]
         
         self.summary = {
-            "n_structures": len(self.results),
+            "n_mutations": len(self.results),
             "n_successful": sum(1 for r in self.results if r.error is None),
             "n_failed": sum(1 for r in self.results if r.error is not None),
-            "dg_mean": sum(dg_values) / len(dg_values) if dg_values else None,
-            "dg_min": min(dg_values) if dg_values else None,
-            "dg_max": max(dg_values) if dg_values else None,
             "ddg_mean": sum(ddg_values) / len(ddg_values) if ddg_values else None,
             "ddg_min": min(ddg_values) if ddg_values else None,
             "ddg_max": max(ddg_values) if ddg_values else None,
-            "n_stable": sum(1 for r in self.results if r.is_stable and r.error is None),
             "n_stabilizing": sum(1 for r in self.results if r.is_stabilizing and r.error is None),
+            "n_destabilizing": sum(1 for r in self.results if not r.is_stabilizing and r.error is None and r.ddg is not None),
+            "n_significant": sum(1 for r in self.results if r.is_significant and r.error is None),
         }
 
 
-def check_esm3dg_available() -> bool:
-    """Check if ESM3dG is available."""
-    try:
-        import ESM3dG
-        return True
-    except ImportError:
-        return False
-
-
-def check_saprodg_available() -> bool:
-    """Check if SaProtΔG is available."""
-    try:
-        import SaProtdG
-        return True
-    except ImportError:
-        return False
-
-
-def predict_dg_esm3dg(pdb_file: str, chain_id: str = "A") -> StabilityResult:
-    """Predict absolute stability ΔG using ESM3dG.
-    
-    Args:
-        pdb_file: Path to PDB file
-        chain_id: Chain to analyze (default: A)
-    
-    Returns:
-        StabilityResult with ΔG value
-    """
-    result = StabilityResult(pdb_file=pdb_file, chain_id=chain_id, model="ESM3dG")
-    
-    try:
-        import ESM3dG
-        dg = ESM3dG.ESM3dG_predict(pdb_file)
-        result.dg = dg
-    except ImportError:
-        result.error = "ESM3dG not installed. Run: pip install git+https://github.com/yehlincho/absolute-stability-predictor.git"
-    except Exception as e:
-        result.error = f"ESM3dG prediction failed: {str(e)}"
-    
-    return result
-
-
-def predict_dg_saprodg(pdb_file: str, chain_id: str = "A") -> StabilityResult:
-    """Predict absolute stability ΔG using SaProtΔG.
-    
-    Args:
-        pdb_file: Path to PDB file
-        chain_id: Chain to analyze (default: A)
-    
-    Returns:
-        StabilityResult with ΔG value
-    """
-    result = StabilityResult(pdb_file=pdb_file, chain_id=chain_id, model="SaProtΔG")
-    
-    try:
-        import SaProtdG
-        dg = SaProtdG.SaProtdG_predict(pdb_file)
-        result.dg = dg
-    except ImportError:
-        result.error = "SaProtΔG not installed. Run: pip install git+https://github.com/yehlincho/absolute-stability-predictor.git"
-    except Exception as e:
-        result.error = f"SaProtΔG prediction failed: {str(e)}"
-    
-    return result
-
-
-def predict_ddg(wt_pdb: str, mutant_pdb: str, model: str = "ESM3dG") -> StabilityResult:
-    """Predict mutational effect ΔΔG.
-    
-    Args:
-        wt_pdb: Path to wildtype PDB file
-        mutant_pdb: Path to mutant PDB file
-        model: Model to use ("ESM3dG" or "SaProtΔG")
-    
-    Returns:
-        StabilityResult with ΔΔG value
-    """
-    result = StabilityResult(
-        pdb_file=mutant_pdb,
-        model=model,
-        ddg=None
+# Import ThermoMPNN analyzer functions
+try:
+    from .thermompnn_analyzer import (
+        analyze_structure,
+        analyze_batch,
+        StabilityReport,
     )
-    
-    try:
-        if model == "ESM3dG":
-            import ESM3dG
-            ddg = ESM3dG.ESM3dG_predict(wt_pdb, mutant_pdb)
-            result.ddg = ddg
-        elif model == "SaProtΔG":
-            import SaProtdG
-            ddg = SaProtdG.SaProtdG_predict(wt_pdb, mutant_pdb)
-            result.ddg = ddg
-        else:
-            result.error = f"Unknown model: {model}"
-    except ImportError:
-        result.error = f"{model} not installed. Run: pip install git+https://github.com/yehlincho/absolute-stability-predictor.git"
-    except Exception as e:
-        result.error = f"{model} prediction failed: {str(e)}"
-    
-    return result
-
-
-def analyze_batch(pdb_dir: str, model: str = "ESM3dG") -> BatchStabilityResult:
-    """Analyze all PDB files in a directory.
-    
-    Args:
-        pdb_dir: Directory containing PDB files
-        model: Model to use
-    
-    Returns:
-        BatchStabilityResult with all predictions
-    """
-    batch_result = BatchStabilityResult()
-    
-    if not os.path.exists(pdb_dir):
-        batch_result.results = [StabilityResult(
-            pdb_file=pdb_dir,
-            error=f"Directory not found: {pdb_dir}"
-        )]
-        return batch_result
-    
-    pdb_files = [f for f in os.listdir(pdb_dir) if f.endswith('.pdb')]
-    
-    if not pdb_files:
-        batch_result.results = [StabilityResult(
-            pdb_file=pdb_dir,
-            error="No PDB files found in directory"
-        )]
-        return batch_result
-    
-    for pdb_file in sorted(pdb_files):
-        pdb_path = os.path.join(pdb_dir, pdb_file)
-        
-        if model == "ESM3dG":
-            result = predict_dg_esm3dg(pdb_path)
-        else:
-            result = predict_dg_saprodg(pdb_path)
-        
-        batch_result.add_result(result)
-    
-    return batch_result
+    THERMOMPNN_AVAILABLE = True
+except ImportError:
+    analyze_structure = None
+    analyze_batch = None
+    StabilityReport = None
+    THERMOMPNN_AVAILABLE = False
 
 
 def format_result_text(result: StabilityResult) -> str:
     """Format single result as text."""
     lines = []
     lines.append(f"\n{'='*70}")
-    lines.append(f"  Stability Analysis: {os.path.basename(result.pdb_file)}")
+    lines.append(f"  Stability Analysis: {os.path.basename(result.pdb_file)} (chain {result.chain_id})")
     lines.append(f"{'='*70}")
     lines.append(f"\n  Model: {result.model}")
-    lines.append(f"  Chain: {result.chain_id}")
+    lines.append(f"  Position: {result.position_kabat} (PDB pos {result.position_pdb})")
+    lines.append(f"  Mutation: {result.wildtype} -> {result.mutation}")
+    lines.append(f"  Kabat Region: {result.region_kabat or '-'}")
+    lines.append(f"  IMGT Region: {result.region_imgt or '-'}")
     
     if result.error:
         lines.append(f"\n  ERROR: {result.error}")
     else:
-        if result.dg is not None:
-            lines.append(f"\n  Absolute Stability (ΔG): {result.dg:.2f} kcal/mol")
-            lines.append(f"  Status: {'STABLE' if result.is_stable else 'UNSTABLE'}")
-        
         if result.ddg is not None:
             lines.append(f"\n  Mutational Effect (ΔΔG): {result.ddg:.2f} kcal/mol")
-            lines.append(f"  Effect: {'STABILIZING' if result.is_stabilizing else 'DESTABILIZING'}")
+            effect = "STABILIZING" if result.is_stabilizing else "DESTABILIZING"
+            signif = " (significant, |ΔΔG| ≥ 1.0)" if result.is_significant else ""
+            lines.append(f"  Effect: {effect}{signif}")
     
     return "\n".join(lines)
 
@@ -260,27 +148,22 @@ def format_batch_text(batch_result: BatchStabilityResult) -> str:
     """Format batch results as text."""
     lines = []
     lines.append(f"\n{'='*70}")
-    lines.append(f"  Batch Stability Analysis Summary")
+    lines.append(f"  Batch Stability Analysis Summary (ThermoMPNN)")
     lines.append(f"{'='*70}")
     
     s = batch_result.summary
-    lines.append(f"\n  Total structures: {s.get('n_structures', 0)}")
+    lines.append(f"\n  Total mutations: {s.get('n_mutations', 0)}")
     lines.append(f"  Successful: {s.get('n_successful', 0)}")
     lines.append(f"  Failed: {s.get('n_failed', 0)}")
-    
-    if s.get('dg_mean') is not None:
-        lines.append(f"\n  ΔG Statistics:")
-        lines.append(f"    Mean: {s['dg_mean']:.2f} kcal/mol")
-        lines.append(f"    Min:  {s['dg_min']:.2f} kcal/mol")
-        lines.append(f"    Max:  {s['dg_max']:.2f} kcal/mol")
-        lines.append(f"    Stable: {s.get('n_stable', 0)}/{s.get('n_structures', 0)}")
     
     if s.get('ddg_mean') is not None:
         lines.append(f"\n  ΔΔG Statistics:")
         lines.append(f"    Mean: {s['ddg_mean']:.2f} kcal/mol")
         lines.append(f"    Min:  {s['ddg_min']:.2f} kcal/mol")
         lines.append(f"    Max:  {s['ddg_max']:.2f} kcal/mol")
-        lines.append(f"    Stabilizing: {s.get('n_stabilizing', 0)}/{s.get('n_structures', 0)}")
+        lines.append(f"    Stabilizing (ΔΔG < 0):   {s.get('n_stabilizing', 0)}")
+        lines.append(f"    Destabilizing (ΔΔG > 0): {s.get('n_destabilizing', 0)}")
+        lines.append(f"    Significant (|ΔΔG| ≥ 1.0): {s.get('n_significant', 0)}")
     
     lines.append(f"\n{'='*70}")
     lines.append(f"  Individual Results")
@@ -297,12 +180,17 @@ def format_result_json(result: StabilityResult) -> Dict:
     return {
         "pdb_file": result.pdb_file,
         "chain_id": result.chain_id,
-        "dg": result.dg,
+        "position_pdb": result.position_pdb,
+        "position_kabat": result.position_kabat,
+        "wildtype": result.wildtype,
+        "mutation": result.mutation,
         "ddg": result.ddg,
+        "region_kabat": result.region_kabat,
+        "region_imgt": result.region_imgt,
         "model": result.model,
         "error": result.error,
-        "is_stable": result.is_stable if result.error is None else None,
         "is_stabilizing": result.is_stabilizing if result.error is None else None,
+        "is_significant": result.is_significant if result.error is None else None,
     }
 
 
@@ -316,114 +204,134 @@ def format_batch_json(batch_result: BatchStabilityResult) -> Dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Protein Stability Predictor - ΔG and ΔΔG analysis"
+        description="Protein Stability Predictor - ΔΔG analysis with ThermoMPNN"
     )
-    parser.add_argument("--pdb", help="Single PDB file to analyze")
-    parser.add_argument("--pdb-dir", help="Directory of PDB files for batch analysis")
-    parser.add_argument("--wt", help="Wildtype PDB file (for ΔΔG prediction)")
-    parser.add_argument("--mutant", help="Mutant PDB file (for ΔΔG prediction)")
-    parser.add_argument("--model", default="ESM3dG", choices=["ESM3dG", "SaProtΔG"],
-                        help="Prediction model (default: ESM3dG)")
-    parser.add_argument("--chain", default="A", help="Chain ID to analyze (default: A)")
+    parser.add_argument("--pdb", help="Single PDB/CIF file to analyze")
+    parser.add_argument("--pdb-dir", help="Directory of PDB/CIF files for batch analysis")
+    parser.add_argument("--chain", default="H", help="Chain ID to analyze (default: H)")
+    parser.add_argument("--positions", help="Comma-separated Kabat positions (e.g., '37,44,45' or 'H37,H44')")
+    parser.add_argument("--thermompnn-dir", required=True, help="Path to ThermoMPNN repo (required)")
+    parser.add_argument("--python", required=True, 
+                        help="Python binary for ThermoMPNN env (e.g., '~/miniconda3/envs/thermoMPNN/bin/python' or 'conda run -n thermoMPNN python')")
     parser.add_argument("--output", help="Output directory for results")
     parser.add_argument("--json", action="store_true", help="Output JSON format")
     parser.add_argument("--markdown", action="store_true", help="Output Markdown format")
     parser.add_argument("--word", action="store_true", help="Output Word format")
     parser.add_argument("--all-formats", action="store_true", help="Output all formats")
+    parser.add_argument("--verbose", action="store_true", help="Verbose ThermoMPNN output")
     
     args = parser.parse_args()
     
-    if not args.pdb and not args.pdb_dir and not (args.wt and args.mutant):
-        parser.error("Provide --pdb, --pdb-dir, or --wt/--mutant")
+    if not args.pdb and not args.pdb_dir:
+        parser.error("Provide --pdb or --pdb-dir")
     
-    # Check if models are available
-    print("[stability] Checking model availability...")
-    esm3d_available = check_esm3dg_available()
-    saprodg_available = check_saprodg_available()
-    
-    print(f"  ESM3dG: {'available' if esm3d_available else 'NOT INSTALLED'}")
-    print(f"  SaProtΔG: {'available' if saprodg_available else 'NOT INSTALLED'}")
-    
-    if not esm3d_available and not saprodg_available:
-        print("\n[stability] ERROR: No prediction models available!")
-        print("  Install ESM3dG (recommended):")
-        print("    pip install git+https://github.com/yehlincho/absolute-stability-predictor.git")
-        print("\n  Or install SaProtΔG:")
-        print("    pip install git+https://github.com/yehlincho/absolute-stability-predictor.git")
+    if not THERMOMPNN_AVAILABLE or analyze_structure is None or analyze_batch is None:
+        print("[stability] ERROR: ThermoMPNN analyzer not available")
         return 1
     
-    # Determine which model to use
-    model = args.model
-    if model == "ESM3dG" and not esm3d_available:
-        if saprodg_available:
-            print("[stability] ESM3dG not available, using SaProtΔG")
-            model = "SaProtΔG"
-        else:
-            print("[stability] ERROR: No models available")
-            return 1
-    elif model == "SaProtΔG" and not saprodg_available:
-        if esm3d_available:
-            print("[stability] SaProtΔG not available, using ESM3dG")
-            model = "ESM3dG"
-        else:
-            print("[stability] ERROR: No models available")
-            return 1
+    # Parse positions
+    positions = None
+    if args.positions:
+        for p in args.positions.split(','):
+            p = p.strip().upper()
+            if not p:
+                continue
+            if not p.startswith(('H', 'L')):
+                p = 'H' + p
+            if positions is None:
+                positions = []
+            positions.append(p)
+    
+    # Handle conda run syntax
+    python_bin = args.python
+    
+    # Output directory
+    if args.output:
+        os.makedirs(args.output, exist_ok=True)
     
     # Run analysis
-    if args.wt and args.mutant:
-        # ΔΔG prediction
-        print(f"\n[stability] Predicting ΔΔG: {os.path.basename(args.wt)} -> {os.path.basename(args.mutant)}")
-        result = predict_ddg(args.wt, args.mutant, model)
+    if args.pdb:
+        struct_out_dir = args.output or "outputs/stability"
+        report = analyze_structure(
+            args.pdb, args.chain, args.thermompnn_dir, python_bin,
+            struct_out_dir, positions, args.verbose
+        )
         
-        if args.json:
-            print(json.dumps(format_result_json(result), indent=2))
-        else:
-            print(format_result_text(result))
-    
-    elif args.pdb:
-        # Single structure ΔG prediction
-        print(f"\n[stability] Analyzing: {os.path.basename(args.pdb)}")
-        
-        if model == "ESM3dG":
-            result = predict_dg_esm3dg(args.pdb, args.chain)
-        else:
-            result = predict_dg_saprodg(args.pdb, args.chain)
-        
-        if args.json:
-            print(json.dumps(format_result_json(result), indent=2))
-        else:
-            print(format_result_text(result))
-    
-    elif args.pdb_dir:
-        # Batch analysis
-        print(f"\n[stability] Batch analyzing: {args.pdb_dir}")
-        batch_result = analyze_batch(args.pdb_dir, model)
+        # Convert to StabilityResult list for batch formatting
+        batch_result = BatchStabilityResult()
+        for mut in report.mutations:
+            batch_result.add_result(StabilityResult(
+                pdb_file=report.pdb_file,
+                chain_id=args.chain,
+                position_pdb=mut.position_pdb,
+                position_kabat=mut.position_kabat,
+                wildtype=mut.wildtype,
+                mutation=mut.mutation,
+                ddg=mut.ddG,
+                region_kabat=mut.region_kabat,
+                region_imgt=mut.region_imgt,
+                model="ThermoMPNN",
+                error=report.error,
+            ))
         
         if args.json:
             print(json.dumps(format_batch_json(batch_result), indent=2))
         else:
             print(format_batch_text(batch_result))
-    
-    # Save results if output directory specified
-    if args.output:
-        os.makedirs(args.output, exist_ok=True)
         
-        if args.pdb:
-            result = predict_dg_esm3dg(args.pdb, args.chain) if model == "ESM3dG" else predict_dg_saprodg(args.pdb, args.chain)
-            data = format_result_json(result)
-            output_file = os.path.join(args.output, "stability_result.json")
-        elif args.wt and args.mutant:
-            result = predict_ddg(args.wt, args.mutant, model)
-            data = format_result_json(result)
-            output_file = os.path.join(args.output, "stability_result.json")
-        else:
-            batch_result = analyze_batch(args.pdb_dir, model)
+        # Save results
+        if args.output:
             data = format_batch_json(batch_result)
             output_file = os.path.join(args.output, "stability_batch_results.json")
+            with open(output_file, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"\n[stability] Results saved to: {output_file}")
+            
+            # Also save markdown/word if requested
+            if args.markdown or args.all_formats:
+                from .thermompnn_analyzer import save_markdown_report
+                save_markdown_report(report, os.path.join(args.output, f"{Path(args.pdb).stem}_stability.md"))
+            if args.word or args.all_formats:
+                from .thermompnn_analyzer import save_word_report
+                save_word_report(report, os.path.join(args.output, f"{Path(args.pdb).stem}_stability.docx"))
+    
+    elif args.pdb_dir:
+        struct_out_dir = args.output or "outputs/stability"
+        reports = analyze_batch(
+            args.pdb_dir, args.chain, args.thermompnn_dir, python_bin,
+            struct_out_dir, positions, args.verbose
+        )
         
-        with open(output_file, "w") as f:
-            json.dump(data, f, indent=2)
-        print(f"\n[stability] Results saved to: {output_file}")
+        # Convert to batch result
+        batch_result = BatchStabilityResult()
+        for report in reports:
+            for mut in report.mutations:
+                batch_result.add_result(StabilityResult(
+                    pdb_file=report.pdb_file,
+                    chain_id=args.chain,
+                    position_pdb=mut.position_pdb,
+                    position_kabat=mut.position_kabat,
+                    wildtype=mut.wildtype,
+                    mutation=mut.mutation,
+                    ddg=mut.ddG,
+                    region_kabat=mut.region_kabat,
+                    region_imgt=mut.region_imgt,
+                    model="ThermoMPNN",
+                    error=report.error,
+                ))
+        
+        if args.json:
+            print(json.dumps(format_batch_json(batch_result), indent=2))
+        else:
+            print(format_batch_text(batch_result))
+        
+        # Save results
+        if args.output:
+            data = format_batch_json(batch_result)
+            output_file = os.path.join(args.output, "stability_batch_results.json")
+            with open(output_file, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"\n[stability] Results saved to: {output_file}")
     
     return 0
 
