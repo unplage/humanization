@@ -63,6 +63,20 @@ class PDBModel:
         ]
 
 
+def _encode_resseq_icode(resseq: int, icode: str) -> int:
+    """Encode a PDB insertion code into resseq so residues stay unique.
+
+    PDB insertion codes (column 27) distinguish residues like 100, 100A,
+    100B that share the same integer residue number.  We fold a non-blank
+    iCode into resseq as ``resseq * 1000 + ord(icode)`` so that 100A →
+    100065 and 100B → 100066, while plain residues (1–999) never collide
+    with the encoded range (≥ 100000).
+    """
+    if icode and icode not in (" ", "\x00", ""):
+        return resseq * 1000 + ord(icode)
+    return resseq
+
+
 def parse_pdb(path: str) -> Optional[PDBModel]:
     model = PDBModel()
     with open(path) as fh:
@@ -74,11 +88,13 @@ def parse_pdb(path: str) -> Optional[PDBModel]:
                 try:
                     # AF3 stores pLDDT in the B-factor column (60:66)
                     plddt = float(line[60:66]) if len(line) > 66 else 0.0
+                    resseq_raw = int(line[22:26].strip())
+                    icode = line[26] if len(line) > 26 else " "
                     model.atoms.append(PDBAtom(
                         name=line[12:16].strip(),
                         resname=line[17:20].strip(),
                         chain=line[21],
-                        resseq=int(line[22:26].strip()),
+                        resseq=_encode_resseq_icode(resseq_raw, icode),
                         x=float(line[30:38]),
                         y=float(line[38:46]),
                         z=float(line[46:54]),
@@ -888,17 +904,27 @@ def kabsch_superpose(
         [Szx - Sxz, Sxy + Syx, -Sxx + Syy - Szz, Syz + Szy],
         [Sxy - Syx, Szx + Sxz, Syz + Szy, -Sxx - Syy + Szz],
     ]
-    # shift eigenvalues positive so power iteration finds the rotation
-    shift = sum(N[i][i] for i in range(4))
+    # Shift eigenvalues positive so power iteration finds the LARGEST
+    # algebraic eigenvalue (the rotation solution), not the largest-magnitude
+    # eigenvalue (which can be negative for elongated/collinear point sets).
+    # The Horn matrix trace is always 0, so we use a Gershgorin-type bound:
+    # c = max row sum of |N[i][j]| guarantees all eigenvalues of N + c*I
+    # are >= 0, making the desired eigenvalue the unique largest.
+    shift = max(sum(abs(N[i][j]) for j in range(4)) for i in range(4))
     for i in range(4):
         N[i][i] += shift
+    # Power iteration with convergence check (relative eigenvector change).
     v = [1.0, 0.0, 0.0, 0.0]
-    for _ in range(200):
+    for _ in range(500):
         w = [sum(N[i][j] * v[j] for j in range(4)) for i in range(4)]
         norm = math.sqrt(sum(x * x for x in w))
         if norm < 1e-12:
             break
-        v = [x / norm for x in w]
+        v_new = [x / norm for x in w]
+        delta = sum((v_new[i] - v[i]) ** 2 for i in range(4))
+        v = v_new
+        if delta < 1e-20:
+            break
     qw, qx, qy, qz = v
     R = [
         [qw * qw + qx * qx - qy * qy - qz * qz, 2 * (qx * qy - qw * qz),
@@ -968,10 +994,18 @@ def _pos_key(pos: str):
 
 
 def _get_fr_region(pos: str, chain_type: str) -> str:
-    """Get FR region (FR1/FR2/FR3/FR4) from Kabat position string.
-    
-    VH: FR1 1-30, CDR1 31-35, FR2 36-49, CDR2 50-65, FR3 66-94, CDR3 95-102, FR4 103-113
-    VL: FR1 1-23, CDR1 24-34, FR2 35-49, CDR2 50-56, FR3 57-88, CDR3 89-97, FR4 98-107
+    """Get FR/CDR region label from a Kabat position string.
+
+    Uses the same CDR windows as ``schemespec.cdr_windows("kabat","kabat")``
+    so CDR positions are correctly labelled (CDR1/CDR2/CDR3) rather than
+    being silently folded into an FR region.  The caller only collects FR
+    labels into ``fr_regions``; CDR labels are ignored, which is the
+    intended behaviour.
+
+    VH: FR1 1-30, CDR1 31-35, FR2 36-49, CDR2 50-65, FR3 66-92,
+        CDR3 93-102, FR4 103-113
+    VL: FR1 1-23, CDR1 24-34, FR2 35-49, CDR2 50-56, FR3 57-88,
+        CDR3 89-97, FR4 98-107
     """
     # Extract numeric position from strings like "H31", "H100A", "L27E"
     num_str = ""
@@ -980,30 +1014,41 @@ def _get_fr_region(pos: str, chain_type: str) -> str:
             num_str += c
         elif num_str:  # Stop at first non-digit after digits
             break
-    
+
     if not num_str:
         return "FR4"  # Default for unknown positions
-    
+
     num = int(num_str)
-    
+
+    # CDR windows (matching schemespec.cdr_windows for kabat/kabat)
     if chain_type == "H":
+        if 31 <= num <= 35:
+            return "CDR1"
+        if 50 <= num <= 65:
+            return "CDR2"
+        if 93 <= num <= 102:
+            return "CDR3"
         if num <= 30:
             return "FR1"
-        elif num <= 49:
+        if num <= 49:
             return "FR2"
-        elif num <= 94:
+        if num <= 92:
             return "FR3"
-        else:
-            return "FR4"
+        return "FR4"
     else:  # L chain
+        if 24 <= num <= 34:
+            return "CDR1"
+        if 50 <= num <= 56:
+            return "CDR2"
+        if 89 <= num <= 97:
+            return "CDR3"
         if num <= 23:
             return "FR1"
-        elif num <= 49:
+        if num <= 49:
             return "FR2"
-        elif num <= 88:
+        if num <= 88:
             return "FR3"
-        else:
-            return "FR4"
+        return "FR4"
 
 
 def structure_rmsd(
