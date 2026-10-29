@@ -29,5 +29,4 @@ tools/pataa_homology/database/tax*
 # IgFold AntiBERTy weights (downloaded from HuggingFace)
 tools/igfold/antiberty_weights/
 
-# Immunogenicity tool model weights
-tools/immunogenicity/models/
+

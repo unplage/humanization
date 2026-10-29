@@ -801,11 +801,20 @@ def _plddt_by_pos(model, label: str, numbered: NumberedChain) -> Dict[str, float
 def _measure_variant(donor_struct, config: PipelineConfig, donor_numbered,
                      variant, vmodel, vlabel: str, pdb: str) -> Dict:
     """CDR-RMSD + clashes + CDR pLDDT for one variant chain vs its donor."""
-    from .structure import count_clashes, structure_rmsd
+    from .structure import count_clashes, structure_rmsd, _AA3TO1
     donor_model, donor_label, donor_pos = donor_struct
     cdr_sets, framework = build_cdr_framework_sets(
         donor_numbered, config.cdr_scheme, config.numbering)
-    vpos = pdb_chain_pos_map(vmodel, vlabel, variant.graft.numbered)
+    # Pair donor positions to variant PDB resseqs via sequence alignment.
+    # Two independent numbering runs (donor FASTA vs variant PDB sequence)
+    # can place CDR insertions at different anchor residues; pairing by
+    # label alone then mismatches residues and inflates CDR-RMSD.
+    ca = sorted((a.resseq, a.resname)
+                for a in vmodel.atoms if a.chain == vlabel and a.name == "CA")
+    vseq = "".join(_AA3TO1.get(rn, "X") for _, rn in ca)
+    vpos = align_pos_map(donor_numbered, vseq, vmodel, vlabel)
+    if vpos is None:
+        vpos = pdb_chain_pos_map(vmodel, vlabel, variant.graft.numbered)
     # Use only high-confidence framework residues for the superposition so a
     # flexible/low-pLDDT loop or terminus cannot drag the whole fit.
     plddt = _plddt_by_pos(vmodel, vlabel, variant.graft.numbered)
