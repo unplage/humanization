@@ -15,20 +15,28 @@ Post-humanization immunogenicity analysis for antibody variants. Predicts MHC-II
 
 ### Step 2: Structure-Based Confirmation (FreeSASA)
 
-- **Input**: Variant PDB structure (AF3/IgFold)
+- **Input**: Variant PDB structure (AF3/IgFold/Boltz/Protenix)
 - **Method**: Computes relative SASA (relSASA) for each residue
-- **Output**: Risk adjustment factors based on buriedness
-- **Key insight**: Buried residues (relSASA < 0.20) are less accessible to MHC-II antigen processing
+- **Output**: Peptide-level adjustment factor; the adjusted mean **rewrites the final score**
+- **Key insight**: Buried residues (relSASA < 0.15) are less accessible to MHC-II antigen processing
 
 ### Risk Adjustment Logic
 
+The factor is a core-weighted average over all residues of each 15-mer
+peptide (core 1.0, flanks 0.5). Back-mutation tiers are never used as
+structural weights.
+
 | relSASA | Classification | Risk Factor | Rationale |
 |---------|----------------|-------------|-----------|
-| < 0.10 | Deeply buried | 0.05 | Minimal accessibility |
-| 0.10-0.15 | Partially buried | 0.05-0.30 | Low accessibility |
+| < 0.05 | Deeply buried | 0.05 | Minimal accessibility |
+| 0.05-0.15 | Partially buried | 0.05-0.30 | Low accessibility |
 | 0.15-0.25 | Uncertain zone | 0.30-0.70 | Linear interpolation |
 | 0.25-0.40 | Partially exposed | 0.70-0.90 | Moderate accessibility |
 | > 0.40 | Fully exposed | 1.00 | Full risk |
+
+Missing structure data contributes a neutral factor of 1.0, never a silent
+0.5. The final score is `100 * adjusted_variant_mean / adjusted_reference_mean`
+and is not capped at 100.
 
 ## Backend
 
@@ -146,18 +154,12 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py \
 ### Analyze with structural risk adjustment
 
 ```bash
-# Step 1: Run sequence-based analysis
 python3 tools/immunogenicity/immunogenicity_analyzer.py \
     --outdir outputs/amg110_step3/step3 \
-    --all-formats
-
-# Step 2: Run structural risk adjustment
-python3 tools/immunogenicity/structural_risk.py \
-    --immunogenicity-json outputs/immunogenicity/variants_immunogenicity.json \
+    --structural-risk \
     --structure-dir af3/amg110_variants \
     --backmutation-dir outputs/amg110_step3/step3 \
-    --output-dir outputs/immunogenicity \
-    --verbose
+    --all-formats
 ```
 
 ### Analyze specific FASTA
@@ -185,6 +187,27 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py \
     --donor donor.fasta \
     --all-formats
 ```
+
+## Key CLI options
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--backend` | `auto` | `hlaiipred`, `heuristic`, or `auto` (falls back with a warning) |
+| `--allele-panel` | `9common` | `9common` (official HLAIIPred example) or `extended` (24 alleles) |
+| `--alleles` | panel | Explicit comma-separated alleles; max 14 per HLAIIPred call (batched automatically) |
+| `--pep-len` | `15` | MHC-II peptide window length, 9-30 |
+| `--strong-threshold` | `0.5` | Peptide window is strong at/above this score |
+| `--weak-threshold` | `0.3` | Peptide window is weak in `[weak, strong)` |
+| `--donor` | none | Always scored from its own sequence as the reference |
+| `--reference-variant` | auto | Exact variant name to use as reference when no donor is given |
+| `--structural-risk` | off | Enable structure-based rewriting of final scores |
+| `--structure-dir` | required with structural | Directory containing per-variant PDB/CIF files |
+| `--backmutation-dir` | none | Pipeline step3 dir with back-mutation CSVs and `variants_numbering.json` |
+| `--numbering-json` | auto-discovered | Explicit per-variant Kabat/IMGT labels |
+
+`extended` adds common DQ/DP alleles. HLAIIPred expects DP/DQ heterodimers as
+`DPA1*01:03-DPB1*02:01` / `DQA1*01:02-DQB1*06:02`; the tool batches alleles
+and pads missing slots with `0`, matching the official API.
 
 ## Position numbering (FR4 and insertion letters)
 
@@ -227,7 +250,7 @@ Use the structural-risk report for label-aware positions.
 | Tool | FR4 handled? |
 |------|--------------|
 | `immunogenicity_analyzer.py` (sequence) | Yes — MHC-II peptides are generated over the whole chain, FR4 included |
-| `structural_risk.py` (structure) | Yes — with `variants_numbering.json`; `T_FR4` carries weight 0.9 |
+| `structural_risk.py` (structure) | Yes — with `variants_numbering.json`; FR4 uses the same core-weighted buriedness as other positions |
 | `../ptm_exposure/analyze_ptm.py` | Yes — PTM motifs scanned over the whole chain (e.g. `H103` W oxidation) |
 | `../igfold/igfold_predict.py` | Predicts the full chain (FR4 in the model); does no region analysis itself |
 
@@ -255,8 +278,23 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py \
 
 ### Step 3: Structural risk adjustment (structure-based)
 
+Recommended: run analysis and structural adjustment in one pass. The adjusted
+mean directly rewrites `immunogenicity_score` in every report.
+
 ```bash
-# Use variant-specific structures (AF3/IgFold)
+python3 tools/immunogenicity/immunogenicity_analyzer.py \
+    --outdir outputs/amg110_step3/step3 \
+    --donor data/examples/mouse_4d5_fab.fasta \
+    --structural-risk \
+    --structure-dir af3/amg110_variants \
+    --backmutation-dir outputs/amg110_step3/step3 \
+    --all-formats
+```
+
+The standalone structural step is still available and writes
+`*_with_structural_risk.json`:
+
+```bash
 python3 tools/immunogenicity/structural_risk.py \
     --immunogenicity-json outputs/immunogenicity/variants_immunogenicity.json \
     --structure-dir af3/amg110_variants \
@@ -267,11 +305,12 @@ python3 tools/immunogenicity/structural_risk.py \
 
 ### Step 4: Interpret results
 
-- **Score**: variant immunogenicity relative to donor (100% = same as donor, <100% = reduced)
-- **Strong**: number of residues in strong predicted epitopes (sigmoid > 0.5)
-- **Density**: fraction of residues in any epitope window
+- **Score**: percent of reference mean; `100%` = same as reference; values **above 100%** mean higher predicted presentation. With `--structural-risk`, both variant and reference means are structurally adjusted.
+- **Strong / Weak**: number of **peptide windows** at/above the strong or weak threshold (not residue counts)
+- **Density**: `(strong + weak) / total peptide windows`
 - **ΔEPI**: epitope score change at back-mutated positions (negative = reduced)
-- **Structural Adjustment**: risk factor based on buriedness (0.1 = buried, 1.0 = exposed)
+- **StructAdj**: mean buriedness-derived factor (0.1 = buried, 1.0 = exposed); `*` marks a structurally rewritten score
+- **Reference**: with `--donor`, the donor is always scored from its own sequence. Without donor, an exact `V0` / `H_V0` / `L_V0` / `combo_V0` variant is used. Use `--reference-variant` to override.
 
 ## Output Formats
 
@@ -306,8 +345,16 @@ python3 tools/immunogenicity/structural_risk.py \
       "variants": {
         "H_V0": {
           "immunogenicity_score": 100.0,
-          "epitope_density": 0.245,
-          "structural_adjustment": 0.75,
+          "strong_threshold": 0.5,
+          "weak_threshold": 0.3,
+          "n_strong": 12,
+          "n_weak": 8,
+          "n_total_windows": 81,
+          "epitope_density": 0.247,
+          "mean_epitope_load": 0.421,
+          "raw_mean_epitope_load": 0.532,
+          "structural_adjustment": 0.79,
+          "structural_score_applied": true,
           "adjusted_peptides": [...],
           "positions_of_interest": [...]
         }
@@ -383,19 +430,24 @@ The dominant mechanism of anti-drug antibody (ADA) formation is:
 
 ### Immunogenicity score
 
-The per-variant score (0–100%) compares epitope load to the donor:
+The per-variant score compares epitope load to the reference:
 - **< 50%**: substantially reduced epitope load (strong improvement)
 - **50–80%**: moderately reduced
-- **80–100%**: similar to donor (minimal improvement)
+- **80–100%**: similar to reference (minimal improvement)
 - **> 100%**: increased epitope load (regression)
+
+There is no upper cap; a variant with twice the reference load reports 200%.
 
 ### Structural adjustment
 
-The structural adjustment factor (0–1) modifies the immunogenicity score:
-- **0.0–0.2**: position is buried, minimal risk
-- **0.2–0.5**: position is partially buried, reduced risk
-- **0.5–0.8**: position is partially exposed, moderate risk
-- **0.8–1.0**: position is fully exposed, full risk
+The structural adjustment factor (0–1) is applied to each peptide's raw score:
+- **0.0–0.2**: buried, minimal risk
+- **0.2–0.5**: partially buried, reduced risk
+- **0.5–0.8**: partially exposed, moderate risk
+- **0.8–1.0**: fully exposed, full risk
+
+`mean_epitope_load`, `n_strong`, `n_weak`, `epitope_density`, and
+`immunogenicity_score` are all recomputed from the adjusted peptides.
 
 ## Key Findings from AMG110 Analysis
 

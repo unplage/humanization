@@ -46,17 +46,17 @@ REFERENCE_SASA = {
     'SER': 122.0, 'THR': 146.0, 'TRP': 259.0, 'TYR': 229.0, 'VAL': 160.0,
 }
 
-# Buriedness thresholds (Tien et al. 2013)
-BURIED_THRESHOLD = 0.20    # relSASA < 0.20 = buried
+# Buriedness thresholds (single source of truth)
+BURIED_THRESHOLD = 0.15    # relSASA < 0.15 = buried
 EXPOSED_THRESHOLD = 0.25   # relSASA > 0.25 = exposed
-# 0.15 <= relSASA <= 0.25 = uncertain zone (linear interpolation)
+# 0.15 <= relSASA <= 0.25 = uncertain zone
 
-# Risk adjustment factors
+# Risk adjustment factors for the binary method
 RISK_ADJUSTMENT = {
-    'buried': 0.1,         # 90% risk reduction
-    'exposed': 1.0,        # no reduction
-    'uncertain': 0.5,      # 50% reduction
-    'no_structure': 0.5,   # conservative: assume 50% risk
+    'buried': 0.10,
+    'exposed': 1.0,
+    'uncertain': 0.5,
+    'no_structure': 1.0,   # neutral: never silently halve risk
 }
 
 
@@ -136,6 +136,10 @@ class VariantStructuralRisk:
     sequence: str
     peptides: List[PeptideRiskAssessment] = field(default_factory=list)
     overall_adjustment: float = 1.0
+    adjusted_mean: Optional[float] = None
+    adjusted_immunogenicity_score: Optional[float] = None
+    structure_ok: bool = True
+    error: Optional[str] = None
     structure_source: str = ""  # e.g. "V2.pdb", "donor.pdb"
 
 
@@ -143,15 +147,75 @@ class VariantStructuralRisk:
 # SASA computation
 # ---------------------------------------------------------------------------
 
-def compute_rel_sasa(pdb_path: str, chain_id: str = 'H') -> Dict[str, PositionBuriedness]:
-    """Compute relative SASA for all residues in a PDB file.
+_AA3 = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+    'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
+    'MSE': 'M', 'SEC': 'U', 'PYL': 'O',
+}
 
-    Args:
-        pdb_path: Path to PDB structure file
-        chain_id: Chain identifier to analyze
 
-    Returns:
-        Dict mapping position string (e.g. "H5") to PositionBuriedness
+def _resseq_num(value) -> Optional[int]:
+    m = re.search(r"(-?\d+)", str(value or ""))
+    return int(m.group(1)) if m else None
+
+
+def _ordered_chain(chain_areas) -> List[Tuple[int, object]]:
+    ordered = []
+    for resseq_str, area_obj in chain_areas.items():
+        n = _resseq_num(resseq_str)
+        if n is not None:
+            ordered.append((n, area_obj))
+    ordered.sort(key=lambda item: item[0])
+    return ordered
+
+
+def _chain_sequence(chain_areas) -> str:
+    return "".join(
+        _AA3.get(str(getattr(obj, "residueType", "")).upper(), "X")
+        for _, obj in _ordered_chain(chain_areas)
+    )
+
+
+def _identity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0.0
+    same = sum(1 for i in range(n) if a[i] == b[i])
+    return same / n
+
+
+def _pick_chain(residue_areas, chain_id: str,
+                expected_sequence: Optional[str]) -> str:
+    if chain_id in residue_areas:
+        return chain_id
+    if not residue_areas:
+        raise ValueError("structure contains no protein chains")
+    if expected_sequence:
+        scored = [
+            (_identity(_chain_sequence(areas), expected_sequence.upper()), name)
+            for name, areas in residue_areas.items()
+        ]
+        scored.sort(reverse=True)
+        if scored and scored[0][0] >= 0.5:
+            return scored[0][1]
+    if len(residue_areas) == 1:
+        return next(iter(residue_areas))
+    raise ValueError(
+        f"chain '{chain_id}' not found and no chain matches the variant sequence")
+
+
+def compute_rel_sasa(pdb_path: str, chain_id: str = 'H',
+                     expected_sequence: Optional[str] = None
+                     ) -> Dict[str, PositionBuriedness]:
+    """Compute relative SASA for all residues of one chain.
+
+    If ``chain_id`` is absent (common for AF3/Boltz A/B chains), the chain
+    whose sequence best matches ``expected_sequence`` is selected. A chain is
+    never silently treated as all-missing.
     """
     if not HAS_FREESASA:
         raise ImportError("FreeSASA is required. Install with: pip install freesasa")
@@ -161,33 +225,39 @@ def compute_rel_sasa(pdb_path: str, chain_id: str = 'H') -> Dict[str, PositionBu
     result = _freesasa.calc(structure)
 
     residue_areas = result.residueAreas()
+    chain_id = _pick_chain(residue_areas, chain_id, expected_sequence)
     chain_areas = residue_areas.get(chain_id, {})
+    observed = _chain_sequence(chain_areas)
+    if expected_sequence and observed:
+        ident = _identity(observed, expected_sequence.upper())
+        if ident < 0.80:
+            raise ValueError(
+                f"chain {chain_id} sequence identity {ident:.2f} is too low "
+                f"for this variant; refusing to use a mismatched structure")
 
     rel_sasa = {}
-    for resseq_str, area_obj in chain_areas.items():
-        resseq = int(resseq_str)
+    for seq_index, (resseq, area_obj) in enumerate(_ordered_chain(chain_areas)):
         total_area = area_obj.total
         rel_total = area_obj.relativeTotal
         resname = area_obj.residueType
 
-        # Determine buriedness
         if rel_total < BURIED_THRESHOLD:
             buried = True
         elif rel_total > EXPOSED_THRESHOLD:
             buried = False
         else:
-            buried = None  # uncertain zone
+            buried = None
 
         position = f'{chain_id}{resseq}'
         rel_sasa[position] = PositionBuriedness(
             position=position,
             chain=chain_id,
-            seq_index=resseq - 1,  # convert to 0-based
+            seq_index=seq_index,
             resname=resname,
             abs_sasa=total_area,
             rel_sasa=rel_total,
             buried=buried,
-            is_backmutation=False,  # will be updated later
+            is_backmutation=False,
         )
 
     return rel_sasa
@@ -211,8 +281,7 @@ def compute_all_chains_sasa(pdb_path: str) -> Dict[str, Dict[str, PositionBuried
 
     for chain_id, chain_areas in residue_areas.items():
         chain_data = {}
-        for resseq_str, area_obj in chain_areas.items():
-            resseq = int(resseq_str)
+        for seq_index, (resseq, area_obj) in enumerate(_ordered_chain(chain_areas)):
             total_area = area_obj.total
             rel_total = area_obj.relativeTotal
             resname = area_obj.residueType
@@ -228,7 +297,7 @@ def compute_all_chains_sasa(pdb_path: str) -> Dict[str, Dict[str, PositionBuried
             chain_data[position] = PositionBuriedness(
                 position=position,
                 chain=chain_id,
-                seq_index=resseq - 1,
+                seq_index=seq_index,
                 resname=resname,
                 abs_sasa=total_area,
                 rel_sasa=rel_total,
@@ -343,99 +412,84 @@ def map_peptide_positions(
 # Risk adjustment calculation
 # ---------------------------------------------------------------------------
 
+def _rel_sasa_weight(rel_sasa: float) -> float:
+    if rel_sasa < 0.05:
+        return 0.05
+    if rel_sasa < 0.15:
+        return 0.05 + 0.25 * (rel_sasa - 0.05) / 0.10
+    if rel_sasa < 0.25:
+        return 0.30 + 0.40 * (rel_sasa - 0.15) / 0.10
+    if rel_sasa < 0.40:
+        return 0.70 + 0.20 * (rel_sasa - 0.25) / 0.15
+    return 1.0
+
+
 def calculate_adjustment_factor(
     positions: List[PositionBuriedness],
     method: str = "relSASA",
+    core_start: Optional[int] = None,
+    core_end: Optional[int] = None,
 ) -> Tuple[float, List[str]]:
-    """Calculate structural risk adjustment factor for a peptide.
+    """Calculate a peptide-level structural adjustment factor.
 
-    Args:
-        positions: list of PositionBuriedness for positions in peptide
-        method: adjustment method ("relSASA", "binary", "tier")
-
-    Returns:
-        (adjustment_factor, rationale_list)
+    The factor is a weighted average over all residues of the peptide, with
+    core residues weighted 1.0 and flanking residues 0.5. Back-mutation tier is
+    never used as a structural weight: tiers describe reversion importance, not
+    the reliability of a buriedness measurement.
     """
-    backmut_positions = [p for p in positions if p.is_backmutation]
     rationale = []
-
-    # If no backmutation positions, use all positions for structural assessment
-    # This handles cases where we don't have backmutation data (e.g., IgFold variants)
-    positions_to_use = backmut_positions if backmut_positions else positions
-
-    if not positions_to_use:
+    if not positions:
         rationale.append("No positions available for structural assessment")
-        return 0.5, rationale  # conservative default
+        return 1.0, rationale
 
-    n_total = len(positions_to_use)
-    n_buried = sum(1 for p in positions_to_use if p.buried is True)
-    n_exposed = sum(1 for p in positions_to_use if p.buried is False)
-    n_uncertain = sum(1 for p in positions_to_use if p.buried is None)
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    n_missing = 0
 
-    if method == "binary":
-        if n_buried == n_total:
-            rationale.append(f"All {n_total} positions buried (relSASA < {BURIED_THRESHOLD})")
-            return RISK_ADJUSTMENT['buried'], rationale
-        elif n_exposed > 0:
-            factor = n_exposed / n_total
-            rationale.append(f"{n_exposed}/{n_total} positions exposed (relSASA > {EXPOSED_THRESHOLD})")
-            return factor, rationale
+    for pos in positions:
+        weight = 1.0
+        if core_start is not None and core_end is not None:
+            weight = 1.0 if core_start <= pos.seq_index < core_end else 0.5
+
+        if pos.rel_sasa > 0:
+            struct_weight = _rel_sasa_weight(pos.rel_sasa)
+        elif pos.buried is True:
+            struct_weight = RISK_ADJUSTMENT['buried']
+        elif pos.buried is False:
+            struct_weight = RISK_ADJUSTMENT['exposed']
         else:
-            rationale.append(f"All {n_total} positions uncertain")
-            return RISK_ADJUSTMENT['uncertain'], rationale
+            struct_weight = RISK_ADJUSTMENT['no_structure']
+            n_missing += 1
 
-    elif method == "relSASA":
-        # Continuous weighting based on relSASA values
-        weighted_sum = 0.0
-        weight_sum = 0.0
-
-        for pos in positions_to_use:
-            # Base weight: importance of this backmutation position
-            tier_weights = {
-                'T1': 1.0,
-                'T2': 0.8,
-                'T3': 0.5,
-                'T_FR4': 0.9,
-                'KEEP_DONOR': 1.0,
-            }
-            base_weight = tier_weights.get(pos.tier or '', 0.6)
-
-            # Structural weight based on relSASA
-            if pos.rel_sasa > 0:
-                # Use continuous relSASA weighting
-                if pos.rel_sasa < 0.10:
-                    struct_weight = 0.05
-                elif pos.rel_sasa < 0.15:
-                    struct_weight = 0.05 + 0.25 * (pos.rel_sasa - 0.10) / 0.05
-                elif pos.rel_sasa < 0.25:
-                    struct_weight = 0.30 + 0.40 * (pos.rel_sasa - 0.15) / 0.10
-                elif pos.rel_sasa < 0.40:
-                    struct_weight = 0.70 + 0.20 * (pos.rel_sasa - 0.25) / 0.15
-                else:
-                    struct_weight = 1.0
-            elif pos.buried is not None:
-                struct_weight = RISK_ADJUSTMENT['buried'] if pos.buried else RISK_ADJUSTMENT['exposed']
+        if method == "binary":
+            if pos.buried is True:
+                struct_weight = RISK_ADJUSTMENT['buried']
+            elif pos.buried is False:
+                struct_weight = RISK_ADJUSTMENT['exposed']
             else:
                 struct_weight = RISK_ADJUSTMENT['no_structure']
 
-            # CDR contact adjustment
-            if pos.cdr_contact:
-                struct_weight = max(struct_weight, 0.6)
-                rationale.append(f"{pos.position}: CDR contact (structurally relevant)")
+        if pos.cdr_contact and pos.rel_sasa > 0:
+            struct_weight = max(struct_weight, 0.6)
+            rationale.append(f"{pos.position}: CDR contact (structurally relevant)")
 
-            weighted_sum += base_weight * struct_weight
-            weight_sum += base_weight
+        weighted_sum += weight * struct_weight
+        weight_sum += weight
+        rationale.append(
+            f"{pos.position}: relSASA={pos.rel_sasa:.3f}, "
+            f"weight={struct_weight:.3f}, core={weight:.1f}"
+        )
 
-            rationale.append(
-                f"{pos.position}: relSASA={pos.rel_sasa:.3f}, "
-                f"weight={struct_weight:.3f}"
-            )
-
-        factor = weighted_sum / weight_sum if weight_sum > 0 else 0.5
-        return factor, rationale
-
-    else:
+    if method not in ("relSASA", "binary"):
         raise ValueError(f"Unknown method: {method}")
+    if weight_sum == 0:
+        return 1.0, rationale
+
+    factor = weighted_sum / weight_sum
+    if n_missing == len(positions):
+        rationale.append("No structure data for any peptide position; no adjustment applied")
+        return 1.0, rationale
+    return factor, rationale
 
 
 # ---------------------------------------------------------------------------
@@ -459,11 +513,45 @@ def _rekey_structure_by_label(
         return int(m.group(1)) if m else 0
 
     ordered = sorted(structure_data.items(), key=lambda kv: _resseq(kv[0]))
+    if len(ordered) != len(position_labels):
+        print(
+            f"  WARNING: structure has {len(ordered)} residues but "
+            f"{len(position_labels)} labels; label alignment may be shifted",
+            file=sys.stderr,
+        )
     rekeyed: Dict[str, PositionBuriedness] = {}
     for (key, val), label in zip(ordered, position_labels):
         val.position = label
         rekeyed[label] = val
     return rekeyed
+
+
+def filter_backmutations_for_variant(
+    backmutations: Optional[List[Dict]],
+    sequence: str,
+    position_labels: Optional[List[str]],
+    chain_type: str,
+) -> List[Dict]:
+    """Keep only candidate positions actually reverted in this variant."""
+    if not backmutations:
+        return []
+    label_to_idx = {label: i for i, label in enumerate(position_labels or [])}
+    out: List[Dict] = []
+    for bm in backmutations:
+        pos = str(bm.get('position', ''))
+        if not pos.startswith(chain_type):
+            continue
+        idx = label_to_idx.get(pos)
+        if idx is None and not label_to_idx:
+            num = _kabat_num(pos)
+            idx = num - 1 if num is not None else None
+        if idx is None or not (0 <= idx < len(sequence)):
+            continue
+        donor = str(bm.get('donor_aa', '')).upper()
+        human = str(bm.get('human_aa', '')).upper()
+        if donor and donor != human and sequence[idx].upper() == donor:
+            out.append(bm)
+    return out
 
 
 def assess_variant_structural_risk(
@@ -476,71 +564,47 @@ def assess_variant_structural_risk(
     method: str = "relSASA",
     position_labels: Optional[List[str]] = None,
 ) -> VariantStructuralRisk:
-    """Assess structural risk for a variant using its actual structure.
-
-    This is the two-step approach:
-    1. Use sequence-based scores (from HLAIIPred/heuristic)
-    2. Adjust based on structural buriedness from actual variant structure
-
-    Args:
-        variant_name: variant identifier (e.g. "H_V2")
-        chain_type: "H" or "L"
-        sequence: full chain sequence
-        per_peptide_hits: list of peptide dicts from HLAIIPred
-        structure_path: path to variant PDB file
-        backmutations: list of backmutation dicts from pipeline
-        method: adjustment method
-        position_labels: optional per-residue labels aligned to ``sequence``
-            (Kabat or IMGT, matching the pipeline run); enables exact
-            backmutation/FR4 matching.
-
-    Returns:
-        VariantStructuralRisk with adjusted scores
-    """
-    # Compute relSASA from variant structure
-    structure_data = compute_rel_sasa(structure_path, chain_type)
+    """Assess one variant against its own structure."""
+    structure_data = compute_rel_sasa(
+        structure_path, chain_type, expected_sequence=sequence)
     if position_labels:
         structure_data = _rekey_structure_by_label(
             structure_data, chain_type, position_labels)
 
-    # Assess each peptide
+    variant_backmuts = filter_backmutations_for_variant(
+        backmutations, sequence, position_labels, chain_type)
+
     peptides = []
+    search_cursor = 0
     for hit in per_peptide_hits:
         peptide = hit.get('peptide', '')
-        score = hit.get('score', 0.0)
-        start_idx = hit.get('core_pos', 0) if 'core_pos' in hit else 0
-
-        # Find peptide position in sequence
-        # Try to find exact match
-        seq_idx = sequence.find(peptide)
-        if seq_idx >= 0:
-            start_idx = seq_idx
+        score = float(hit.get('score', 0.0) or 0.0)
+        if 'start_index' in hit and hit.get('start_index') is not None:
+            start_idx = int(hit.get('start_index'))
         else:
-            # Use provided position or approximate
-            start_idx = hit.get('start_index', start_idx)
+            found = sequence.find(peptide, search_cursor)
+            if found < 0:
+                found = sequence.find(peptide)
+            start_idx = found if found >= 0 else int(hit.get('core_pos', 0) or 0)
+            search_cursor = max(search_cursor, start_idx + 1)
 
-        end_idx = start_idx + len(peptide)
+        core_pos = int(hit.get('core_pos', 0) or 0)
+        core_start = start_idx + core_pos
+        core_end = min(len(sequence), core_start + 9)
+        end_idx = min(len(sequence), start_idx + len(peptide))
 
-        # Map peptide to positions
         positions = map_peptide_positions(
             start_idx, end_idx, sequence, chain_type,
-            structure_data, backmutations, position_labels=position_labels
+            structure_data, variant_backmuts, position_labels=position_labels
         )
-
-        # Calculate adjustment factor
-        factor, rationale = calculate_adjustment_factor(positions, method)
-
-        # Count position categories (use all positions if no backmutation data)
-        backmut_positions = [p for p in positions if p.is_backmutation]
-        if backmut_positions:
-            count_positions = backmut_positions
-        else:
-            count_positions = positions  # use all positions for counting
-        n_buried = sum(1 for p in count_positions if p.buried is True)
-        n_exposed = sum(1 for p in count_positions if p.buried is False)
-        n_uncertain = sum(1 for p in count_positions if p.buried is None)
-
+        factor, rationale = calculate_adjustment_factor(
+            positions, method, core_start=core_start, core_end=core_end)
         adjusted_score = score * factor
+
+        n_buried = sum(1 for p in positions if p.buried is True)
+        n_exposed = sum(1 for p in positions if p.buried is False)
+        n_uncertain = sum(1 for p in positions if p.buried is None)
+        n_backmutation = sum(1 for p in positions if p.is_backmutation)
 
         peptides.append(PeptideRiskAssessment(
             peptide=peptide,
@@ -553,14 +617,14 @@ def assess_variant_structural_risk(
             n_buried=n_buried,
             n_exposed=n_exposed,
             n_uncertain=n_uncertain,
-            n_backmutation=len(backmut_positions),
+            n_backmutation=n_backmutation,
             rationale=rationale,
         ))
 
-    # Calculate overall adjustment (weighted by raw score)
     total_raw = sum(p.raw_score for p in peptides)
     total_adjusted = sum(p.adjusted_score for p in peptides)
     overall_adjustment = total_adjusted / total_raw if total_raw > 0 else 1.0
+    adjusted_mean = (total_adjusted / len(peptides)) if peptides else None
 
     return VariantStructuralRisk(
         variant_name=variant_name,
@@ -568,6 +632,7 @@ def assess_variant_structural_risk(
         sequence=sequence,
         peptides=peptides,
         overall_adjustment=overall_adjustment,
+        adjusted_mean=adjusted_mean,
         structure_source=os.path.basename(structure_path),
     )
 
@@ -642,6 +707,10 @@ def load_backmutations_from_csv(csv_path: str) -> List[Dict]:
     with open(csv_path) as f:
         reader = csv.DictReader(f)
         for row in reader:
+            try:
+                composite = float(row.get('composite') or 0)
+            except (TypeError, ValueError):
+                composite = 0.0
             backmutations.append({
                 'position': row.get('position', ''),
                 'donor_aa': row.get('donor_aa', ''),
@@ -650,7 +719,7 @@ def load_backmutations_from_csv(csv_path: str) -> List[Dict]:
                 'buried': row.get('buried', '') == 'True',
                 'cdr_contact': row.get('cdr_contact', '') == 'True',
                 'antigen_contact': row.get('antigen_contact', '') == 'True',
-                'composite': float(row.get('composite', 0)),
+                'composite': composite,
             })
     return backmutations
 
@@ -676,8 +745,11 @@ def generate_structural_risk_report(
         "1. **Sequence-based analysis**: HLAIIPred/heuristic predicts MHC-II binding from sequence",
         "2. **Structure-based confirmation**: FreeSASA computes relSASA from actual variant structure",
         "",
-        "**Key principle**: Buried residues (relSASA < 0.20) are less accessible to MHC-II",
+        "**Key principle**: Buried residues (relSASA < 0.15) are less accessible to MHC-II",
         "antigen processing, so sequence-based predictions may overestimate risk.",
+        "",
+        "The adjusted mean is used to rewrite the final immunogenicity score in the "
+        "main report (relative to the adjusted reference mean).",
         "",
         "---",
         "",
@@ -688,6 +760,14 @@ def generate_structural_risk_report(
         lines.append("")
         lines.append(f"- **Structure**: {assessment.structure_source}")
         lines.append(f"- **Overall adjustment**: {assessment.overall_adjustment:.3f}")
+        if assessment.adjusted_mean is not None:
+            lines.append(f"- **Adjusted mean epitope load**: {assessment.adjusted_mean:.3f}")
+        if assessment.adjusted_immunogenicity_score is not None:
+            lines.append(
+                f"- **Final structural immunogenicity score**: "
+                f"{assessment.adjusted_immunogenicity_score:.1f}%")
+        if assessment.error:
+            lines.append(f"- **Error**: {assessment.error}")
         lines.append("")
 
         # Peptide summary table
@@ -747,13 +827,17 @@ def generate_structural_risk_report(
     if len(assessments) > 1:
         lines.append("## Cross-Variant Comparison")
         lines.append("")
-        lines.append("| Variant | Structure | Overall Adj | High-Risk Peptides |")
-        lines.append("|---------|-----------|-------------|-------------------|")
+        lines.append("| Variant | Structure | Overall Adj | Adj Mean | Final Score | High-Risk Peptides |")
+        lines.append("|---------|-----------|-------------|----------|-------------|-------------------|")
         for a in assessments:
             n_high = sum(1 for p in a.peptides if p.adjusted_score > 0.5)
+            adj_mean = (f"{a.adjusted_mean:.3f}"
+                        if a.adjusted_mean is not None else "N/A")
+            score = (f"{a.adjusted_immunogenicity_score:.1f}%"
+                     if a.adjusted_immunogenicity_score is not None else "N/A")
             lines.append(
                 f"| {a.variant_name} | {a.structure_source} | "
-                f"{a.overall_adjustment:.3f} | {n_high} |"
+                f"{a.overall_adjustment:.3f} | {adj_mean} | {score} | {n_high} |"
             )
         lines.append("")
 
@@ -795,6 +879,14 @@ def generate_structural_risk_word(
         doc.add_heading(f"{assessment.variant_name} ({assessment.chain_type} chain)", level=1)
         doc.add_paragraph(f"Structure: {assessment.structure_source}")
         doc.add_paragraph(f"Overall adjustment: {assessment.overall_adjustment:.3f}")
+        if assessment.adjusted_mean is not None:
+            doc.add_paragraph(f"Adjusted mean epitope load: {assessment.adjusted_mean:.3f}")
+        if assessment.adjusted_immunogenicity_score is not None:
+            doc.add_paragraph(
+                "Final structural immunogenicity score: "
+                f"{assessment.adjusted_immunogenicity_score:.1f}%")
+        if assessment.error:
+            doc.add_paragraph(f"Error: {assessment.error}")
 
         # Peptide summary table
         doc.add_heading("Peptide Risk Summary", level=2)
@@ -875,10 +967,10 @@ def generate_structural_risk_word(
     # Cross-variant comparison
     if len(assessments) > 1:
         doc.add_heading("Cross-Variant Comparison", level=1)
-        table3 = doc.add_table(rows=1 + len(assessments), cols=4)
+        table3 = doc.add_table(rows=1 + len(assessments), cols=6)
         table3.style = "Table Grid"
         for i, h in enumerate(["Variant", "Structure", "Overall Adj",
-                               "High-Risk Peptides"]):
+                               "Adj Mean", "Final Score", "High-Risk Peptides"]):
             cell = table3.rows[0].cells[i]
             cell.text = h
             for p in cell.paragraphs:
@@ -892,6 +984,9 @@ def generate_structural_risk_word(
                 a.variant_name,
                 a.structure_source,
                 f"{a.overall_adjustment:.3f}",
+                f"{a.adjusted_mean:.3f}" if a.adjusted_mean is not None else "N/A",
+                (f"{a.adjusted_immunogenicity_score:.1f}%"
+                 if a.adjusted_immunogenicity_score is not None else "N/A"),
                 str(n_high),
             ]
             for ci, val in enumerate(vals):
@@ -904,6 +999,68 @@ def generate_structural_risk_word(
 # Main function
 # ---------------------------------------------------------------------------
 
+def _structure_names(vname: str) -> List[str]:
+    variant_part = vname.split('_', 1)[1] if '_' in vname else vname
+    bases = []
+    for base in (vname, variant_part, vname.replace('_', ''),
+                 variant_part.replace('_', '')):
+        if base and base not in bases:
+            bases.append(base)
+    names: List[str] = []
+    for base in bases:
+        for prefix in ('', 'igfold_', 'af3_', 'boltz_', 'protenix_'):
+            for suffix in ('.pdb', '.cif'):
+                for value in (base, base.lower()):
+                    names.append(f"{prefix}{value}{suffix}")
+    seen = set()
+    return [n for n in names if not (n in seen or seen.add(n))]
+
+
+def _find_structure(structure_dir: str, vname: str) -> Optional[str]:
+    names = _structure_names(vname)
+    for name in names:
+        candidate = os.path.join(structure_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+    for root, _dirs, _files in os.walk(structure_dir):
+        for name in names:
+            candidate = os.path.join(root, name)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def _load_chain_backmutations(csv_dir: Optional[str], chain_type: str) -> List[Dict]:
+    if not csv_dir:
+        return []
+    import glob
+    patterns = [
+        f'backmutations_*.{chain_type}.csv',
+        f'backmutations_{chain_type}.csv',
+    ]
+    for pattern in patterns:
+        matches = sorted(glob.glob(os.path.join(csv_dir, pattern)))
+        if matches:
+            return load_backmutations_from_csv(matches[0])
+    return []
+
+
+def _recompute_counts(vdata: Dict, strong_threshold: float,
+                      weak_threshold: float) -> None:
+    scores = [float(p.get('adjusted_score', 0.0))
+              for p in vdata.get('adjusted_peptides', [])]
+    if not scores:
+        return
+    n_strong = sum(1 for s in scores if s >= strong_threshold)
+    n_weak = sum(1 for s in scores if weak_threshold <= s < strong_threshold)
+    vdata['n_strong'] = n_strong
+    vdata['n_weak'] = n_weak
+    vdata['n_total_windows'] = len(scores)
+    vdata['epitope_density'] = round((n_strong + n_weak) / len(scores), 4)
+    vdata['mean_epitope_load'] = round(sum(scores) / len(scores), 4)
+    vdata['max_epitope'] = round(max(scores), 4)
+
+
 def run_structural_risk_assessment(
     immunogenicity_results: Dict,
     structure_dir: str,
@@ -913,32 +1070,11 @@ def run_structural_risk_assessment(
     verbose: bool = False,
     numbering_json: Optional[str] = None,
 ) -> Dict:
-    """Run structural risk assessment on immunogenicity results.
-
-    This is the main entry point for the two-step workflow.
-
-    Args:
-        immunogenicity_results: output from immunogenicity_analyzer
-        structure_dir: directory containing variant PDB files
-        backmutation_csv_dir: directory containing backmutation CSVs
-        output_dir: directory for output files
-        method: adjustment method
-        verbose: print progress
-        numbering_json: optional ``variants_numbering.json`` path
-            (per-variant labels in the run's coordinate space, Kabat or
-            IMGT). When omitted it is auto-discovered in
-            ``backmutation_csv_dir``. Without it, backmutation/FR4 positions
-            are matched only approximately (sequence index vs label).
-
-    Returns:
-        Updated results with structural risk adjustments
-    """
+    """Run variant-specific structural adjustment and rewrite final scores."""
     if output_dir is None:
         output_dir = os.path.dirname(immunogenicity_results.get('input_fasta', '.'))
-
     os.makedirs(output_dir, exist_ok=True)
 
-    # Per-variant labels (Kabat/IMGT): explicit path, else auto-discover.
     if numbering_json is None and backmutation_csv_dir:
         cand = os.path.join(backmutation_csv_dir, 'variants_numbering.json')
         if os.path.isfile(cand):
@@ -951,133 +1087,121 @@ def run_structural_risk_assessment(
         print("  WARNING: no variants_numbering.json found; backmutation/FR4 "
               "matching falls back to sequence index (approximate)")
 
-    assessments = []
+    strong_threshold = float(immunogenicity_results.get('strong_threshold', 0.5))
+    weak_threshold = float(immunogenicity_results.get('weak_threshold', 0.3))
+    assessments: List[VariantStructuralRisk] = []
 
     for chain_type, cdata in immunogenicity_results.get('chains', {}).items():
         variants = cdata.get('variants', {})
+        backmutations = _load_chain_backmutations(backmutation_csv_dir, chain_type)
+        if verbose and backmutations:
+            print(f"  Loaded {len(backmutations)} backmutation candidates for chain {chain_type}")
 
-        # Load backmutations if available
-        backmutations = []
-        if backmutation_csv_dir:
-            # Try various naming patterns for backmutation CSV files
-            possible_csv_names = [
-                f'backmutations_{chain_type}.csv',
-                f'backmutations_*.{chain_type}.csv',
-            ]
-            for pattern in possible_csv_names:
-                if '*' in pattern:
-                    # Use glob to find matching files
-                    import glob
-                    matches = glob.glob(os.path.join(backmutation_csv_dir, pattern))
-                    if matches:
-                        csv_path = matches[0]  # Use the first match
-                        if os.path.isfile(csv_path):
-                            backmutations = load_backmutations_from_csv(csv_path)
-                            if verbose:
-                                print(f"  Loaded {len(backmutations)} backmutations from {csv_path}")
-                            break
-                else:
-                    csv_path = os.path.join(backmutation_csv_dir, pattern)
-                    if os.path.isfile(csv_path):
-                        backmutations = load_backmutations_from_csv(csv_path)
-                        if verbose:
-                            print(f"  Loaded {len(backmutations)} backmutations from {csv_path}")
-                        break
-
+        assessed_names = []
         for vname, vdata in variants.items():
-            # Find structure file
-            # Try various naming patterns
-            structure_path = None
-
-            # Extract variant name without chain prefix (e.g., "H_V0" -> "V0")
-            variant_part = vname.split('_', 1)[1] if '_' in vname else vname
-
-            possible_names = [
-                f"igfold_amg110_{variant_part}.pdb",
-                f"igfold_{variant_part}.pdb",
-                f"igfold_amg110_{variant_part.lower()}.pdb",
-                f"igfold_{variant_part.lower()}.pdb",
-                f"amg110_{variant_part}.pdb",
-                f"amg110_{variant_part.lower()}.pdb",
-                f"{variant_part}.pdb",
-                f"{variant_part.lower()}.pdb",
-                f"igfold_{vname.replace('_', '')}.pdb",
-                f"igfold_{vname.lower().replace('_', '')}.pdb",
-                f"amg110_{vname.replace('_', '')}.pdb",
-                f"amg110_{vname.lower().replace('_', '')}.pdb",
-                f"{vname}.pdb",
-                f"{vname.lower()}.pdb",
-            ]
-            for pname in possible_names:
-                candidate = os.path.join(structure_dir, pname)
-                if os.path.isfile(candidate):
-                    structure_path = candidate
-                    break
-
-            # Also check subdirectories
+            vdata['structural_score_applied'] = False
+            vdata['structural_adjustment'] = None
+            structure_path = _find_structure(structure_dir, vname)
             if structure_path is None:
-                for root, dirs, files in os.walk(structure_dir):
-                    for pname in possible_names:
-                        candidate = os.path.join(root, pname)
-                        if os.path.isfile(candidate):
-                            structure_path = candidate
-                            break
-                    if structure_path:
-                        break
-
-            if structure_path is None:
+                vdata['structural_error'] = "no structure file found"
                 if verbose:
                     print(f"  WARNING: No structure found for {vname}")
                 continue
 
-            if verbose:
-                print(f"  Assessing {vname} with {os.path.basename(structure_path)}")
-
-            # Run assessment
             labels = _labels_for_variant(numbering, vname, chain_type)
-            assessment = assess_variant_structural_risk(
-                variant_name=vname,
-                chain_type=chain_type,
-                sequence=vdata.get('sequence', ''),
-                per_peptide_hits=vdata.get('per_peptide_hits', []),
-                structure_path=structure_path,
-                backmutations=backmutations,
-                method=method,
-                position_labels=labels,
-            )
-            assessments.append(assessment)
-
+            variant_backmuts = filter_backmutations_for_variant(
+                backmutations, vdata.get('sequence', ''), labels, chain_type)
             if verbose:
-                print(f"    Assessment result: adjustment={assessment.overall_adjustment:.3f}, "
-                      f"peptides={len(assessment.peptides)}")
+                print(f"  Assessing {vname} with {os.path.basename(structure_path)} "
+                      f"({len(variant_backmuts)} reverted positions)")
 
-            # Update results with adjusted scores
-            vdata['structural_adjustment'] = assessment.overall_adjustment
+            try:
+                assessment = assess_variant_structural_risk(
+                    variant_name=vname,
+                    chain_type=chain_type,
+                    sequence=vdata.get('sequence', ''),
+                    per_peptide_hits=vdata.get('per_peptide_hits', []),
+                    structure_path=structure_path,
+                    backmutations=variant_backmuts,
+                    method=method,
+                    position_labels=labels,
+                )
+            except Exception as exc:
+                vdata['structural_error'] = str(exc)
+                vdata['structural_adjustment'] = None
+                if verbose:
+                    print(f"    structural assessment failed: {exc}")
+                continue
+
+            assessments.append(assessment)
+            assessed_names.append(vname)
+            vdata.pop('structural_error', None)
+            vdata['structural_adjustment'] = round(assessment.overall_adjustment, 4)
+            vdata['structural_source'] = assessment.structure_source
+            vdata['structural_adjusted_mean'] = (
+                round(assessment.adjusted_mean, 4)
+                if assessment.adjusted_mean is not None else None)
+            vdata['raw_mean_epitope_load'] = vdata.get('raw_mean_epitope_load',
+                                                       vdata.get('mean_epitope_load'))
             vdata['adjusted_peptides'] = [
                 {
                     'peptide': p.peptide,
+                    'start_index': p.start_index,
                     'raw_score': p.raw_score,
                     'adjusted_score': p.adjusted_score,
                     'adjustment_factor': p.adjustment_factor,
                     'n_buried': p.n_buried,
                     'n_exposed': p.n_exposed,
+                    'n_backmutation': p.n_backmutation,
                 }
                 for p in assessment.peptides
-                if p.raw_score >= 0.3
             ]
-            if verbose:
-                print(f"    Updated {vname}: adjustment={assessment.overall_adjustment:.3f}, "
-                      f"peptides={len(vdata['adjusted_peptides'])}")
+            _recompute_counts(vdata, strong_threshold, weak_threshold)
 
-    # Generate reports
+        ref_name = cdata.get('reference_name')
+        ref_adj_mean = None
+        if ref_name and ref_name in variants:
+            ref_adj_mean = variants[ref_name].get('structural_adjusted_mean')
+        donor_m = cdata.get('donor_metrics') or {}
+        if ref_adj_mean is None:
+            ref_adj_mean = donor_m.get('mean')
+        cdata['structural_reference_name'] = ref_name
+        cdata['structural_reference_mean'] = ref_adj_mean
+
+        for vname in assessed_names:
+            vdata = variants[vname]
+            adj_mean = vdata.get('structural_adjusted_mean')
+            if adj_mean is None:
+                continue
+            if ref_adj_mean and ref_adj_mean > 0:
+                score = adj_mean / ref_adj_mean * 100.0
+            else:
+                score = adj_mean * 100.0
+            vdata['immunogenicity_score'] = round(score, 1)
+            vdata['structural_immunogenicity_score'] = round(score, 1)
+            vdata['structural_score_applied'] = True
+            assessment = next(a for a in assessments
+                              if a.variant_name == vname and a.chain_type == chain_type)
+            assessment.adjusted_immunogenicity_score = round(score, 1)
+            if verbose:
+                print(f"    {vname}: adjusted mean={adj_mean:.3f}, "
+                      f"score={score:.1f}%")
+
+    immunogenicity_results['structural_risk'] = {
+        'method': method,
+        'applied_to_final_score': True,
+        'score_semantics': ('percent of structurally adjusted reference mean; '
+                            '>100 means higher than reference'),
+    }
+    immunogenicity_results['score_semantics'] = (
+        'structural: percent of structurally adjusted reference mean; '
+        '>100 means higher than reference')
+
     if assessments:
-        # Markdown report
         md_path = os.path.join(output_dir, 'structural_risk_assessment.md')
         generate_structural_risk_report(assessments, md_path)
         if verbose:
             print(f"  Generated Markdown report: {md_path}")
-
-        # Word report
         docx_path = os.path.join(output_dir, 'structural_risk_assessment.docx')
         generate_structural_risk_word(assessments, docx_path)
         if verbose:
