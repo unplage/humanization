@@ -199,13 +199,20 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py   --input <fasta> --dono
 7. Strong/Weak 为残基计数 → **肽窗口计数**
 ### 5. TAP 可开发性分析 (tap_profiler)
 
-**功能**：预测 TAP 转运效率
+**功能**：Therapeutic Antibody Profiler（Raybould 2019/2024）五项可开发性指标：
+Ltot（总 CDR 长度）、PSH（表面疏水斑块）、PPC/PNC（正/负电荷斑块）、SFvCSP（VH/VL 表面电荷乘积）。
+结构模式需要 ANARCI + FreeSASA（或 JOY `psa`）；序列模式只算 Ltot。
 
 **用法**：
 ```bash
+# 结构（默认 ANARCI IMGT 编号 + FreeSASA + Fv 作用域 + 2024 阈值）
 python3 tools/tap_profiler/tap_analyzer.py \
-  --input <fasta> --output <outdir>
+  --pdb structure.pdb --output outputs/tap/
+
+# 序列模式（仅 Ltot）
+python3 tools/tap_profiler/tap_analyzer.py --vh <VH_SEQ> --vl <VL_SEQ>
 ```
+详见 `tools/tap_profiler/README.md`。
 
 ---
 

@@ -82,7 +82,7 @@ CONSERVED_CYS = {
 
 # Maximum SASA values for amino acids. Tien et al. 2013 (PLoS ONE 8(11):e80635),
 # Table 1 "Theoretical" / ALLOWED-region scale; identical table to
-# scripts/humanize/structure.py (ref_sasa) and tools/tap_profiler/tap_analyzer.py.
+# scripts/humanize/structure.py (ref_sasa) and tools/tap_profiler/tap_core.py.
 # NOTE: this table previously held the Miller et al. 1987 values while citing
 # Tien 2013. Miller underestimates maxASA by up to ~28% (ASP 151 vs 193),
 # which systematically inflated relSASA and biased borderline sites toward
