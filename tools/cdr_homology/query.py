@@ -1,900 +1,919 @@
 #!/usr/bin/env python3
-"""CDR Homology Analysis — query clinical antibody database.
+"""CDR Homology Analysis -- compare antibody CDRs against a clinical database.
 
 Usage:
     # Single query (VH + VL)
     python3 tools/cdr_homology/query.py \
-        --vh QVQLVQSGAEVKKPGASVKVSCKASGYTFTSYWMHWVRQAPGQGLEWIG... \
-        --vl DIQMTQSPSSLSASVGDRVTITCRASQGISSYLAWYQQKPGKAPKLLI... \
+        --vh QVQLVQSGAEVKKPGASVKVSCKAS... --vl DIQMTQSPSSLSASVGDRVTITC... \
         --top 5 --output outputs/cdr_homology/
 
-    # From FASTA (pairs of VH/VL by header suffix)
+    # From FASTA (VH/VL paired by header suffix)
     python3 tools/cdr_homology/query.py \
         --input query.fasta --top 5 --output outputs/cdr_homology/
+
+Exit codes:
+    0  success
+    1  fatal error (database missing, no queries, unreadable input)
+    2  partial success: some query chains could not be numbered (reports are
+       still written, but the affected CDRs are marked N/A and listed under
+       "Errors" in the report)
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
+import statistics
 import sys
-import textwrap
-from collections import Counter, defaultdict
-from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import cdr_core as core  # noqa: E402
+
+# Backwards-compatible names: the numbering/CDR helpers moved into cdr_core.
+_extract_cdrs_from_posmap = core.extract_cdrs_from_posmap
+extract_cdrs = core.extract_cdrs
+_number_anarci = core.number_sequence_imgt
 
 
 # ---------------------------------------------------------------------------
-# ANARCI CDR extraction (self-contained, no pipeline imports)
+# Query input parsing
 # ---------------------------------------------------------------------------
 
-_IMGT_CDR_RANGES = {
-    "CDR1": (27, 38),
-    "CDR2": (56, 65),
-    "CDR3": (105, 117),
-}
+_HEAVY_MARKERS = ("VH", "HEAVY", "IGH")
+_LIGHT_MARKERS = ("VL", "LIGHT", "KAPPA", "LAMBDA", "IGK", "IGL")
 
 
-def _position_number(label: str):
-    """Numeric IMGT position of a label like 'H105' or 'H111A'."""
-    digits = "".join(c for c in label[1:] if c.isdigit())
-    return int(digits) if digits else None
+def _header_chain_hint(header: str):
+    """Return ``'H'``/``'L'`` when the header states a chain type, else None."""
+    token = header.split()[0].upper()
+    if "|" in token:
+        token = token.split("|")[1]
+    # Check the light markers first: "VL" contains no "VH", but a header such
+    # as "VL_Heavy" would otherwise match the heavy test first.
+    for marker in _LIGHT_MARKERS:
+        if marker in token:
+            return "L"
+    for marker in _HEAVY_MARKERS:
+        if marker in token:
+            return "H"
+    return None
 
 
-def _extract_cdrs_from_posmap(posmap: dict, chain_type: str) -> dict:
-    """Extract CDR1/CDR2/CDR3 from an IMGT position map.
+def _classify_record(header: str, sequence: str):
+    """Return ``('H'|'L', 'header'|'anarci'|'default')`` for a FASTA record."""
+    hint = _header_chain_hint(header)
+    if hint:
+        return hint, "header"
+    detected = core.detect_chain_type(sequence)
+    if detected:
+        return detected, "anarci"
+    # Last resort: a heavy chain is longer on average.  Flagged as a guess.
+    return ("H" if len(sequence) > 120 else "L"), "default"
 
-    Iterates the posmap in ANARCI sequence order (not numeric order). IMGT
-    CDR3 insertions run 111, 111A, 111B, ... then 112C, 112B, 112A, 112, so
-    a numeric walk with ascending letters would transpose the loop.
-    """
-    cdrs = {name: "" for name in _IMGT_CDR_RANGES}
-    for label, aa in posmap.items():
-        if not aa or aa == "-" or not label.startswith(chain_type):
+
+def parse_query_inputs(args) -> list:
+    """Return ``[(name, vh_seq, vl_seq, meta), ...]`` from CLI args."""
+    if args.vh or args.vl:
+        name = core.base_name(args.name or "query_1")
+        return [(name, args.vh, args.vl, {"name_source": "--name"})]
+
+    records = core.parse_fasta(args.input)
+    heavy, light = {}, {}
+    for header, sequence in records:
+        if not sequence:
             continue
-        pos_num = _position_number(label)
-        if pos_num is None:
+        chain_type, source = _classify_record(header, sequence)
+        slot = heavy if chain_type == "H" else light
+        slot[header] = (sequence, source)
+
+    order = list(dict.fromkeys([h for h, _ in records]))
+    queries, used = [], set()
+    for header in order:
+        if header in used:
             continue
-        for cdr_name, (start, end) in _IMGT_CDR_RANGES.items():
-            if start <= pos_num <= end:
-                cdrs[cdr_name] += aa
-                break
-    return cdrs
-
-
-def _number_anarci(sequence: str, chain_type: str):
-    """Number a sequence using ANARCI IMGT, return posmap."""
-    try:
-        from anarci import anarci
-    except ImportError:
-        return None
-
-    seq = sequence.upper().strip()
-    try:
-        result = anarci([("q", seq)], scheme="imgt", output=False)
-    except Exception:
-        return None
-
-    try:
-        numbering_list = result[0][0][0][0]
-    except (IndexError, TypeError):
-        return None
-
-    if not numbering_list:
-        return None
-
-    posmap = {}
-    for (pos_num, ins_flag), aa in numbering_list:
-        if aa == "-":
-            continue
-        label = f"{chain_type}{pos_num}{ins_flag}" if ins_flag and ins_flag != " " else f"{chain_type}{pos_num}"
-        posmap[label] = aa.upper()
-    return posmap
-
-
-def extract_cdrs(sequence: str, chain_type: str):
-    """Full CDR extraction: ANARCI numbering + posmap extraction.
-
-    Returns dict {CDR1, CDR2, CDR3} or None on failure.
-    """
-    posmap = _number_anarci(sequence, chain_type)
-    if not posmap:
-        return None
-    return _extract_cdrs_from_posmap(posmap, chain_type)
-
-
-# ---------------------------------------------------------------------------
-# FASTA parsing (self-contained)
-# ---------------------------------------------------------------------------
-
-def parse_fasta(path: str) -> list:
-    """Parse FASTA file into [(header, sequence), ...]."""
-    records = []
-    name, lines = None, []
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                if name is not None:
-                    records.append((name, "".join(lines)))
-                name = line[1:].strip()
-                lines = []
-            else:
-                lines.append(line)
-    if name is not None:
-        records.append((name, "".join(lines)))
-    return records
-
-
-# ---------------------------------------------------------------------------
-# Alignment engine (self-contained, uses Biopython)
-# ---------------------------------------------------------------------------
-
-_aligner = None
-
-
-def _get_aligner(mode="global"):
-    """Lazily build a Biopython PairwiseAligner with BLOSUM62."""
-    global _aligner
-    from Bio.Align import PairwiseAligner, substitution_matrices
-
-    a = PairwiseAligner()
-    a.substitution_matrix = substitution_matrices.load("BLOSUM62")
-    a.open_gap_score = -10
-    a.extend_gap_score = -0.5
-    a.mode = mode
-    return a
-
-
-def align_sequences(query: str, subject: str, is_local: bool = False) -> dict:
-    """Align two sequences, return identity / score / aligned strings.
-
-    Uses BioPython PairwiseAligner with BLOSUM62.
-    All CDRs use global alignment (Needleman-Wunsch) to ensure full-length comparison.
-    Identity is calculated over the aligned length (including gaps).
-
-    Note: BioPython aligner.align() takes (target, query) order.
-    """
-    if not query or not subject:
-        return {"identity": 0.0, "score": 0.0, "matches": 0, "aligned_len": 0,
-                "query_aligned": "", "subject_aligned": ""}
-
-    # Always use global alignment for proper full-length comparison
-    aligner = _get_aligner("global")
-    try:
-        # BioPython: aligner.align(target, query)
-        alignments = aligner.align(subject, query)
-    except Exception:
-        return {"identity": 0.0, "score": 0.0, "matches": 0, "aligned_len": 0,
-                "query_aligned": "", "subject_aligned": ""}
-
-    if not alignments:
-        return {"identity": 0.0, "score": 0.0, "matches": 0, "aligned_len": 0,
-                "query_aligned": "", "subject_aligned": ""}
-
-    best = alignments[0]
-    coords = best.coordinates  # shape (2, num_segments+1)
-    seqs = best.sequences
-    # seqs[0] = target = subject, seqs[1] = query
-
-    # Build aligned strings from segment coordinates
-    q_parts = []
-    s_parts = []
-    for i in range(coords.shape[1] - 1):
-        t_start = int(coords[0, i])
-        t_end = int(coords[0, i + 1])
-        q_start = int(coords[1, i])
-        q_end = int(coords[1, i + 1])
-
-        if t_start == t_end:
-            # Gap in target (subject) — query has insertion
-            q_parts.append(seqs[1][q_start:q_end])
-            s_parts.append("-" * (q_end - q_start))
-        elif q_start == q_end:
-            # Gap in query — subject has deletion
-            q_parts.append("-" * (t_end - t_start))
-            s_parts.append(seqs[0][t_start:t_end])
-        else:
-            # Match/mismatch block
-            q_parts.append(seqs[1][q_start:q_end])
-            s_parts.append(seqs[0][t_start:t_end])
-
-    aln_q = "".join(q_parts)  # query aligned
-    aln_s = "".join(s_parts)  # subject aligned
-
-    # Count matches (exclude gaps)
-    matches = sum(1 for a, b in zip(aln_q, aln_s) if a == b and a not in ("-", "."))
-    aligned_len = max(len(aln_q), 1)
-    identity = matches / aligned_len
-
-    return {
-        "identity": round(identity, 4),
-        "score": round(best.score, 1),
-        "matches": matches,
-        "aligned_len": aligned_len,
-        "query_aligned": aln_q,
-        "subject_aligned": aln_s,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Database loading
-# ---------------------------------------------------------------------------
-
-def load_database(db_path: str) -> list:
-    """Load preprocessed CDR JSON database."""
-    with open(db_path) as f:
-        return json.load(f)
+        base = core.base_name(header)
+        vh = heavy.get(header, (None, None))
+        vl = light.get(header, (None, None))
+        vh_seq, vh_src = vh
+        vl_seq, vl_src = vl
+        if vh_seq and not vl_seq:
+            for other, (seq, src) in light.items():
+                if other not in used and core.base_name(other) == base:
+                    vl_seq, vl_src = seq, src
+                    used.add(other)
+                    break
+        elif vl_seq and not vh_seq:
+            for other, (seq, src) in heavy.items():
+                if other not in used and core.base_name(other) == base:
+                    vh_seq, vh_src = seq, src
+                    used.add(other)
+                    break
+        used.add(header)
+        queries.append((base, vh_seq, vl_seq, {
+            "vh_header": header if vh_seq else None,
+            "vl_header": None,
+            "chain_source": {"VH": vh_src, "VL": vl_src},
+        }))
+    return queries
 
 
 # ---------------------------------------------------------------------------
 # CDR homology search
 # ---------------------------------------------------------------------------
 
-def search_cdr(query_cdr: str, database: list, chain_key: str, cdr_name: str,
-               is_cdr3: bool, top_n: int = 5) -> list:
-    """Find top N matches for a single CDR from the database."""
-    mode = "local" if is_cdr3 else "global"
-    results = []
-
+def _iter_chain_cdrs(database: list, chain_key: str, cdr_name: str):
+    """Yield ``(entry, subject_cdr, chain_source)`` for primary + bispecific."""
     for entry in database:
-        for label_key in (chain_key,):
-            chain_data = entry.get("chains", {}).get(label_key)
-            if not chain_data:
-                continue
+        chain_data = entry.get("chains", {}).get(chain_key)
+        if chain_data:
             subject_cdr = chain_data.get(cdr_name, "")
-            if not subject_cdr:
-                continue
-
-            aln = align_sequences(query_cdr, subject_cdr, is_local=is_cdr3)
-            results.append({
-                "therapeutic": entry["name"],
-                "identity": aln["identity"],
-                "score": aln["score"],
-                "matches": aln["matches"],
-                "aligned_len": aln["aligned_len"],
-                "subject_cdr": subject_cdr,
-                "query_aligned": aln["query_aligned"],
-                "subject_aligned": aln["subject_aligned"],
-                "format": entry.get("format", ""),
-                "genetics": entry.get("genetics", ""),
-                "target": entry.get("target", ""),
-                "highest_trial": entry.get("highest_trial", ""),
-            })
-
-        # also check bispecific chains
-        bispec = entry.get("bispecific", {})
-        if chain_key in bispec:
-            subject_cdr = bispec[chain_key].get(cdr_name, "")
-            if not subject_cdr:
-                continue
-            aln = align_sequences(query_cdr, subject_cdr, is_local=is_cdr3)
-            results.append({
-                "therapeutic": f"{entry['name']} (bispec)",
-                "identity": aln["identity"],
-                "score": aln["score"],
-                "matches": aln["matches"],
-                "aligned_len": aln["aligned_len"],
-                "subject_cdr": subject_cdr,
-                "query_aligned": aln["query_aligned"],
-                "subject_aligned": aln["subject_aligned"],
-                "format": entry.get("format", ""),
-                "genetics": entry.get("genetics", ""),
-                "target": entry.get("target", ""),
-                "highest_trial": entry.get("highest_trial", ""),
-            })
-
-    results.sort(key=lambda x: (-x["identity"], -x["score"]))
-    return results[:top_n]
+            if subject_cdr:
+                yield entry, subject_cdr, "primary"
+        bispec_data = entry.get("bispecific", {}).get(chain_key)
+        if bispec_data:
+            subject_cdr = bispec_data.get(cdr_name, "")
+            if subject_cdr:
+                yield entry, subject_cdr, "bispecific"
 
 
-def run_query(queries: list, database: list, top_n: int = 5) -> list:
-    """Run CDR homology search for all queries.
+def _make_hit(entry, subject_cdr, source, aln) -> dict:
+    return {
+        "therapeutic": entry.get("name", ""),
+        "chain_source": source,
+        "identity": aln["identity"],
+        "identity_global": aln["identity_global"],
+        "identity_over_query": aln["identity_over_query"],
+        "coverage": aln["coverage"],
+        "score": aln["score"],
+        "score_norm": aln["score_norm"],
+        "matches": aln["matches"],
+        "aligned_len": aln["aligned_len"],
+        "subject_cdr": subject_cdr,
+        "query_aligned": aln["query_aligned"],
+        "subject_aligned": aln["subject_aligned"],
+        "mode": aln["mode"],
+        "format": entry.get("format", ""),
+        "genetics": entry.get("genetics", ""),
+        "target": entry.get("target", ""),
+        "highest_trial": entry.get("highest_trial", ""),
+    }
 
-    queries: [(name, vh_seq, vl_seq), ...]
-    Returns per-query result dicts.
+
+def search_cdr(query_cdr: str, database: list, chain_key: str, cdr_name: str,
+               top_n: int = 5, mode: str = "auto",
+               min_score: float = 0.0, min_identity: float = 0.0) -> dict:
+    """Find the top-N homologous database CDRs for one query CDR.
+
+    Returns a dict with the ranked ``top_matches``, the number of candidates
+    scanned/filtered, and the background identity distribution that gives the
+    top hit a statistical context.
     """
-    all_results = []
-    for name, vh_seq, vl_seq in queries:
-        print(f"  Processing {name} ...")
-        result = {"name": name, "vh_seq": vh_seq, "vl_seq": vl_seq, "cdrs": {}, "matches": {}}
+    aln_mode = core.cdr_mode(cdr_name, mode)
+    hits = []
+    all_identities = []
+    n_candidates = 0
+    n_filtered = 0
 
-        # Extract query CDRs
-        for chain_key, seq in [("VH", vh_seq), ("VL", vl_seq)]:
+    for entry, subject_cdr, source in _iter_chain_cdrs(database, chain_key, cdr_name):
+        n_candidates += 1
+        aln = core.align_sequences(query_cdr, subject_cdr, aln_mode)
+        all_identities.append(aln["identity"])
+        if aln["identity"] < min_identity or aln["score"] < min_score:
+            n_filtered += 1
+            continue
+        hits.append(_make_hit(entry, subject_cdr, source, aln))
+
+    hits.sort(key=lambda h: (-h["identity"], -h["score_norm"], -h["score"],
+                             h["therapeutic"], h["chain_source"]))
+
+    top = hits[:top_n]
+    background = 0.0
+    percentile = None
+    if all_identities:
+        background = round(statistics.median(all_identities), 4)
+        if top:
+            top_id = top[0]["identity"]
+            at_least = sum(1 for i in all_identities if i >= top_id)
+            percentile = round(at_least / len(all_identities), 4)
+
+    return {
+        "query_cdr": query_cdr,
+        "query_len": len(query_cdr),
+        "mode": aln_mode,
+        "n_candidates": n_candidates,
+        "n_filtered": n_filtered,
+        "background_median_identity": background,
+        "top_match_percentile": percentile,
+        "top_match": top[0] if top else None,
+        "top_matches": top,
+    }
+
+
+def run_query(queries: list, database: list, top_n: int = 5, mode: str = "auto",
+              min_score: float = 0.0, min_identity: float = 0.0) -> list:
+    """Run the CDR homology search for every query; collect per-chain errors."""
+    all_results = []
+    for name, vh_seq, vl_seq, meta in queries:
+        print(f"  Processing {name} ...")
+        kind, kind_info = core.chain_kind(vh_seq, vl_seq)
+        result = {
+            "name": name,
+            "kind": kind,
+            "kind_info": kind_info,
+            "vh_seq": vh_seq,
+            "vl_seq": vl_seq,
+            "chain_source": meta.get("chain_source", {}),
+            "cdrs": {},
+            "matches": {},
+            "errors": [],
+        }
+        for chain_key, seq in (("VH", vh_seq), ("VL", vl_seq)):
             if not seq:
                 continue
-            cdrs = extract_cdrs(seq, chain_key[1])  # H or L
-            if cdrs:
-                result["cdrs"][chain_key] = cdrs
-                for cdr_name, cdr_seq in cdrs.items():
-                    full_key = f"{chain_key}_{cdr_name}"
-                    is_cdr3 = "CDR3" in cdr_name
-                    top_matches = search_cdr(cdr_seq, database, chain_key, cdr_name, is_cdr3, top_n)
-                    result["matches"][full_key] = {
-                        "query_cdr": cdr_seq,
-                        "query_len": len(cdr_seq),
-                        "top_match": top_matches[0] if top_matches else None,
-                        "top_matches": top_matches,
-                    }
+            chain_type = chain_key[1]  # 'H' or 'L'
+            posmap = core.number_sequence_imgt(seq, chain_type)
+            if not posmap:
+                result["errors"].append(
+                    f"{chain_key}: ANARCI could not number this chain "
+                    f"({len(seq)} aa); its CDRs are N/A")
+                print(f"    [ERROR] {chain_key} could not be numbered by ANARCI",
+                      file=sys.stderr)
+                continue
+            cdrs = core.extract_cdrs_from_posmap(posmap, chain_type)
+            result["cdrs"][chain_key] = cdrs
+            for cdr_name, cdr_seq in cdrs.items():
+                if not cdr_seq:
+                    result["errors"].append(
+                        f"{chain_key}_{cdr_name}: empty after IMGT extraction")
+                    continue
+                full_key = f"{chain_key}_{cdr_name}"
+                result["matches"][full_key] = search_cdr(
+                    cdr_seq, database, chain_key, cdr_name,
+                    top_n=top_n, mode=mode,
+                    min_score=min_score, min_identity=min_identity)
         all_results.append(result)
     return all_results
 
 
 # ---------------------------------------------------------------------------
-# Report generation (Markdown + CSV)
+# Statistics helpers
 # ---------------------------------------------------------------------------
 
-def generate_report(all_results: list, database_stats: dict, output_dir: str, top_n: int):
-    """Generate Markdown summary + per-query CSV detail files."""
-    os.makedirs(output_dir, exist_ok=True)
+def _pct(value) -> str:
+    return "N/A" if value is None else f"{value:.1%}"
 
-    # ---- Summary Markdown ----
-    lines = []
-    lines.append("# CDR Homology Analysis Report\n")
-    lines.append(f"**Queries analysed:** {len(all_results)}\n")
-    lines.append(f"**Database size:** {database_stats.get('total_entries', '?')} clinical antibodies\n")
-    lines.append("")
 
-    # Summary table
-    lines.append("## Summary Table\n")
-    header = "| # | Antibody | VH_CDR3 best | VH_CDR3 id | VL_CDR3 best | VL_CDR3 id | Mean id |"
-    sep    = "|---|----------|-------------|-----------|-------------|-----------|---------|"
-    lines.append(header)
-    lines.append(sep)
+def _cdr3_mean(result: dict):
+    ids = [result["matches"][k]["top_match"]["identity"]
+           for k in ("VH_CDR3", "VL_CDR3")
+           if result["matches"].get(k, {}).get("top_match")]
+    return sum(ids) / len(ids) if ids else None
+
+
+def _all_cdr_mean(result: dict):
+    ids = [m["top_match"]["identity"] for m in result["matches"].values()
+           if m.get("top_match")]
+    return sum(ids) / len(ids) if ids else None
+
+
+def _truncate(text: str, width: int) -> str:
+    text = str(text)
+    return text if len(text) <= width else text[: width - 2] + ".."
+
+
+def _top_drug_counts(database: list) -> list:
+    """Count database entries per therapeutic name (fills appendix G)."""
+    counts: dict = {}
+    for entry in database:
+        name = entry.get("name", "")
+        if not name:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def build_metadata(args, database: list, stats: dict) -> dict:
+    """Provenance block: what was run, on which data, with which parameters."""
+    meta = {
+        "tool": core.TOOL_NAME,
+        "tool_version": core.TOOL_VERSION,
+        "generated_at": core.timestamp(),
+        "python_version": core.python_version(),
+        "libraries": core.library_versions(),
+        "database": {
+            "path": os.path.abspath(args.database),
+            "sha256": core.file_sha256(args.database),
+            "entries": len(database),
+            "source_file": stats.get("source_file"),
+            "source_sha256": stats.get("source_sha256"),
+            "source_rows": stats.get("source_rows"),
+            "preprocessed_at": stats.get("generated_at"),
+        },
+        "parameters": {
+            "top": args.top,
+            "align_mode": args.align,
+            "min_score": args.min_score,
+            "min_identity": args.min_identity,
+            "cdr_boundaries_imgt": {k: list(v) for k, v in core.IMGT_CDR_RANGES.items()},
+            "alignment": {
+                "substitution_matrix": core.BLOSUM62,
+                "open_gap_score": core.OPEN_GAP_SCORE,
+                "extend_gap_score": core.EXTEND_GAP_SCORE,
+                "mode_by_cdr": dict(core.DEFAULT_CDR_MODE),
+            },
+        },
+    }
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Markdown report
+# ---------------------------------------------------------------------------
+
+def _md_provenance(meta: dict) -> list:
+    db = meta["database"]
+    libs = ", ".join(f"{k} {v}" for k, v in meta["libraries"].items())
+    return [
+        "## 1. Provenance",
+        "",
+        "| Item | Value |",
+        "|------|-------|",
+        f"| Tool | {meta['tool']} v{meta['tool_version']} |",
+        f"| Generated (UTC) | {meta['generated_at']} |",
+        f"| Database | `{core.markdown_cell(db['path'])}` |",
+        f"| Database SHA-256 | `{db['sha256'] or 'n/a'}` |",
+        f"| Database entries | {db['entries']} |",
+        f"| Source file | `{core.markdown_cell(db.get('source_file') or 'n/a')}` |",
+        f"| Source SHA-256 | `{db.get('source_sha256') or 'n/a'}` |",
+        f"| Source rows | {db.get('source_rows') if db.get('source_rows') is not None else 'n/a'} |",
+        f"| Preprocessed (UTC) | {db.get('preprocessed_at') or 'n/a'} |",
+        f"| Libraries | {libs} |",
+        "",
+    ]
+
+
+def _md_method(meta: dict) -> list:
+    p = meta["parameters"]
+    return [
+        "## 2. Method",
+        "",
+        "- **CDR definition**: IMGT (CDR1 27-38, CDR2 56-65, CDR3 105-117), "
+        "numbered with ANARCI.",
+        f"- **Alignment**: BLOSUM62, open gap {p['alignment']['open_gap_score']}, "
+        f"extend gap {p['alignment']['extend_gap_score']}.",
+        "- **CDR1/CDR2**: global (Needleman-Wunsch) identity over the full "
+        "alignment. **CDR3**: local (Smith-Waterman) identity over the "
+        "homologous core, because CDR3 lengths vary from 3 to >30 residues "
+        "and a global denominator would divide by the length mismatch.",
+        "- **Coverage**: fraction of the *query* CDR that participates in the "
+        "alignment (1.0 for a global alignment).",
+        "- **Score norm**: raw BLOSUM62 score / query self-alignment score.",
+        f"- **Reported hits**: score >= {p['min_score']} and identity >= "
+        f"{p['min_identity']}. Filtered-out candidates are counted per CDR.",
+        "- **Background**: median identity of the query CDR against every "
+        "database CDR; the top-hit percentile is its rank in that distribution.",
+        "- **Caveat**: sequence homology is not functional homology. A high "
+        "CDR3 identity indicates a shared loop, not a shared epitope or "
+        "mechanism; use it as a regulatory/developability signal only.",
+        "",
+    ]
+
+
+def _md_summary(all_results: list) -> list:
+    lines = [
+        "## 3. Summary",
+        "",
+        "| # | Antibody | Type | VH_CDR3 best | VH_CDR3 id | VL_CDR3 best | VL_CDR3 id | CDR3 mean id |",
+        "|---|----------|------|--------------|-----------|--------------|-----------|--------------|",
+    ]
     for i, r in enumerate(all_results, 1):
         vh3 = r["matches"].get("VH_CDR3", {}).get("top_match")
         vl3 = r["matches"].get("VL_CDR3", {}).get("top_match")
-        vh3_name = (vh3["therapeutic"][:25] + "..") if vh3 and len(vh3["therapeutic"]) > 25 else (vh3["therapeutic"] if vh3 else "N/A")
-        vh3_id = f"{vh3['identity']:.1%}" if vh3 else "N/A"
-        vl3_name = (vl3["therapeutic"][:25] + "..") if vl3 and len(vl3["therapeutic"]) > 25 else (vl3["therapeutic"] if vl3 else "N/A")
-        vl3_id = f"{vl3['identity']:.1%}" if vl3 else "N/A"
-        # overall mean
-        ids = [v["top_match"]["identity"] for v in r["matches"].values() if v.get("top_match")]
-        mean_id = f"{sum(ids)/len(ids):.1%}" if ids else "N/A"
-        lines.append(f"| {i} | {r['name'][:30]} | {vh3_name} | {vh3_id} | {vl3_name} | {vl3_id} | {mean_id} |")
-    lines.append("")
+        lines.append(
+            f"| {i} | {core.markdown_cell(_truncate(r['name'], 30))} | {r['kind']} "
+            f"| {core.markdown_cell(_truncate(vh3['therapeutic'], 25)) if vh3 else 'N/A'} "
+            f"| {_pct(vh3['identity']) if vh3 else 'N/A'} "
+            f"| {core.markdown_cell(_truncate(vl3['therapeutic'], 25)) if vl3 else 'N/A'} "
+            f"| {_pct(vl3['identity']) if vl3 else 'N/A'} "
+            f"| {_pct(_cdr3_mean(r))} |")
+    lines += [
+        "",
+        "> `CDR3 mean id` is the mean of the VH and VL CDR3 top-hit identities. "
+        "CDR1/CDR2 are highly conserved across the clinical database, so their "
+        "identities are near-saturated and are **not** folded into the headline "
+        "number; see the per-CDR tables for their background medians.",
+        "",
+    ]
+    return lines
 
-    # Per-query detail
-    for i, r in enumerate(all_results, 1):
-        lines.append(f"---\n## {i}. {r['name']}\n")
 
-        # CDR table for this query
-        lines.append("### CDR Sequences (IMGT numbering)\n")
-        lines.append("| Region | Query CDR | Len | Top Match | Identity | Score |")
-        lines.append("|--------|-----------|-----|-----------|----------|-------|")
-        for full_key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-            m = r["matches"].get(full_key)
-            if not m:
-                lines.append(f"| {full_key} | - | - | - | - | - |")
-                continue
-            q = m["query_cdr"]
-            qlen = m["query_len"]
-            tm = m["top_match"]
-            if tm:
-                tname = tm["therapeutic"][:30]
-                tid = f"{tm['identity']:.1%}"
-                tscore = f"{tm['score']:.0f}"
-            else:
-                tname = tid = tscore = "N/A"
-            lines.append(f"| {full_key} | `{q}` | {qlen} | {tname} | {tid} | {tscore} |")
+def _md_query(result: dict, index: int, top_n: int) -> list:
+    lines = ["---", f"## 4.{index} {core.markdown_cell(result['name'])}", ""]
+    if result.get("kind") in ("vhh", "vhh_suspect"):
+        hallmark = ", ".join(result.get("kind_info", {}).get("vhh_hallmark", []))
+        if result["kind"] == "vhh":
+            lines += [f"**Chain type**: VHH (camelid single domain; FR2 hallmark "
+                      f"{hallmark}). CDRs are labelled VH_* by convention.", ""]
+        else:
+            lines += ["**Chain type**: single heavy chain without the camelid "
+                      "FR2 hallmark (`vhh_suspect`); confirm the format.", ""]
+    if result.get("errors"):
+        lines.append("**Errors**")
+        lines.append("")
+        for err in result["errors"]:
+            lines.append(f"- {core.markdown_cell(err)}")
         lines.append("")
 
-        # Top 5 per CDR
-        for full_key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-            m = r["matches"].get(full_key)
-            if not m:
-                continue
-            lines.append(f"### {full_key} — Top {top_n} Matches\n")
-            lines.append("| Rank | Therapeutic | Identity | Score | Subject CDR | Alignment |")
-            lines.append("|------|-------------|----------|-------|-------------|-----------|")
-            for j, hit in enumerate(m["top_matches"][:top_n], 1):
-                aln_str = ""
-                if hit["query_aligned"] and hit["subject_aligned"]:
-                    aln_str = f"`{hit['query_aligned']}` / `{hit['subject_aligned']}`"
-                lines.append(
-                    f"| {j} | {hit['therapeutic'][:30]} | {hit['identity']:.1%} "
-                    f"| {hit['score']:.0f} | `{hit['subject_cdr']}` | {aln_str} |"
-                )
-            lines.append("")
-
-    # ---- Appendix: Database Statistics ----
-    lines.append("---\n")
-    lines.append("# Appendix: Clinical Antibody Database Summary (TheraSAbDab)\n")
-
-    # Format counts
-    lines.append("## A. Antibody Format Distribution\n")
-    lines.append("| Format | Count |")
-    lines.append("|--------|-------|")
-    for fmt, cnt in sorted(database_stats.get("format_counts", {}).items(), key=lambda x: -x[1]):
-        lines.append(f"| {fmt} | {cnt} |")
+    lines += [
+        "### CDR Sequences (IMGT numbering)",
+        "",
+        "| Region | Query CDR | Len | Top Match | Identity | Coverage | Score | Background median |",
+        "|--------|-----------|-----|-----------|----------|----------|-------|-------------------|",
+    ]
+    for full_key in ("VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+        m = result["matches"].get(full_key)
+        if not m:
+            lines.append(f"| {full_key} | - | - | - | - | - | - | - |")
+            continue
+        tm = m["top_match"]
+        if tm:
+            top_name = core.markdown_cell(_truncate(tm["therapeutic"], 30))
+            top_id = _pct(tm["identity"])
+            top_cov = _pct(tm["coverage"])
+            top_score = f"{tm['score']:.0f}"
+        else:
+            top_name = top_id = top_cov = top_score = "N/A"
+        lines.append(
+            f"| {full_key} | `{core.markdown_cell(m['query_cdr'])}` | {m['query_len']} "
+            f"| {top_name} | {top_id} | {top_cov} | {top_score} "
+            f"| {_pct(m['background_median_identity'])} |")
     lines.append("")
 
-    # Genetics
-    lines.append("## B. Genetics / Humanization Strategy\n")
-    lines.append("| Strategy | Count |")
-    lines.append("|----------|-------|")
-    for g, cnt in sorted(database_stats.get("genetics_counts", {}).items(), key=lambda x: -x[1]):
-        lines.append(f"| {g} | {cnt} |")
-    lines.append("")
+    for full_key in ("VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+        m = result["matches"].get(full_key)
+        if not m:
+            continue
+        lines.append(f"### {full_key} -- Top {top_n} Matches "
+                     f"({m['mode']}, {m['n_candidates']} candidates, "
+                     f"{m['n_filtered']} filtered)")
+        lines.append("")
+        if not m["top_matches"]:
+            lines += ["No candidate passed the score/identity thresholds.", ""]
+            continue
+        lines.append("| Rank | Therapeutic | Chain | Identity | Coverage | Score | Score norm | Subject CDR | Alignment |")
+        lines.append("|------|-------------|-------|----------|----------|-------|------------|-------------|-----------|")
+        for j, hit in enumerate(m["top_matches"][:top_n], 1):
+            aln_str = ""
+            if hit["query_aligned"] and hit["subject_aligned"]:
+                aln_str = (f"`{core.markdown_cell(hit['query_aligned'])}` / "
+                           f"`{core.markdown_cell(hit['subject_aligned'])}`")
+            lines.append(
+                f"| {j} | {core.markdown_cell(_truncate(hit['therapeutic'], 30))} "
+                f"| {hit['chain_source']} | {_pct(hit['identity'])} "
+                f"| {_pct(hit['coverage'])} | {hit['score']:.0f} "
+                f"| {hit['score_norm']:.2f} "
+                f"| `{core.markdown_cell(hit['subject_cdr'])}` | {aln_str} |")
+        lines.append("")
+    return lines
 
-    # Light chain type
-    lines.append("## C. Light Chain Type\n")
-    lines.append("| Type | Count |")
-    lines.append("|------|-------|")
-    for v, cnt in sorted(database_stats.get("vd_lc_counts", {}).items(), key=lambda x: -x[1]):
-        lines.append(f"| {v} | {cnt} |")
-    lines.append("")
 
-    # Clinical trial status
-    lines.append("## D. Highest Clinical Trial Phase\n")
-    lines.append("| Phase | Count |")
-    lines.append("|-------|-------|")
-    for t, cnt in sorted(database_stats.get("trial_counts", {}).items(), key=lambda x: -x[1]):
-        lines.append(f"| {t} | {cnt} |")
-    lines.append("")
+def _md_appendix(database: list, stats: dict) -> list:
+    lines = ["---", "# Appendix: Clinical Antibody Database Summary (TheraSAbDab)", ""]
 
-    # CDR length distribution
-    lines.append("## E. CDR Length Distribution (IMGT numbering)\n")
-    lines.append("| CDR | Min | Max | Mean | Median | N |")
-    lines.append("|-----|-----|-----|------|--------|---|")
-    for key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-        s = database_stats.get("cdr_length_summary", {}).get(key)
+    def simple_table(title, counts):
+        out = [f"## {title}", "", "| Value | Count |", "|-------|-------|"]
+        for value, count in sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0]))):
+            out.append(f"| {core.markdown_cell(value)} | {count} |")
+        out.append("")
+        return out
+
+    lines += simple_table("A. Antibody Format Distribution", stats.get("format_counts", {}))
+    lines += simple_table("B. Genetics / Humanization Strategy", stats.get("genetics_counts", {}))
+    lines += simple_table("C. Light Chain Type", stats.get("vd_lc_counts", {}))
+    lines += simple_table("D. Highest Clinical Trial Phase", stats.get("trial_counts", {}))
+
+    lines += ["## E. CDR Length Distribution (IMGT numbering)", "",
+              "| CDR | Min | Max | Mean | Median | N |",
+              "|-----|-----|-----|------|--------|---|"]
+    for key in ("VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+        s = stats.get("cdr_length_summary", {}).get(key)
         if s:
-            lines.append(f"| {key} | {s['min']} | {s['max']} | {s['mean']} | {s['median']} | {s['count']} |")
+            lines.append(f"| {key} | {s['min']} | {s['max']} | {s['mean']} "
+                         f"| {s['median']} | {s['count']} |")
         else:
             lines.append(f"| {key} | - | - | - | - | 0 |")
     lines.append("")
 
-    # Top targets
-    lines.append("## F. Top 30 Therapeutic Targets\n")
-    lines.append("| Target | Count |")
-    lines.append("|--------|-------|")
-    tc = database_stats.get("target_counts", {})
-    for t, cnt in sorted(tc.items(), key=lambda x: -x[1])[:30]:
-        lines.append(f"| {t} | {cnt} |")
+    lines += ["## F. Top 30 Therapeutic Targets", "", "| Target | Count |", "|--------|-------|"]
+    for target, count in sorted(stats.get("target_counts", {}).items(),
+                                key=lambda kv: (-kv[1], str(kv[0])))[:30]:
+        lines.append(f"| {core.markdown_cell(target)} | {count} |")
     lines.append("")
 
-    # Top 30 drugs
-    lines.append("## G. Top 30 Drugs by Entry Count\n")
-    drug_counts = Counter(e["name"] for e in (load_database_stats_from_results(all_results) or []))
-    lines.append("| Drug | Entries |")
-    lines.append("|------|---------|")
-    for d, cnt in drug_counts.most_common(30):
-        lines.append(f"| {d} | {cnt} |")
+    lines += ["## G. Top 30 Drugs by Entry Count", "", "| Drug | Entries |", "|------|---------|"]
+    for name, count in _top_drug_counts(database)[:30]:
+        lines.append(f"| {core.markdown_cell(name)} | {count} |")
     lines.append("")
+    return lines
 
-    # Write markdown
-    md_path = os.path.join(output_dir, "cdr_homology_report.md")
-    with open(md_path, "w") as f:
-        f.write("\n".join(lines))
-    print(f"  Report written: {md_path}")
 
-    # ---- CSV detail files ----
+def generate_report(all_results: list, database: list, stats: dict, metadata: dict,
+                    output_dir: str, top_n: int) -> str:
+    """Write the Markdown report; return its path."""
+    os.makedirs(output_dir, exist_ok=True)
+    lines = ["# CDR Homology Analysis Report", ""]
+    lines.append(f"**Queries analysed:** {len(all_results)}  ")
+    lines.append(f"**Database size:** {len(database)} clinical antibodies  ")
+    n_errors = sum(len(r.get("errors", [])) for r in all_results)
+    lines.append(f"**Warnings/errors:** {n_errors}")
+    lines.append("")
+    lines += _md_provenance(metadata)
+    lines += _md_method(metadata)
+    lines += _md_summary(all_results)
+    for i, result in enumerate(all_results, 1):
+        lines += _md_query(result, i, top_n)
+    lines += _md_appendix(database, stats)
+
+    path = os.path.join(output_dir, "cdr_homology_report.md")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print(f"  Markdown report written: {path}")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# CSV detail files
+# ---------------------------------------------------------------------------
+
+def write_csv_details(all_results: list, output_dir: str) -> list:
+    """Write one CSV per query; filenames are collision-free."""
     csv_dir = os.path.join(output_dir, "detail")
     os.makedirs(csv_dir, exist_ok=True)
-    for r in all_results:
-        safe_name = r["name"].replace("/", "_").replace(" ", "_")[:60]
-        csv_path = os.path.join(csv_dir, f"{safe_name}.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
+    used: set = set()
+    written = []
+    for result in all_results:
+        stem = core.safe_filename(result["name"], used)
+        path = os.path.join(csv_dir, f"{stem}.csv")
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
             writer.writerow([
-                "CDR", "Query CDR", "Query Len", "Rank",
-                "Therapeutic", "Identity", "Score", "Subject CDR",
-                "Format", "Genetics", "Target", "Highest Trial",
+                "CDR", "Query CDR", "Query Len", "Rank", "Therapeutic",
+                "Chain Source", "Identity", "Identity (global)", "Coverage",
+                "Score", "Score Norm", "Subject CDR", "Format", "Genetics",
+                "Target", "Highest Trial", "Alignment",
             ])
-            for full_key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-                m = r["matches"].get(full_key)
+            for full_key in ("VH_CDR1", "VH_CDR2", "VH_CDR3",
+                             "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+                m = result["matches"].get(full_key)
                 if not m:
                     continue
-                for j, hit in enumerate(m["top_matches"], 1):
+                for rank, hit in enumerate(m["top_matches"], 1):
                     writer.writerow([
-                        full_key, m["query_cdr"], m["query_len"], j,
-                        hit["therapeutic"], f"{hit['identity']:.4f}", hit["score"],
-                        hit["subject_cdr"], hit["format"], hit["genetics"],
-                        hit["target"], hit["highest_trial"],
+                        full_key, m["query_cdr"], m["query_len"], rank,
+                        hit["therapeutic"], hit["chain_source"],
+                        f"{hit['identity']:.4f}", f"{hit['identity_global']:.4f}",
+                        f"{hit['coverage']:.4f}", hit["score"], hit["score_norm"],
+                        hit["subject_cdr"], hit.get("format", ""),
+                        hit.get("genetics", ""), hit.get("target", ""),
+                        hit.get("highest_trial", ""),
+                        f"{hit['query_aligned']} / {hit['subject_aligned']}",
                     ])
-        print(f"  CSV written: {csv_path}")
+        written.append(path)
+        print(f"  CSV written: {path}")
+    return written
 
-    return md_path
 
+# ---------------------------------------------------------------------------
+# Word report
+# ---------------------------------------------------------------------------
 
-def generate_docx_report(all_results: list, database_stats: dict, output_dir: str, top_n: int):
-    """Generate Word (.docx) report with summary + appendix."""
+def generate_docx_report(all_results: list, database: list, stats: dict,
+                         metadata: dict, output_dir: str, top_n: int) -> str:
+    """Write the Word report; mirrors the Markdown sections including G."""
     from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
+    from docx.shared import Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.oxml.ns import qn
 
-    def set_cell_shading(cell, color):
-        shading = cell._element.get_or_add_tcPr().makeelement(qn("w:shd"), {
-            qn("w:val"): "clear",
-            qn("w:color"): "auto",
-            qn("w:fill"): color,
-        })
-        cell._element.get_or_add_tcPr().append(shading)
+    def shade(cell, color):
+        cell._element.get_or_add_tcPr().append(
+            cell._element.get_or_add_tcPr().makeelement(
+                qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto",
+                              qn("w:fill"): color}))
 
-    def add_table_row(table, values, bold=False, header=False):
+    def add_row(table, values, header=False):
         row = table.add_row()
-        for i, v in enumerate(values):
+        for i, value in enumerate(values):
             cell = row.cells[i]
-            cell.text = str(v)
-            for p in cell.paragraphs:
-                p.style = doc.styles["Normal"]
-                for run in p.runs:
+            cell.text = str(value)
+            for paragraph in cell.paragraphs:
+                paragraph.style = doc.styles["Normal"]
+                for run in paragraph.runs:
                     run.font.size = Pt(8)
-                    if bold:
+                    if header:
                         run.bold = True
-            if header:
-                set_cell_shading(cell, "2F5496")
-                for p in cell.paragraphs:
-                    for run in p.runs:
                         run.font.color.rgb = RGBColor(255, 255, 255)
+            if header:
+                shade(cell, "2F5496")
         return row
 
-    doc = Document()
-
-    # ---- Title ----
-    title = doc.add_heading("CDR Homology Analysis Report", level=0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    doc.add_paragraph(f"Queries analysed: {len(all_results)}")
-    doc.add_paragraph(f"Database size: {database_stats.get('total_entries', '?')} clinical antibodies")
-    doc.add_paragraph()
-
-    # ---- Summary Table ----
-    doc.add_heading("Summary Table", level=1)
-    tbl = doc.add_table(rows=1, cols=7)
-    tbl.style = "Table Grid"
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    hdr_cells = tbl.rows[0].cells
-    for i, h in enumerate(["#", "Antibody", "VH_CDR3 Best", "VH_CDR3 Id", "VL_CDR3 Best", "VL_CDR3 Id", "Mean Id"]):
-        hdr_cells[i].text = h
-        set_cell_shading(hdr_cells[i], "2F5496")
-        for p in hdr_cells[i].paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-
-    for i, r in enumerate(all_results, 1):
-        vh3 = r["matches"].get("VH_CDR3", {}).get("top_match")
-        vl3 = r["matches"].get("VL_CDR3", {}).get("top_match")
-        vh3_name = (vh3["therapeutic"][:25] + "..") if vh3 and len(vh3["therapeutic"]) > 25 else (vh3["therapeutic"] if vh3 else "N/A")
-        vh3_id = f"{vh3['identity']:.1%}" if vh3 else "N/A"
-        vl3_name = (vl3["therapeutic"][:25] + "..") if vl3 and len(vl3["therapeutic"]) > 25 else (vl3["therapeutic"] if vl3 else "N/A")
-        vl3_id = f"{vl3['identity']:.1%}" if vl3 else "N/A"
-        ids = [v["top_match"]["identity"] for v in r["matches"].values() if v.get("top_match")]
-        mean_id = f"{sum(ids)/len(ids):.1%}" if ids else "N/A"
-        add_table_row(tbl, [i, r["name"][:30], vh3_name, vh3_id, vl3_name, vl3_id, mean_id])
-    doc.add_paragraph()
-
-    # ---- Per-query detail ----
-    for i, r in enumerate(all_results, 1):
-        doc.add_heading(f"{i}. {r['name']}", level=1)
-
-        # CDR summary table
-        doc.add_heading("CDR Sequences (IMGT numbering)", level=2)
-        tbl2 = doc.add_table(rows=1, cols=6)
-        tbl2.style = "Table Grid"
-        for j, h in enumerate(["Region", "Query CDR", "Len", "Top Match", "Identity", "Score"]):
-            tbl2.rows[0].cells[j].text = h
-            set_cell_shading(tbl2.rows[0].cells[j], "2F5496")
-            for p in tbl2.rows[0].cells[j].paragraphs:
-                for run in p.runs:
+    def make_table(headers, rows):
+        table = doc.add_table(rows=1, cols=len(headers))
+        table.style = "Table Grid"
+        for i, header in enumerate(headers):
+            table.rows[0].cells[i].text = header
+            shade(table.rows[0].cells[i], "2F5496")
+            for paragraph in table.rows[0].cells[i].paragraphs:
+                for run in paragraph.runs:
                     run.bold = True
                     run.font.color.rgb = RGBColor(255, 255, 255)
                     run.font.size = Pt(8)
+        for row in rows:
+            add_row(table, row)
+        doc.add_paragraph()
+        return table
 
-        for full_key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-            m = r["matches"].get(full_key)
+    doc = Document()
+    title = doc.add_heading("CDR Homology Analysis Report", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph(f"Queries analysed: {len(all_results)}")
+    doc.add_paragraph(f"Database size: {len(database)} clinical antibodies")
+    n_errors = sum(len(r.get("errors", [])) for r in all_results)
+    doc.add_paragraph(f"Warnings/errors: {n_errors}")
+
+    # 1. Provenance
+    db = metadata["database"]
+    libs = ", ".join(f"{k} {v}" for k, v in metadata["libraries"].items())
+    doc.add_heading("1. Provenance", level=1)
+    make_table(["Item", "Value"], [
+        ["Tool", f"{metadata['tool']} v{metadata['tool_version']}"],
+        ["Generated (UTC)", metadata["generated_at"]],
+        ["Database", db["path"]],
+        ["Database SHA-256", db["sha256"] or "n/a"],
+        ["Database entries", db["entries"]],
+        ["Source file", db.get("source_file") or "n/a"],
+        ["Source SHA-256", db.get("source_sha256") or "n/a"],
+        ["Source rows", db.get("source_rows") if db.get("source_rows") is not None else "n/a"],
+        ["Preprocessed (UTC)", db.get("preprocessed_at") or "n/a"],
+        ["Libraries", libs],
+    ])
+
+    # 2. Method
+    p = metadata["parameters"]
+    doc.add_heading("2. Method", level=1)
+    for bullet in (
+        "CDR definition: IMGT (CDR1 27-38, CDR2 56-65, CDR3 105-117), numbered with ANARCI.",
+        f"Alignment: BLOSUM62, open gap {p['alignment']['open_gap_score']}, "
+        f"extend gap {p['alignment']['extend_gap_score']}.",
+        "CDR1/CDR2: global (Needleman-Wunsch) identity. CDR3: local (Smith-Waterman) "
+        "identity over the homologous core.",
+        "Coverage: fraction of the query CDR participating in the alignment.",
+        "Score norm: raw BLOSUM62 score / query self-alignment score.",
+        f"Reported hits: score >= {p['min_score']} and identity >= {p['min_identity']}.",
+        "Background: median identity against every database CDR.",
+        "Caveat: sequence homology is not functional homology.",
+    ):
+        doc.add_paragraph(bullet, style="List Bullet")
+
+    # 3. Summary
+    doc.add_heading("3. Summary", level=1)
+    rows = []
+    for i, r in enumerate(all_results, 1):
+        vh3 = r["matches"].get("VH_CDR3", {}).get("top_match")
+        vl3 = r["matches"].get("VL_CDR3", {}).get("top_match")
+        rows.append([
+            i, _truncate(r["name"], 30), r["kind"],
+            _truncate(vh3["therapeutic"], 25) if vh3 else "N/A",
+            _pct(vh3["identity"]) if vh3 else "N/A",
+            _truncate(vl3["therapeutic"], 25) if vl3 else "N/A",
+            _pct(vl3["identity"]) if vl3 else "N/A",
+            _pct(_cdr3_mean(r)),
+        ])
+    make_table(["#", "Antibody", "Type", "VH_CDR3 Best", "VH_CDR3 Id",
+                "VL_CDR3 Best", "VL_CDR3 Id", "CDR3 Mean Id"], rows)
+    doc.add_paragraph("CDR3 mean id aggregates only the two CDR3 top hits; "
+                      "CDR1/CDR2 are near-saturated across the clinical database.")
+
+    # 4. Per query
+    for index, result in enumerate(all_results, 1):
+        doc.add_heading(f"4.{index} {result['name']}", level=1)
+        if result.get("kind") == "vhh":
+            doc.add_paragraph("Chain type: VHH (camelid single domain).")
+        elif result.get("kind") == "vhh_suspect":
+            doc.add_paragraph("Chain type: single heavy chain without the camelid "
+                              "FR2 hallmark (vhh_suspect); confirm the format.")
+        if result.get("errors"):
+            doc.add_heading("Errors", level=2)
+            for err in result["errors"]:
+                doc.add_paragraph(err, style="List Bullet")
+
+        doc.add_heading("CDR Sequences (IMGT numbering)", level=2)
+        rows = []
+        for full_key in ("VH_CDR1", "VH_CDR2", "VH_CDR3",
+                         "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+            m = result["matches"].get(full_key)
             if not m:
-                add_table_row(tbl2, [full_key, "-", "-", "-", "-", "-"])
+                rows.append([full_key, "-", "-", "-", "-", "-", "-", "-"])
                 continue
             tm = m["top_match"]
-            if tm:
-                add_table_row(tbl2, [
-                    full_key, m["query_cdr"], m["query_len"],
-                    tm["therapeutic"][:30], f"{tm['identity']:.1%}", f"{tm['score']:.0f}"
-                ])
-            else:
-                add_table_row(tbl2, [full_key, m["query_cdr"], m["query_len"], "N/A", "N/A", "N/A"])
-        doc.add_paragraph()
+            rows.append([
+                full_key, m["query_cdr"], m["query_len"],
+                _truncate(tm["therapeutic"], 30) if tm else "N/A",
+                _pct(tm["identity"]) if tm else "N/A",
+                _pct(tm["coverage"]) if tm else "N/A",
+                f"{tm['score']:.0f}" if tm else "N/A",
+                _pct(m["background_median_identity"]),
+            ])
+        make_table(["Region", "Query CDR", "Len", "Top Match", "Identity",
+                    "Coverage", "Score", "Background median"], rows)
 
-        # Top N per CDR
-        for full_key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-            m = r["matches"].get(full_key)
+        for full_key in ("VH_CDR1", "VH_CDR2", "VH_CDR3",
+                         "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+            m = result["matches"].get(full_key)
             if not m:
                 continue
-            doc.add_heading(f"{full_key} — Top {top_n} Matches", level=2)
-            tbl3 = doc.add_table(rows=1, cols=6)
-            tbl3.style = "Table Grid"
-            for j, h in enumerate(["Rank", "Therapeutic", "Identity", "Score", "Subject CDR", "Alignment"]):
-                tbl3.rows[0].cells[j].text = h
-                set_cell_shading(tbl3.rows[0].cells[j], "2F5496")
-                for p in tbl3.rows[0].cells[j].paragraphs:
-                    for run in p.runs:
-                        run.bold = True
-                        run.font.color.rgb = RGBColor(255, 255, 255)
-                        run.font.size = Pt(8)
-
+            doc.add_heading(
+                f"{full_key} -- Top {top_n} Matches ({m['mode']}, "
+                f"{m['n_candidates']} candidates, {m['n_filtered']} filtered)",
+                level=2)
+            if not m["top_matches"]:
+                doc.add_paragraph("No candidate passed the score/identity thresholds.")
+                continue
+            rows = []
             for j, hit in enumerate(m["top_matches"][:top_n], 1):
-                aln_str = ""
-                if hit["query_aligned"] and hit["subject_aligned"]:
-                    aln_str = f"{hit['query_aligned']} / {hit['subject_aligned']}"
-                add_table_row(tbl3, [
-                    j, hit["therapeutic"][:30], f"{hit['identity']:.1%}",
-                    f"{hit['score']:.0f}", hit["subject_cdr"], aln_str
+                rows.append([
+                    j, _truncate(hit["therapeutic"], 30), hit["chain_source"],
+                    _pct(hit["identity"]), _pct(hit["coverage"]),
+                    f"{hit['score']:.0f}", f"{hit['score_norm']:.2f}",
+                    hit["subject_cdr"],
+                    f"{hit['query_aligned']} / {hit['subject_aligned']}",
                 ])
-            doc.add_paragraph()
+            make_table(["Rank", "Therapeutic", "Chain", "Identity", "Coverage",
+                        "Score", "Score Norm", "Subject CDR", "Alignment"], rows)
 
-    # ---- Appendix ----
+    # Appendix
     doc.add_page_break()
     doc.add_heading("Appendix: Clinical Antibody Database Summary (TheraSAbDab)", level=1)
 
-    # A. Format
-    doc.add_heading("A. Antibody Format Distribution", level=2)
-    tbl_a = doc.add_table(rows=1, cols=2)
-    tbl_a.style = "Table Grid"
-    tbl_a.rows[0].cells[0].text = "Format"
-    tbl_a.rows[0].cells[1].text = "Count"
-    for cell in tbl_a.rows[0].cells:
-        set_cell_shading(cell, "2F5496")
-        for p in cell.paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-    for fmt, cnt in sorted(database_stats.get("format_counts", {}).items(), key=lambda x: -x[1]):
-        add_table_row(tbl_a, [fmt, cnt])
-    doc.add_paragraph()
+    def simple(title, counts):
+        doc.add_heading(title, level=2)
+        make_table(["Value", "Count"],
+                   [[k, v] for k, v in sorted(counts.items(),
+                                              key=lambda kv: (-kv[1], str(kv[0])))])
 
-    # B. Genetics
-    doc.add_heading("B. Genetics / Humanization Strategy", level=2)
-    tbl_b = doc.add_table(rows=1, cols=2)
-    tbl_b.style = "Table Grid"
-    tbl_b.rows[0].cells[0].text = "Strategy"
-    tbl_b.rows[0].cells[1].text = "Count"
-    for cell in tbl_b.rows[0].cells:
-        set_cell_shading(cell, "2F5496")
-        for p in cell.paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-    for g, cnt in sorted(database_stats.get("genetics_counts", {}).items(), key=lambda x: -x[1]):
-        add_table_row(tbl_b, [g, cnt])
-    doc.add_paragraph()
+    simple("A. Antibody Format Distribution", stats.get("format_counts", {}))
+    simple("B. Genetics / Humanization Strategy", stats.get("genetics_counts", {}))
+    simple("C. Light Chain Type", stats.get("vd_lc_counts", {}))
+    simple("D. Highest Clinical Trial Phase", stats.get("trial_counts", {}))
 
-    # C. Light chain
-    doc.add_heading("C. Light Chain Type", level=2)
-    tbl_c = doc.add_table(rows=1, cols=2)
-    tbl_c.style = "Table Grid"
-    tbl_c.rows[0].cells[0].text = "Type"
-    tbl_c.rows[0].cells[1].text = "Count"
-    for cell in tbl_c.rows[0].cells:
-        set_cell_shading(cell, "2F5496")
-        for p in cell.paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-    for v, cnt in sorted(database_stats.get("vd_lc_counts", {}).items(), key=lambda x: -x[1]):
-        add_table_row(tbl_c, [v, cnt])
-    doc.add_paragraph()
-
-    # D. Clinical trial
-    doc.add_heading("D. Highest Clinical Trial Phase", level=2)
-    tbl_d = doc.add_table(rows=1, cols=2)
-    tbl_d.style = "Table Grid"
-    tbl_d.rows[0].cells[0].text = "Phase"
-    tbl_d.rows[0].cells[1].text = "Count"
-    for cell in tbl_d.rows[0].cells:
-        set_cell_shading(cell, "2F5496")
-        for p in cell.paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-    for t, cnt in sorted(database_stats.get("trial_counts", {}).items(), key=lambda x: -x[1]):
-        add_table_row(tbl_d, [t, cnt])
-    doc.add_paragraph()
-
-    # E. CDR length
     doc.add_heading("E. CDR Length Distribution (IMGT numbering)", level=2)
-    tbl_e = doc.add_table(rows=1, cols=6)
-    tbl_e.style = "Table Grid"
-    for j, h in enumerate(["CDR", "Min", "Max", "Mean", "Median", "N"]):
-        tbl_e.rows[0].cells[j].text = h
-        set_cell_shading(tbl_e.rows[0].cells[j], "2F5496")
-        for p in tbl_e.rows[0].cells[j].paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-    for key in ["VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"]:
-        s = database_stats.get("cdr_length_summary", {}).get(key)
-        if s:
-            add_table_row(tbl_e, [key, s["min"], s["max"], s["mean"], s["median"], s["count"]])
-        else:
-            add_table_row(tbl_e, [key, "-", "-", "-", "-", 0])
-    doc.add_paragraph()
+    rows = []
+    for key in ("VH_CDR1", "VH_CDR2", "VH_CDR3", "VL_CDR1", "VL_CDR2", "VL_CDR3"):
+        s = stats.get("cdr_length_summary", {}).get(key)
+        rows.append([key, s["min"], s["max"], s["mean"], s["median"], s["count"]]
+                    if s else [key, "-", "-", "-", "-", 0])
+    make_table(["CDR", "Min", "Max", "Mean", "Median", "N"], rows)
 
-    # F. Top targets
     doc.add_heading("F. Top 30 Therapeutic Targets", level=2)
-    tbl_f = doc.add_table(rows=1, cols=2)
-    tbl_f.style = "Table Grid"
-    tbl_f.rows[0].cells[0].text = "Target"
-    tbl_f.rows[0].cells[1].text = "Count"
-    for cell in tbl_f.rows[0].cells:
-        set_cell_shading(cell, "2F5496")
-        for p in cell.paragraphs:
-            for run in p.runs:
-                run.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-                run.font.size = Pt(8)
-    tc = database_stats.get("target_counts", {})
-    for t, cnt in sorted(tc.items(), key=lambda x: -x[1])[:30]:
-        add_table_row(tbl_f, [t, cnt])
-    doc.add_paragraph()
+    make_table(["Target", "Count"],
+               [[t, c] for t, c in sorted(stats.get("target_counts", {}).items(),
+                                          key=lambda kv: (-kv[1], str(kv[0])))[:30]])
 
-    # Save
-    docx_path = os.path.join(output_dir, "cdr_homology_report.docx")
-    doc.save(docx_path)
-    print(f"  Word report written: {docx_path}")
-    return docx_path
+    doc.add_heading("G. Top 30 Drugs by Entry Count", level=2)
+    make_table(["Drug", "Entries"], [[n, c] for n, c in _top_drug_counts(database)[:30]])
 
-
-def load_database_stats_from_results(results):
-    """Dummy: not used in report, kept for structure."""
-    return None
-
-
-def load_stats(stats_path: str) -> dict:
-    """Load precomputed statistics JSON."""
-    if os.path.exists(stats_path):
-        with open(stats_path) as f:
-            return json.load(f)
-    return {"total_entries": 0, "format_counts": {}, "genetics_counts": {},
-            "vd_lc_counts": {}, "trial_counts": {}, "target_counts": {},
-            "cdr_length_summary": {}}
-
-
-# ---------------------------------------------------------------------------
-# Input parsing helpers
-# ---------------------------------------------------------------------------
-
-def parse_query_inputs(args) -> list:
-    """Return [(name, vh_seq, vl_seq), ...] from CLI args."""
-    queries = []
-    if args.input:
-        records = parse_fasta(args.input)
-        # Group by name: VH + VL pairs
-        # Convention: header contains VH/VL/Light/Heavy or suffix _VH/_VL
-        vh_map = {}
-        vl_map = {}
-        for hdr, seq in records:
-            h = hdr.upper()
-            if "VH" in h or "HEAVY" in h:
-                vh_map[hdr] = seq
-            elif "VL" in h or "LIGHT" in h:
-                vl_map[hdr] = seq
-            elif len(seq) > 130:
-                vh_map[hdr] = seq
-            else:
-                vl_map[hdr] = seq
-
-        # Pair by base name (remove _Heavy/_Light/_VH/_VL suffix)
-        all_names = list(dict.fromkeys(list(vh_map.keys()) + list(vl_map.keys())))
-        used = set()
-        for hdr in all_names:
-            if hdr in used:
-                continue
-            # Extract base name by removing known suffixes
-            base = hdr
-            for suffix in ["_Heavy", "_Light", "_VH", "_VL"]:
-                if base.endswith(suffix):
-                    base = base[:-len(suffix)]
-                    break
-            vh = vh_map.get(hdr)
-            vl = vl_map.get(hdr)
-            # try to find partner
-            if vh and not vl:
-                for vhdr in vl_map:
-                    partner_base = vhdr
-                    for suffix in ["_Heavy", "_Light", "_VH", "_VL"]:
-                        if partner_base.endswith(suffix):
-                            partner_base = partner_base[:-len(suffix)]
-                            break
-                    if partner_base == base and vhdr not in used:
-                        vl = vl_map[vhdr]
-                        used.add(vhdr)
-                        break
-            elif vl and not vh:
-                for vhdr in vh_map:
-                    partner_base = vhdr
-                    for suffix in ["_Heavy", "_Light", "_VH", "_VL"]:
-                        if partner_base.endswith(suffix):
-                            partner_base = partner_base[:-len(suffix)]
-                            break
-                    if partner_base == base and vhdr not in used:
-                        vh = vh_map[vhdr]
-                        used.add(vhdr)
-                        break
-            queries.append((hdr, vh, vl))
-            used.add(hdr)
-    elif args.vh or args.vl:
-        name = args.name or "query_1"
-        queries.append((name, args.vh, args.vl))
-    return queries
+    path = os.path.join(output_dir, "cdr_homology_report.docx")
+    doc.save(path)
+    print(f"  Word report written: {path}")
+    return path
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid integer: {text!r}")
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1 (got {value})")
+    return value
+
+
+def _fraction(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number: {text!r}")
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(f"must be within [0, 1] (got {value})")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="CDR Homology Analysis: compare antibody CDRs against clinical database"
-    )
+        description="CDR Homology Analysis: compare antibody CDRs against a "
+                    "clinical antibody database")
     parser.add_argument("--database", default="data/therasabdab_cdrs.json",
                         help="Preprocessed CDR database JSON")
     parser.add_argument("--stats", default="data/therasabdab_stats.json",
-                        help="Precomputed statistics JSON")
+                        help="Precomputed database statistics JSON")
     parser.add_argument("--input", "-i", help="FASTA file with query sequences")
     parser.add_argument("--vh", help="VH amino acid sequence")
     parser.add_argument("--vl", help="VL amino acid sequence")
-    parser.add_argument("--name", help="Query name (for single --vh/--vl mode)")
-    parser.add_argument("--top", type=int, default=5, help="Top N matches per CDR (default 5)")
+    parser.add_argument("--name", help="Query name (single --vh/--vl mode)")
+    parser.add_argument("--top", type=_positive_int, default=5,
+                        help="Top N matches per CDR (default 5, must be >= 1)")
     parser.add_argument("--output", "-o", default="outputs/cdr_homology",
                         help="Output directory")
-    args = parser.parse_args()
+    parser.add_argument("--align", choices=("auto", "global", "local"), default="auto",
+                        help="Alignment mode; 'auto' uses local for CDR3 and "
+                             "global for CDR1/CDR2 (default: auto)")
+    parser.add_argument("--min-score", type=float, default=0.0,
+                        help="Minimum BLOSUM62 score for a hit to be reported "
+                             "(default 0.0)")
+    parser.add_argument("--min-identity", type=_fraction, default=0.0,
+                        help="Minimum identity for a hit to be reported, 0-1 "
+                             "(default 0.0)")
+    parser.add_argument("--markdown", action="store_true", help="Write Markdown report")
+    parser.add_argument("--json", action="store_true", help="Write raw JSON")
+    parser.add_argument("--csv", action="store_true", help="Write per-query CSV detail")
+    parser.add_argument("--docx", action="store_true", help="Write Word report")
+    parser.add_argument("--all-formats", action="store_true",
+                        help="Write every output format (default when no format "
+                             "flag is given)")
+    return parser
 
-    if not args.vh and not args.vl and not args.input:
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.input and not args.vh and not args.vl:
         parser.error("Provide --input FASTA or --vh/--vl sequences")
 
-    # Load database
-    db_path = args.database
-    if not os.path.exists(db_path):
-        print(f"Error: database not found: {db_path}")
-        print("Run preprocess.py first:  python3 tools/cdr_homology/preprocess.py")
-        sys.exit(1)
+    if args.all_formats or not any(
+            (args.markdown, args.json, args.csv, args.docx)):
+        args.markdown = args.json = args.csv = args.docx = True
 
-    print(f"Loading database from {db_path} ...")
-    database = load_database(db_path)
+    if not os.path.exists(args.database):
+        print(f"Error: database not found: {args.database}", file=sys.stderr)
+        print("Run preprocess.py first:  python3 tools/cdr_homology/preprocess.py",
+              file=sys.stderr)
+        return 1
+
+    print(f"Loading database from {args.database} ...")
+    database = core.read_json(args.database)
     print(f"  {len(database)} clinical antibodies loaded")
 
-    # Parse queries
     queries = parse_query_inputs(args)
     if not queries:
-        print("Error: no queries found")
-        sys.exit(1)
+        print("Error: no queries found", file=sys.stderr)
+        return 1
     print(f"  {len(queries)} query(ies) to process")
 
-    # Run search
     print("Running CDR homology search ...")
-    all_results = run_query(queries, database, top_n=args.top)
+    all_results = run_query(queries, database, top_n=args.top, mode=args.align,
+                            min_score=args.min_score,
+                            min_identity=args.min_identity)
 
-    # Load stats for appendix
-    stats = load_stats(args.stats)
+    stats = core.read_json(args.stats) if os.path.exists(args.stats) else {}
+    metadata = build_metadata(args, database, stats)
 
-    # Generate report
-    print("Generating report ...")
-    md_path = generate_report(all_results, stats, args.output, args.top)
+    os.makedirs(args.output, exist_ok=True)
 
-    # Generate Word report
-    print("Generating Word report ...")
-    generate_docx_report(all_results, stats, args.output, args.top)
+    # JSON first: it is the machine-readable record and must survive a later
+    # report-generation failure (e.g. python-docx missing).
+    if args.json:
+        path = core.write_json(
+            os.path.join(args.output, "cdr_homology_results.json"),
+            {"metadata": metadata, "queries": all_results})
+        print(f"  Raw JSON written: {path}")
 
-    # Also save raw JSON
-    json_path = os.path.join(args.output, "cdr_homology_results.json")
-    with open(json_path, "w") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
-    print(f"  Raw JSON written: {json_path}")
+    if args.csv:
+        write_csv_details(all_results, args.output)
+    if args.markdown:
+        generate_report(all_results, database, stats, metadata, args.output, args.top)
+    if args.docx:
+        try:
+            generate_docx_report(all_results, database, stats, metadata,
+                                 args.output, args.top)
+        except ImportError as exc:
+            print(f"  [WARN] Word report skipped: python-docx unavailable ({exc})",
+                  file=sys.stderr)
 
+    failures = sum(len(r.get("errors", [])) for r in all_results)
+    if failures:
+        print(f"\nCompleted with {failures} warning(s): some chains/CDRs could "
+              f"not be analysed. See the report.", file=sys.stderr)
+        return 2
     print("\nDone!")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
