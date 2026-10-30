@@ -1000,6 +1000,12 @@ def generate_structural_risk_word(
 # ---------------------------------------------------------------------------
 
 def _structure_names(vname: str) -> List[str]:
+    """Generate possible structure file names for a variant.
+    
+    Supports multiple naming conventions:
+    - Split chains: H_V0.pdb, L_V0.pdb
+    - Paired: AMG110_V0.pdb, amg110_V0.pdb, igfold_V0.pdb, etc.
+    """
     variant_part = vname.split('_', 1)[1] if '_' in vname else vname
     bases = []
     for base in (vname, variant_part, vname.replace('_', ''),
@@ -1007,21 +1013,29 @@ def _structure_names(vname: str) -> List[str]:
         if base and base not in bases:
             bases.append(base)
     names: List[str] = []
+    # Common prefixes used by structure prediction tools
+    prefixes = ('', 'igfold_', 'af3_', 'boltz_', 'protenix_')
     for base in bases:
-        for prefix in ('', 'igfold_', 'af3_', 'boltz_', 'protenix_'):
+        for prefix in prefixes:
             for suffix in ('.pdb', '.cif'):
                 for value in (base, base.lower()):
                     names.append(f"{prefix}{value}{suffix}")
-    # Also add paired structure names (e.g., AMG110_V0.pdb for H_V0/L_V0)
-    # Extract the base name without H_/L_ prefix
+    # Also add paired structure names with antibody name prefix
+    # Extract the base name without H_/L_ prefix (e.g., H_V0 -> V0)
     if '_' in vname:
         parts = vname.split('_', 1)
         if parts[0] in ('H', 'L') and len(parts) > 1:
             paired_base = parts[1]  # e.g., V0, V1, V2a, etc.
-            for prefix in ('', 'igfold_', 'af3_', 'boltz_', 'protenix_'):
+            for prefix in prefixes:
                 for suffix in ('.pdb', '.cif'):
                     for value in (paired_base, paired_base.lower()):
                         names.append(f"{prefix}{value}{suffix}")
+            # Also try common antibody name prefixes (e.g., AMG110_, amg110_)
+            # These are often used in pipeline outputs
+            for ab_prefix in ('AMG110_', 'amg110_', 'AMG_', 'amg_'):
+                for suffix in ('.pdb', '.cif'):
+                    for value in (paired_base, paired_base.lower()):
+                        names.append(f"{ab_prefix}{value}{suffix}")
     seen = set()
     return [n for n in names if not (n in seen or seen.add(n))]
 
@@ -1039,50 +1053,6 @@ def _find_structure(structure_dir: str, vname: str, chain_type: str = None) -> O
             if os.path.isfile(candidate):
                 return candidate
     return None
-
-
-def _extract_chain_from_paired(pdb_path: str, chain_type: str) -> Optional[str]:
-    """Extract a single chain from a paired PDB file and save as temp file.
-    Returns path to temp single-chain PDB file, or None if chain not found.
-    """
-    if not HAS_FREESASA:
-        return None
-    
-    import freesasa as _freesasa
-    import tempfile
-    
-    # Determine PDB chain ID for the requested chain_type
-    # IgFold uses 'H' and 'L' as chain IDs
-    target_chain_id = chain_type  # 'H' or 'L'
-    
-    structure = _freesasa.Structure(pdb_path)
-    result = _freesasa.calc(structure)
-    residue_areas = result.residueAreas()
-    
-    if target_chain_id not in residue_areas:
-        return None
-    
-    # Create a new PDB with only the target chain
-    with open(pdb_path, 'r') as f:
-        lines = f.readlines()
-    
-    chain_lines = []
-    for line in lines:
-        if line.startswith(('ATOM', 'HETATM')):
-            if line[21] == target_chain_id:
-                chain_lines.append(line)
-        else:
-            # Keep header/footer lines (REMARK, HEADER, etc.)
-            chain_lines.append(line)
-    
-    if not chain_lines:
-        return None
-    
-    # Write to temp file
-    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False)
-    tmp.writelines(chain_lines)
-    tmp.close()
-    return tmp.name
 
 
 def _load_chain_backmutations(csv_dir: Optional[str], chain_type: str) -> List[Dict]:
@@ -1163,25 +1133,24 @@ def run_structural_risk_assessment(
                     print(f"  WARNING: No structure found for {vname}")
                 continue
             
-            # If it's a paired structure (contains both H and L chains), extract the relevant chain
+            # Use the paired structure directly for SASA calculation.
+            # FreeSASA computes on the full complex, so VH-VL interface residues
+            # are correctly identified as buried. No need to extract single chain.
             actual_structure_path = structure_path
             temp_files = []
             try:
-                # Check if this is a paired structure by looking at chain IDs
                 import freesasa as _freesasa
                 structure = _freesasa.Structure(structure_path)
                 result = _freesasa.calc(structure)
                 residue_areas = result.residueAreas()
                 
-                # If both H and L chains present, and we only need one, extract it
+                # Log if this is a paired structure (both H and L present)
                 if 'H' in residue_areas and 'L' in residue_areas:
-                    # This is a paired structure, extract the chain we need
-                    extracted = _extract_chain_from_paired(structure_path, chain_type)
-                    if extracted:
-                        actual_structure_path = extracted
-                        temp_files.append(extracted)
+                    if verbose:
+                        print(f"    Using paired structure (H+L chains) for {vname} - "
+                              f"interface burial will be accounted for")
             except Exception:
-                # If extraction fails, use original path
+                # If structure check fails, use original path
                 pass
 
             labels = _labels_for_variant(numbering, vname, chain_type)
@@ -1197,7 +1166,7 @@ def run_structural_risk_assessment(
                     chain_type=chain_type,
                     sequence=vdata.get('sequence', ''),
                     per_peptide_hits=vdata.get('per_peptide_hits', []),
-                    structure_path=structure_path,
+                    structure_path=actual_structure_path,
                     backmutations=variant_backmuts,
                     method=method,
                     position_labels=labels,
