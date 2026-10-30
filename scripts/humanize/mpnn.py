@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -29,7 +30,8 @@ from .numbering import NumberedChain
 @dataclass
 class MPNNConfig:
     mode: str = "off"            # off | local
-    script: str = "protein_mpnn.py"   # helper_scripts path or full path
+    script: str = "protein_mpnn.py"   # adapter path or full path
+    python_bin: str = "python"   # python that has torch/ProteinMPNN deps
     num_seqs: int = 32
     batch_size: int = 8
     chains_to_design: str = "A"
@@ -74,7 +76,7 @@ def run_mpnn(cfg: MPNNConfig, pdb_path: str, chain: NumberedChain,
     os.makedirs(cfg.outdir, exist_ok=True)
     fixed = _fixed_positions(chain, is_vhh)
     cmd = [
-        "python", cfg.script,
+        cfg.python_bin or sys.executable, cfg.script,
         "--pdb_path", pdb_path,
         "--out_folder", cfg.outdir,
         "--num_seq_per_target", str(cfg.num_seqs),
@@ -347,7 +349,7 @@ def run_developability_optimization(
         # Run MPNN
         os.makedirs(cfg.outdir, exist_ok=True)
         cmd = [
-            "python", cfg.script,
+            cfg.python_bin or sys.executable, cfg.script,
             "--pdb_path", pdb_path,
             "--out_folder", cfg.outdir,
             "--num_seq_per_target", str(cfg.num_seqs),
