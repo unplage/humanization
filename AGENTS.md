@@ -52,6 +52,8 @@ python3 tests/backtest_scale.py     # HumAb25: 25 approved mouse antibodies
 
    This displays a comparison table showing the top 10 candidates for each of the 9 strategies, with columns: strategy, rank, V gene, FR identity, CDR identity, composite, CVI, frequency, 3-axis, and back-mutation count.
 
+   **Output persistence (mandatory)**: `compare` writes the *full* untruncated table to `outputs/<stem>_germline_compare.txt` (repo working tree, gitignored). Use `--out <path>` to override. Never rely on terminal scrollback; always read the saved file for germline decisions.
+
    9 个底层策略: `fr_best` | `cdr_best` | `composite` (0.7*FR+0.3*CDR) | `cvi_best` (canonical+vernier+interface) | `min_backmutations` | `current` (top-30% FR with max CDR) | `adimab_frequency` | `pioneer_frequency` | `composite_3axis` (0.5*CVI+0.3*freq+0.2*FR)。
    `auto` 是默认路由策略（VH=`adimab_frequency`，VL=`current`），不需要单独跑。
 

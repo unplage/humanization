@@ -396,7 +396,13 @@ def cmd_compare(args):
     from humanize.numbering import number_heavy, number_light, number_heavy_imgt, number_light_imgt
     from humanize.germline import load_germline_db
     from humanize.multi_strategy_germline import choose_germlines_multi_strategy, format_multi_strategy_report
-    
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    out_path = args.out or os.path.join(
+        repo_root, "outputs",
+        os.path.splitext(os.path.basename(args.input))[0] + "_germline_compare.txt")
+    buf = []
+
     # Load germline database
     germline_dir = args.germline_dir or os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -408,9 +414,9 @@ def cmd_compare(args):
     fmt, chains = parse_input(args.input, args.format,
                               numbering=args.numbering)
     
-    print(f"\n{'='*100}")
-    print(f"Germline Comparison Report (Step 1) [numbering: {args.numbering}]")
-    print(f"{'='*100}\n")
+    buf.append(f"\n{'='*100}")
+    buf.append(f"Germline Comparison Report (Step 1) [numbering: {args.numbering}]")
+    buf.append(f"{'='*100}\n")
     
     if args.numbering == "imgt":
         _num_h, _num_l = number_heavy_imgt, number_light_imgt
@@ -427,15 +433,24 @@ def cmd_compare(args):
         result = choose_germlines_multi_strategy(
             numbered, db, is_vhh=chain.is_vhh, numbering=args.numbering)
         
-        # Display comparison table
-        print(format_multi_strategy_report(result))
+        # Capture comparison table
+        report_text = format_multi_strategy_report(result)
+        buf.append(report_text)
     
-    print(f"\n{'='*100}")
-    print("Next step: Run full pipeline with chosen germline strategy:")
-    print("  python -m scripts.humanize.cli run --input <fasta> --germline-strategy <strategy>")
-    print("  or force specific germline:")
-    print("  python -m scripts.humanize.cli run --input <fasta> --force-germline VH=<gene> VL=<gene>")
-    print(f"{'='*100}\n")
+    buf.append(f"\n{'='*100}")
+    buf.append("Next step: Run full pipeline with chosen germline strategy:")
+    buf.append("  python -m scripts.humanize.cli run --input <fasta> --germline-strategy <strategy>")
+    buf.append("  or force specific germline:")
+    buf.append("  python -m scripts.humanize.cli run --input <fasta> --force-germline VH=<gene> VL=<gene>")
+    buf.append(f"{'='*100}\n")
+    
+    # Print and write
+    full_output = "\n".join(buf)
+    print(full_output)
+    with open(out_path, "w") as f:
+        f.write(full_output)
+    print(f"[saved] {out_path}")
+    return 0
     
     return 0
 
@@ -517,6 +532,9 @@ def main(argv=None):
                            choices=["kabat", "imgt"],
                            help="numbering coordinate space (must match the "
                                 "later 'run --numbering')")
+    p_compare.add_argument("--out", default=None,
+                           help="output file for full comparison table "
+                                "(default: outputs/<stem>_germline_compare.txt)")
     p_compare.set_defaults(func=cmd_compare)
 
     # ---- rmsd: compare external variant structures to a donor structure ----

@@ -45,6 +45,10 @@ FR2 hallmark (Kabat 37/44/45/47) plus single-chain status.
    cvi_best / min_backmutations (T1+T2) / current (top-30% FR, max CDR) /
    adimab_frequency / pioneer_frequency / composite_3axis. Default `auto` =
    VH `adimab_frequency`, VL `current` (see docs/scoring.md).
+   **Output persistence**: `compare` auto-writes the full untruncated table to
+   `outputs/<stem>_germline_compare.txt` (repo working tree, gitignored).
+   Use `--out <path>` to override. Never rely on terminal scrollback; always
+   read the saved file for germline decisions.
 3. **CDR grafting** — per scheme (kabat/chothia/abm/imgt), all four are
    reported; the variant ladder uses the scheme chosen with `--scheme`.
    VHH: the FR2 hallmark residues 37/44/45/47 are ALWAYS kept from the donor.

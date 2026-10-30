@@ -29,4 +29,8 @@ tools/pataa_homology/database/tax*
 # IgFold AntiBERTy weights (downloaded from HuggingFace)
 tools/igfold/antiberty_weights/
 
+# HLAIIPred source clone (third-party, editable install target; see
+# tools/immunogenicity/README.md - do not delete, it is the package body)
+tools/immunogenicity/HLAIIPred/
+
 

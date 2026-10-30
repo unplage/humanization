@@ -132,7 +132,7 @@ python3 tools/stability_predictor/stability_analyzer.py \
     --pdb outputs/step3/igfold_variants/<name>_V0.pdb \
     --chain all \
     --pipeline-json outputs/step3/humanization_result.json \
-    --tiers T1,T2 \
+    --tiers all \
     --thermompnn-dir ~/ThermoMPNN \
     --python "conda run -n thermoMPNN python" \
     --output outputs/stability_<name>_V0 \
@@ -141,7 +141,7 @@ python3 tools/stability_predictor/stability_analyzer.py \
 
 What happens:
 
-- Loads only T1/T2 back-mutation candidates from the pipeline JSON.
+- Loads all back-mutation candidates (T1/T2/T3) from the pipeline JSON.
 - Maps each candidate to the structure residue and decides the direction:
   - structure residue == human → evaluate human→donor (`ddG_bm = ddG`)
   - structure residue == donor → evaluate donor→human (`ddG_bm = -ddG`)
@@ -211,13 +211,14 @@ This is the best way to verify that a Kabat label maps to the expected
 python3 tools/stability_predictor/stability_analyzer.py \
     --pdb <V0.pdb> --chain all \
     --pipeline-json <step3>/humanization_result.json \
-    --tiers T1,T2 \
+    --tiers all \
     --thermompnn-dir ~/ThermoMPNN \
     --python "conda run -n thermoMPNN python" \
     --output <outdir> --all-formats
 ```
 
-- `--tiers T1,T2` is the default. Use `--tiers all` to include T3.
+- `--tiers all` is the default and evaluates every tier (T1/T2/T3). Restrict with
+  `--tiers T1,T2` when only the must-keep and recommended positions matter.
 - `--pipeline-chain H` (or `L`, or a full chain name) restricts a multi-chain
   JSON to one chain. Matching is by chain `name` or `chain_type`.
 - Do **not** combine `--pipeline-json` with `--positions`; the tool will reject
@@ -229,7 +230,7 @@ python3 tools/stability_predictor/stability_analyzer.py \
 python3 tools/stability_predictor/stability_analyzer.py \
     --pdb <V0.pdb> --chain H \
     --backmutations-csv <step3>/backmutations_<name>.H.csv \
-    --tiers T1,T2 \
+    --tiers all \
     --thermompnn-dir ~/ThermoMPNN \
     --python "conda run -n thermoMPNN python" \
     --output <outdir> --json
@@ -262,7 +263,7 @@ python3 tools/stability_predictor/stability_analyzer.py \
 python3 tools/stability_predictor/stability_analyzer.py \
     --pdb-dir outputs/step3/af3/ --chain all \
     --pipeline-json outputs/step3/humanization_result.json \
-    --tiers T1,T2 \
+    --tiers all \
     --thermompnn-dir ~/ThermoMPNN \
     --python "conda run -n thermoMPNN python" \
     --output outputs/stability_batch --json
@@ -280,7 +281,7 @@ The CLI accepts the same options:
 python3 scripts/humanize/cli.py stability \
     --pdb <V0.pdb> --chain all \
     --pipeline-json <step3>/humanization_result.json \
-    --tiers T1,T2 \
+    --tiers all \
     --thermompnn-dir ~/ThermoMPNN \
     --python "conda run -n thermoMPNN python" \
     --output <outdir> --all-formats
@@ -300,7 +301,7 @@ python3 scripts/humanize/cli.py stability \
 | `--pipeline-json FILE` | Targeted back-mutation mode from `humanization_result.json` |
 | `--pipeline-chain H` | Restrict the JSON to one chain (`name` or `chain_type`) |
 | `--backmutations-csv FILE` | Targeted back-mutation mode from a CSV |
-| `--tiers T1,T2` | Tiers to evaluate (default `T1,T2`; use `all` for T1+T2+T3) |
+| `--tiers all` | Tiers to evaluate (default `all` = T1+T2+T3; use `T1,T2` to restrict) |
 | `--thermompnn-dir DIR` | Path to the ThermoMPNN repository |
 | `--python ...` | ThermoMPNN Python interpreter or `conda run ...` command |
 | `--timeout 1800` | Inference timeout in seconds (default 1800) |
