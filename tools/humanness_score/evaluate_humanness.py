@@ -540,8 +540,6 @@ def main():
     parser.add_argument("--vl", help="VL sequence (amino acids)")
     parser.add_argument("--db-dir", help="Germline database directory")
     parser.add_argument("--top", type=int, default=10, help="Number of top germlines to show")
-    parser.add_argument("--no-imgt", action="store_true",
-                        help="Skip IMGT scoring (no ANARCI required)")
     args = parser.parse_args()
 
     if not args.vh and not args.vl and not args.input:
@@ -560,15 +558,33 @@ def main():
         print("ERROR: no valid antibody sequences to evaluate", file=sys.stderr)
         return 1
 
-    imgt_genes = None
-    if not args.no_imgt:
-        imgt_genes = load_imgt_germline(args.db_dir or "")
-        if not imgt_genes:
-            print(
-                "  [WARN] IMGT germline database unavailable; IMGT results "
-                "will be N/A (expected data/germline/abnumber_human_imgt.json)",
-                file=sys.stderr,
-            )
+    # Check ANARCI availability (required for IMGT)
+    try:
+        from scripts.humanize.anarci_adapter import number_with_anarci_imgt
+        test_result = number_with_anarci_imgt("EVQLVESGGGLVQPGGSLRLSCAASGFTFTDYTMHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCARMDYWGQGTLVTVSS", "H")
+        if test_result is None:
+            print("ERROR: ANARCI IMGT numbering failed. Please install ANARCI for IMGT evaluation:", file=sys.stderr)
+            print("  pip install anarci", file=sys.stderr)
+            return 1
+    except ImportError:
+        print("ERROR: ANARCI not installed. Required for IMGT numbering (WHO/INN/USAN standard).", file=sys.stderr)
+        print("  Install with: pip install anarci", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"ERROR: ANARCI IMGT numbering failed: {e}", file=sys.stderr)
+        return 1
+
+    # Load IMGT germline database
+    imgt_genes = load_imgt_germline(args.db_dir or "")
+    if not imgt_genes:
+        print(
+            "ERROR: IMGT germline database unavailable. Required for IMGT evaluation.",
+            file=sys.stderr,
+        )
+        print("  Expected: data/germline/abnumber_human_imgt.json", file=sys.stderr)
+        return 1
+
+    print("  [INFO] IMGT evaluation enabled (ANARCI + IMGT germline DB)")
 
     evaluated = []
     for name, chain_type, seq, numbered in sequences:
@@ -587,12 +603,15 @@ def main():
             print(format_sequence_comparison_table(
                 numbered, best_gene.numbered, chain_type))
 
-        scored_imgt = None
-        if not args.no_imgt:
-            scored_imgt, numbered_imgt = evaluate_sequence_imgt(
-                chain_type, seq, args.db_dir, imgt_genes=imgt_genes)
-            print(format_results_imgt(
-                chain_type, seq, scored_imgt, numbered_imgt, args.top))
+        scored_imgt, numbered_imgt = evaluate_sequence_imgt(
+            chain_type, seq, args.db_dir, imgt_genes=imgt_genes)
+        if not scored_imgt or not numbered_imgt:
+            print(f"  [ERROR] {name}: IMGT evaluation failed - ANARCI or IMGT germline DB unavailable", file=sys.stderr)
+            errors.append((name, "IMGT evaluation failed"))
+            continue
+
+        print(format_results_imgt(
+            chain_type, seq, scored_imgt, numbered_imgt, args.top))
 
         evaluated.append((name, chain_type, seq, scored, numbered, scored_imgt))
 

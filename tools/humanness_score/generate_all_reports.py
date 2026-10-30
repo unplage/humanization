@@ -97,7 +97,7 @@ def _region_stats(best_scores, key):
 
 
 def evaluate_antibody(name, sequence, chain_type, db_dir="", numbered_kabat=None,
-                      imgt_genes=None, include_imgt=True):
+                      imgt_genes=None):
     """Evaluate a single antibody and return comprehensive results."""
     results = {}
 
@@ -136,72 +136,38 @@ def evaluate_antibody(name, sequence, chain_type, db_dir="", numbered_kabat=None
         'diffs': diffs,
     }
 
-    if not include_imgt:
-        results['imgt'] = {
-            'available': False,
-            'best_gene': 'N/A',
-            'fr_identity': 0.0,
-            'cdr_identity': 0.0,
-            'all_identity': 0.0,
-            'n_diff': 0,
-            'usan_class': 'N/A',
-            'n_query': 0,
-            'n_compared': 0,
-            'coverage': 0.0,
-            'n_query_only': 0,
-            'n_germline_only': 0,
-            'regions': {},
-            'diffs': [],
-        }
-        results['cdrs'] = None
-    else:
-        scored_imgt, numbered_imgt = evaluate_sequence_imgt(
-            chain_type, sequence, db_dir=db_dir, imgt_genes=imgt_genes)
-        if scored_imgt and numbered_imgt:
-            best_gene_imgt, best_scores_imgt = scored_imgt[0]
-            imgt_diffs = []
-            q_map_imgt = numbered_imgt.posmap()
-            g_map_imgt = getattr(best_gene_imgt, '_imgt_posmap', {}) or {}
-            for pos in q_map_imgt:
-                if pos in g_map_imgt and q_map_imgt[pos] != g_map_imgt[pos]:
-                    region = get_imgt_region(pos)
-                    imgt_diffs.append((pos, q_map_imgt[pos], g_map_imgt[pos], region))
+    # IMGT evaluation (mandatory)
+    scored_imgt, numbered_imgt = evaluate_sequence_imgt(
+        chain_type, sequence, db_dir=db_dir, imgt_genes=imgt_genes)
+    if not scored_imgt or not numbered_imgt:
+        raise RuntimeError(f"IMGT evaluation failed for {name!r} - ANARCI or IMGT germline DB unavailable")
 
-            results['imgt'] = {
-                'available': True,
-                'best_gene': best_gene_imgt.gene_id,
-                'fr_identity': best_scores_imgt['fr_identity'],
-                'cdr_identity': best_scores_imgt['cdr_identity'],
-                'all_identity': best_scores_imgt['all_identity'],
-                'n_diff': len(imgt_diffs),
-                'usan_class': get_usan_class(best_scores_imgt['fr_identity']),
-                'n_query': best_scores_imgt.get('n_query', 0),
-                'n_compared': best_scores_imgt.get('n_compared', 0),
-                'coverage': best_scores_imgt.get('coverage', 0.0),
-                'n_query_only': best_scores_imgt.get('n_query_only', 0),
-                'n_germline_only': best_scores_imgt.get('n_germline_only', 0),
-                'regions': best_scores_imgt.get('imgt_region_stats', {}),
-                'diffs': imgt_diffs,
-            }
-            results['cdrs'] = _cdrs_from_numbered(numbered_imgt)
-        else:
-            results['imgt'] = {
-                'available': False,
-                'best_gene': 'N/A',
-                'fr_identity': 0.0,
-                'cdr_identity': 0.0,
-                'all_identity': 0.0,
-                'n_diff': 0,
-                'usan_class': 'N/A',
-                'n_query': 0,
-                'n_compared': 0,
-                'coverage': 0.0,
-                'n_query_only': 0,
-                'n_germline_only': 0,
-                'regions': {},
-                'diffs': [],
-            }
-            results['cdrs'] = None
+    best_gene_imgt, best_scores_imgt = scored_imgt[0]
+    imgt_diffs = []
+    q_map_imgt = numbered_imgt.posmap()
+    g_map_imgt = getattr(best_gene_imgt, '_imgt_posmap', {}) or {}
+    for pos in q_map_imgt:
+        if pos in g_map_imgt and q_map_imgt[pos] != g_map_imgt[pos]:
+            region = get_imgt_region(pos)
+            imgt_diffs.append((pos, q_map_imgt[pos], g_map_imgt[pos], region))
+
+    results['imgt'] = {
+        'available': True,
+        'best_gene': best_gene_imgt.gene_id,
+        'fr_identity': best_scores_imgt['fr_identity'],
+        'cdr_identity': best_scores_imgt['cdr_identity'],
+        'all_identity': best_scores_imgt['all_identity'],
+        'n_diff': len(imgt_diffs),
+        'usan_class': get_usan_class(best_scores_imgt['fr_identity']),
+        'n_query': best_scores_imgt.get('n_query', 0),
+        'n_compared': best_scores_imgt.get('n_compared', 0),
+        'coverage': best_scores_imgt.get('coverage', 0.0),
+        'n_query_only': best_scores_imgt.get('n_query_only', 0),
+        'n_germline_only': best_scores_imgt.get('n_germline_only', 0),
+        'regions': best_scores_imgt.get('imgt_region_stats', {}),
+        'diffs': imgt_diffs,
+    }
+    results['cdrs'] = _cdrs_from_numbered(numbered_imgt)
 
     results['kabat_cdrs'] = _cdrs_from_numbered(numbered_kabat)
     return results
@@ -260,14 +226,6 @@ def add_antibody_section(doc, name, sequence, chain_type, results):
 
     imgt = results['imgt']
     doc.add_heading('IMGT Numbering (WHO/INN/USAN)', level=3)
-    if not imgt.get('available', False):
-        doc.add_paragraph(
-            'IMGT numbering unavailable (ANARCI or IMGT germline DB missing); '
-            'IMGT scores shown as N/A'
-        )
-        doc.add_page_break()
-        return
-
     doc.add_paragraph(f'Best germline: {imgt["best_gene"]}')
     doc.add_paragraph(f'FR identity: {imgt["fr_identity"]*100:.1f}%')
     doc.add_paragraph(f'CDR identity: {imgt["cdr_identity"]*100:.1f}%')
@@ -331,7 +289,7 @@ def create_combined_report(all_results, output_path):
     doc.add_paragraph(f'Total antibodies evaluated: {len(all_results)}')
     doc.add_paragraph('Evaluation methods: Kabat numbering + IMGT numbering (WHO/INN/USAN)')
     doc.add_paragraph('Excluded regions: CDR3 (donor) and FR4 (human J gene)')
-    doc.add_paragraph('Missing IMGT evaluations are shown as N/A, never 0.0%')
+    doc.add_paragraph('IMGT evaluation is mandatory (requires ANARCI + IMGT germline DB)')
     doc.add_paragraph('Note: Official USAN/INN naming requires manufacturing process knowledge')
 
     doc.add_page_break()
@@ -381,15 +339,11 @@ def create_combined_report(all_results, output_path):
         row = table_imgt.add_row()
         row.cells[0].text = name
         row.cells[1].text = 'VH' if chain_type == 'H' else 'VL'
-        if imgt.get('available', False):
-            row.cells[2].text = imgt['best_gene']
-            row.cells[3].text = f"{imgt['fr_identity']*100:.1f}%"
-            row.cells[4].text = f"{imgt['cdr_identity']*100:.1f}%"
-            row.cells[5].text = str(imgt['n_diff'])
-            row.cells[6].text = imgt.get('usan_class', 'N/A')
-        else:
-            for cell_index in range(2, 7):
-                row.cells[cell_index].text = 'N/A'
+        row.cells[2].text = imgt['best_gene']
+        row.cells[3].text = f"{imgt['fr_identity']*100:.1f}%"
+        row.cells[4].text = f"{imgt['cdr_identity']*100:.1f}%"
+        row.cells[5].text = str(imgt['n_diff'])
+        row.cells[6].text = imgt.get('usan_class', 'N/A')
 
     doc.add_paragraph()
 
@@ -419,8 +373,6 @@ def main():
     parser.add_argument('--outdir', default='outputs/reports',
                         help='Directory for generated .docx files')
     parser.add_argument('--db-dir', help='Germline database directory')
-    parser.add_argument('--no-imgt', action='store_true',
-                        help='Skip IMGT scoring (no ANARCI required)')
     args = parser.parse_args()
 
     fasta_path = args.input_path or args.fasta or 'data/examples/antibody_panel.fasta'
@@ -442,17 +394,35 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    imgt_genes = None
-    if not args.no_imgt:
-        imgt_genes = load_imgt_germline(args.db_dir or "")
-        if not imgt_genes:
-            print(
-                "  [WARN] IMGT germline database unavailable; IMGT results "
-                "will be N/A (expected data/germline/abnumber_human_imgt.json)",
-                file=sys.stderr,
-            )
+    # Check ANARCI availability (required for IMGT)
+    try:
+        from scripts.humanize.anarci_adapter import number_with_anarci_imgt
+        # Test ANARCI with a dummy sequence
+        test_result = number_with_anarci_imgt("EVQLVESGGGLVQPGGSLRLSCAASGFTFTDYTMHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCARMDYWGQGTLVTVSS", "H")
+        if test_result is None:
+            print("ERROR: ANARCI IMGT numbering failed. Please install ANARCI for IMGT evaluation:", file=sys.stderr)
+            print("  pip install anarci", file=sys.stderr)
+            return 1
+    except ImportError:
+        print("ERROR: ANARCI not installed. Required for IMGT numbering (WHO/INN/USAN standard).", file=sys.stderr)
+        print("  Install with: pip install anarci", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"ERROR: ANARCI IMGT numbering failed: {e}", file=sys.stderr)
+        return 1
+
+    # Load IMGT germline database
+    imgt_genes = load_imgt_germline(args.db_dir or "")
+    if not imgt_genes:
+        print(
+            "ERROR: IMGT germline database unavailable. Required for IMGT evaluation.",
+            file=sys.stderr,
+        )
+        print("  Expected: data/germline/abnumber_human_imgt.json", file=sys.stderr)
+        return 1
 
     print(f"正在评估 {len(sequences)} 个抗体序列...")
+    print("  [INFO] IMGT evaluation enabled (ANARCI + IMGT germline DB)")
 
     all_results = []
     used_names = set()
@@ -465,7 +435,6 @@ def main():
                 db_dir=args.db_dir or "",
                 numbered_kabat=numbered_kabat,
                 imgt_genes=imgt_genes,
-                include_imgt=not args.no_imgt,
             )
         except Exception as exc:
             message = str(exc) or exc.__class__.__name__
