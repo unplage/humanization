@@ -1705,8 +1705,8 @@ Examples:
         help="backmutations_*.csv from the pipeline (targeted back-mutation mode)",
     )
     parser.add_argument(
-        "--tiers", default="T1,T2",
-        help="tiers to evaluate in targeted mode: 'T1,T2', 'T1,T2,T3', or 'all' (default: T1,T2)",
+        "--tiers", default="all",
+        help="tiers to evaluate in targeted mode: 'T1,T2', 'T1,T2,T3', or 'all' (default: all)",
     )
     parser.add_argument("--thermompnn-dir", required=True, help="path to ThermoMPNN repo")
     parser.add_argument(
