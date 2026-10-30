@@ -70,7 +70,8 @@ def cmd_run(args):
         ),
         mpnn=MPNNConfig(
             mode=args.mpnn_mode,
-            script=args.mpnn_script or "",
+            script=args.mpnn_script or "protein_mpnn.py",
+            python_bin=args.mpnn_python or "",
             outdir=os.path.join(args.outdir, "mpnn"),
         ),
         interactive_indel=getattr(args, 'interactive_indel', False),
@@ -503,7 +504,11 @@ def main(argv=None):
     p_run.add_argument("--af3-binary", default="", help="path to run_alphafold.py")
     p_run.add_argument("--af3-api", default="", help="AF3 API base URL")
     p_run.add_argument("--mpnn-mode", default="off", choices=["off", "local"])
-    p_run.add_argument("--mpnn-script", default="", help="path to protein_mpnn.py")
+    p_run.add_argument("--mpnn-script", default="", help="path to protein_mpnn.py (or the adapter)")
+    p_run.add_argument("--mpnn-python", default="",
+                       help="python binary with torch/ProteinMPNN deps "
+                            "(e.g. ~/miniconda3/envs/proteinMPNN/bin/python); "
+                            "defaults to the current python")
     p_run.add_argument("--interactive-indel", action="store_true",
                        help="enable interactive FR indel selection (VH+VL)")
     p_run.add_argument("--af3-rmsd", action="store_true",
