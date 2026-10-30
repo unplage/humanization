@@ -573,8 +573,8 @@ def main(argv=None):
                         help="restrict --pipeline-json to a chain name or H/L")
     p_stab.add_argument("--backmutations-csv",
                         help="backmutations_*.csv (targeted back-mutation mode)")
-    p_stab.add_argument("--tiers", default="T1,T2",
-                        help="tiers to evaluate in targeted mode (default: T1,T2; use all)")
+    p_stab.add_argument("--tiers", default="all",
+                        help="tiers to evaluate in targeted mode (default: all)")
     p_stab.add_argument("--timeout", type=int, default=1800,
                         help="ThermoMPNN timeout in seconds (default: 1800)")
     p_stab.add_argument("--thermompnn-dir", required=True, help="path to ThermoMPNN repo (required)")
