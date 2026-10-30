@@ -70,23 +70,42 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 # 3. Install HLAIIPred dependencies
 pip install scipy numpy pandas tqdm biopython pyyaml
 
-# 4. Clone and install HLAIIPred (Apache-2.0 license)
-git clone https://github.com/pfizer-opensource/HLAIIPred.git /tmp/HLAIIPred
-cd /tmp/HLAIIPred && pip install -e .
+# 4. Clone HLAIIPred (Apache-2.0 license) INTO this tool directory and
+#    install it from there. The clone must stay at this path: the install
+#    below is editable, so the package body is read from this directory at
+#    import time. Deleting or moving it breaks `import hlapred`.
+HLAIIPRED_DIR=tools/immunogenicity/HLAIIPred   # from the repository root
+git clone https://github.com/pfizer-opensource/HLAIIPred.git "$HLAIIPRED_DIR"
+pip install -e "$HLAIIPRED_DIR"
 
 # 5. Copy model files to project directory
 mkdir -p tools/immunogenicity/models
-cp /tmp/HLAIIPred/models/epT_0.pt tools/immunogenicity/models/
-cp /tmp/HLAIIPred/models/epT_1.pt tools/immunogenicity/models/
+cp "$HLAIIPRED_DIR"/models/epT_0.pt tools/immunogenicity/models/
+cp "$HLAIIPRED_DIR"/models/epT_1.pt tools/immunogenicity/models/
 
 # 6. Install structural risk assessment dependencies
 pip install freesasa python-docx
 
-# 7. Cleanup
-rm -rf /tmp/HLAIIPred
-
-# 8. Verify installation
+# 7. Verify installation (run from the repository root)
 python3 tools/immunogenicity/immunogenicity_analyzer.py --check
+#   Expected:
+#     hlaiipred       available
+#     heuristic       available
+#     freesasa        available
+```
+
+> **Do not delete `tools/immunogenicity/HLAIIPred/`.** An editable install
+> (`pip install -e .`) keeps the package body in the clone directory and only
+> writes a path pointer into `site-packages`. Removing the directory leaves the
+> pointer dangling and `import hlapred` fails, which silently downgrades the
+> tool to the heuristic backend. The clone is third-party code and is
+> git-ignored; it is not meant to be committed or deleted.
+
+If the editable install is ever broken, re-point it at the existing clone
+instead of re-downloading anything:
+
+```bash
+pip install -e tools/immunogenicity/HLAIIPred --force-reinstall --no-deps
 ```
 
 ### Dependencies

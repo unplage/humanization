@@ -763,7 +763,7 @@
   "source_path": "/home/jiemiaoxing/work/opencode_task/humanization/data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx",
   "source_sha256": "f905aaed00f7bf7e08c6166124fa4d83ae7cf091a7383983c4ba85dddfd96951",
   "source_rows": 1133,
-  "generated_at": "2026-10-29T03:19:33Z",
+  "generated_at": "2026-10-30T03:30:34Z",
   "tool_version": "2.0.0",
   "libraries": {
     "anarci": "2026.2.13.2",
