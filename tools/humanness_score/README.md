@@ -4,7 +4,7 @@ Evaluate the humanization degree of antibody sequences by comparing against huma
 
 ## Features
 
-- **Dual Numbering**: Both Kabat and IMGT numbering schemes
+- **Dual Numbering**: Both Kabat and IMGT numbering schemes (IMGT is mandatory)
 - **Germline Comparison**: Compare against all human V genes
 - **Druggability Tie-break**: When several germlines give identical (FR, CDR)
   identity, the tool deterministically prefers established druggable frameworks
@@ -21,6 +21,8 @@ Evaluate the humanization degree of antibody sequences by comparing against huma
 ```bash
 pip install biopython anarci python-docx
 ```
+
+**ANARCI is required** for IMGT numbering (WHO/INN/USAN standard). The tool will error out if ANARCI is not installed.
 
 ## Usage
 
@@ -44,10 +46,10 @@ python3 tools/humanness_score/evaluate_humanness.py \
 python3 tools/humanness_score/generate_all_reports.py \
     data/examples/antibody_panel.fasta
 
-# Explicit output directory; skip IMGT when ANARCI is not available
+# Explicit output directory
 python3 tools/humanness_score/generate_all_reports.py \
     data/examples/antibody_panel.fasta \
-    --outdir outputs/humanness --no-imgt
+    --outdir outputs/humanness
 ```
 
 ## Output
@@ -76,6 +78,34 @@ python3 tools/humanness_score/generate_all_reports.py \
   ---------- ------------ -------- --------
   FR1        88.0%     22       25
   FR2        86.7%     13       15
+  ...
+
+  Humanization estimate: Academic: likely Humanized-like
+  (Academic estimate only; official USAN/INN naming requires manufacturing-process knowledge)
+
+======================================================================
+  H chain (120 residues) - IMGT numbering
+======================================================================
+  (Per WHO/INN/USAN standards for drug naming)
+
+  Top 10 human germline matches (IMGT):
+  Rank   Gene                 FR id      CDR id     Overall
+  ------ -------------------- ---------- ---------- ----------
+  1      IGHV1-69*01          0.8421     0.4444     0.7451
+  ...
+
+  Best match (IMGT): IGHV1-69*01
+    FR identity:  0.8421 (84.2%)
+    CDR identity: 0.4444 (44.4%)
+    Overall:      0.7451 (74.5%)
+    Compared:     111/112 query positions (coverage 99.1%); query-only 1, germline-only 0
+
+  IMGT region breakdown:
+  Region     Identity     Match    Total
+  ---------- ------------ -------- --------
+  FR1        88.5%     23       26
+  CDR1       42.9%     3        7
+  ...
 
   Humanization estimate: Academic: likely Humanized-like
   (Academic estimate only; official USAN/INN naming requires manufacturing-process knowledge)
@@ -83,9 +113,8 @@ python3 tools/humanness_score/generate_all_reports.py \
 
 ### Word Reports
 
-- Individual report per antibody
+- Individual report per antibody (Kabat + IMGT sections)
 - Combined summary report with all antibodies
-- IMGT cells show `N/A` when ANARCI/IMGT germline is unavailable (never `0.0%`)
 - Report filenames are sanitized; duplicate FASTA names get unique suffixes
 - Invalid FASTA records are skipped and reported; the command exits non-zero if any failed
 
@@ -96,10 +125,12 @@ python3 tools/humanness_score/generate_all_reports.py \
 - VL: FR1 1-23, CDR1 24-34, FR2 35-49, CDR2 50-56, FR3 57-88, CDR3 89-97, FR4 98-107
 - Used internally by the pipeline
 
-### IMGT Numbering
+### IMGT Numbering (Mandatory)
 - FR1: 1-26, CDR1: 27-38, FR2: 39-55, CDR2: 56-65, FR3: 66-104, CDR3: 105-117, FR4: 118-128
   (identical for VH and VL, Lefranc 2003)
-- Used for WHO/INN/USAN drug naming
+- **Used for WHO/INN/USAN drug naming** — this is the standard for regulatory submissions
+- Requires ANARCI (installed via `pip install anarci`) and the bundled IMGT germline database
+  (`data/germline/abnumber_human_imgt.json`)
 
 ## Humanization Classification
 
@@ -121,6 +152,24 @@ python3 tools/humanness_score/generate_all_reports.py \
 - **Match/Count**: Reported region values are exact position counts (`match/total`), not rounded back-computed percentages
 - **Coverage**: Headline identity uses positions present in both query and germline; coverage/query-only/germline-only are reported separately so indels are visible without changing the historical metric
 - **Note**: The terminal "Sequence identity summary" table is a raw per-region diagnostic that *includes* CDR3 and FR4 and is aligned by position label, so its numbers will not reconcile with the headline scores
+
+## Error Handling
+
+The tool **requires** ANARCI and the IMGT germline database for IMGT evaluation. If either is missing, the tool will error out with instructions:
+
+```
+ERROR: ANARCI not installed. Required for IMGT numbering (WHO/INN/USAN standard).
+  Install with: pip install anarci
+```
+
+or
+
+```
+ERROR: IMGT germline database unavailable. Required for IMGT evaluation.
+  Expected: data/germline/abnumber_human_imgt.json
+```
+
+There is **no `--no-imgt` option** — IMGT evaluation is mandatory for WHO/INN/USAN compliance.
 
 ## Example Output Files
 
