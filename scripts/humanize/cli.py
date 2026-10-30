@@ -9,8 +9,8 @@ Usage:
                   [--antigen SEQ] [--donor-structure PDB]
   humanize setup-germline [--dir DIR]      # download NCBI IgBLAST germline
   humanize setup-check                     # report tool availability
-  humanize stability --pdb FILE            # predict ΔG stability
-  humanize stability --wt FILE --mutant FILE  # predict ΔΔG
+  humanize stability --pdb FILE --pipeline-json RESULT.json  # back-mutation ΔΔG
+  humanize stability --pdb FILE --positions 37,44,45           # SSM at Kabat positions
 """
 
 from __future__ import annotations
@@ -289,7 +289,8 @@ def cmd_learn(args):
 def cmd_stability(args):
     """Predict protein stability (ΔΔG) for antibody structures using ThermoMPNN."""
     import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(_root, "tools"))
     
     from stability_predictor.stability_analyzer import main as stability_main
     
@@ -301,8 +302,18 @@ def cmd_stability(args):
         sys.argv.extend(["--pdb-dir", args.pdb_dir])
     if args.chain:
         sys.argv.extend(["--chain", args.chain])
+    if args.chain_type:
+        sys.argv.extend(["--chain-type", args.chain_type])
     if args.positions:
         sys.argv.extend(["--positions", args.positions])
+    if getattr(args, "pipeline_json", None):
+        sys.argv.extend(["--pipeline-json", args.pipeline_json])
+    if getattr(args, "pipeline_chain", None):
+        sys.argv.extend(["--pipeline-chain", args.pipeline_chain])
+    if getattr(args, "backmutations_csv", None):
+        sys.argv.extend(["--backmutations-csv", args.backmutations_csv])
+    if getattr(args, "tiers", None):
+        sys.argv.extend(["--tiers", args.tiers])
     if args.thermompnn_dir:
         sys.argv.extend(["--thermompnn-dir", args.thermompnn_dir])
     if args.python:
@@ -317,6 +328,8 @@ def cmd_stability(args):
         sys.argv.append("--word")
     if args.all_formats:
         sys.argv.append("--all-formats")
+    if getattr(args, "timeout", None):
+        sys.argv.extend(["--timeout", str(args.timeout)])
     if args.verbose:
         sys.argv.append("--verbose")
     
@@ -359,8 +372,7 @@ def cmd_setup_check(args):
                 if os.path.exists(os.path.join(tm_path, "analysis", "custom_inference.py")):
                     # Check for checkpoint
                     ckpt = list(Path(tm_path).glob("models/*.ckpt")) + \
-                           list(Path(tm_path).glob("models/*.pt")) + \
-                           list(Path(tm_path).glob("vanilla_model_weights/*.pt"))
+                           list(Path(tm_path).glob("models/*.pt"))
                     if ckpt:
                         path = f"found at {tm_path} (ckpt: {ckpt[0].name})"
                     else:
@@ -549,8 +561,22 @@ def main(argv=None):
         "stability", help="predict protein mutational stability (ΔΔG) using ThermoMPNN")
     p_stab.add_argument("--pdb", help="single PDB/CIF file to analyze")
     p_stab.add_argument("--pdb-dir", help="directory of PDB/CIF files for batch analysis")
-    p_stab.add_argument("--chain", default="H", help="chain ID (default: H)")
-    p_stab.add_argument("--positions", help="comma-separated Kabat positions (e.g., '37,44,45' or 'H37,H44')")
+    p_stab.add_argument("--chain", default="H",
+                        help="chain ID, chain type (H/L), comma list, or 'all' (default: H)")
+    p_stab.add_argument("--chain-type", default="auto", choices=("auto", "H", "L"),
+                        help="force heavy/light numbering (default: auto)")
+    p_stab.add_argument("--positions",
+                        help="comma-separated TRUE Kabat positions (e.g., '37,44,45' or 'H37,H35A')")
+    p_stab.add_argument("--pipeline-json",
+                        help="humanization_result.json (targeted back-mutation mode)")
+    p_stab.add_argument("--pipeline-chain",
+                        help="restrict --pipeline-json to a chain name or H/L")
+    p_stab.add_argument("--backmutations-csv",
+                        help="backmutations_*.csv (targeted back-mutation mode)")
+    p_stab.add_argument("--tiers", default="T1,T2",
+                        help="tiers to evaluate in targeted mode (default: T1,T2; use all)")
+    p_stab.add_argument("--timeout", type=int, default=1800,
+                        help="ThermoMPNN timeout in seconds (default: 1800)")
     p_stab.add_argument("--thermompnn-dir", required=True, help="path to ThermoMPNN repo (required)")
     p_stab.add_argument("--python", required=True, help="Python binary for ThermoMPNN env (e.g., '~/miniconda3/envs/thermoMPNN/bin/python' or 'conda run -n thermoMPNN python')")
     p_stab.add_argument("--output", help="output directory for results")

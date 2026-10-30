@@ -218,25 +218,42 @@ python3 tools/tap_profiler/tap_analyzer.py --vh <VH_SEQ> --vl <VL_SEQ>
 
 ### 6. 稳定性预测 (stability_predictor)
 
-**功能**：使用 ThermoMPNN 预测回复突变对稳定性的影响 (ΔΔG)
+**功能**：使用 ThermoMPNN 预测回复突变对折叠稳定性的影响 (ΔΔG)，并映射到真实 Kabat/IMGT 位点。推荐在 **V0 结构**（人源框架 + 供体 CDR + 供体位点回复突变）上评估，此时直接测量 human→donor 效应，无需符号翻转。
 
 **用法**：
 ```bash
-# 单结构分析（指定 Kabat 位点）
+# 推荐：直接评估 pipeline 的 T1/T2 回复突变（V0 结构，双链）
 python3 tools/stability_predictor/stability_analyzer.py \
-  --pdb <structure.pdb> --chain H \
-  --positions 37,44,45,47,48,49,67,69,71,73,76,78,80,82,87,94 \
+  --pdb <V0.pdb> --chain all \
+  --pipeline-json <step3>/humanization_result.json \
+  --tiers T1,T2 \
   --thermompnn-dir ~/ThermoMPNN \
   --python ~/miniconda3/envs/thermoMPNN/bin/python \
-  --output <outdir>
+  --output <outdir> --all-formats
 
-# 批量分析变体目录
+# 或从 CSV 读取回复突变
 python3 tools/stability_predictor/stability_analyzer.py \
-  --pdb-dir <af3_output_dir> --chain H \
+  --pdb <V0.pdb> --chain H \
+  --backmutations-csv <step3>/backmutations_<name>.H.csv \
+  --thermompnn-dir ~/ThermoMPNN \
+  --python ~/miniconda3/envs/thermoMPNN/bin/python \
+  --output <outdir> --json
+
+# 通用 SSM：--positions 是真实 Kabat 位点（不是 ThermoMPNN 的 0-based index）
+python3 tools/stability_predictor/stability_analyzer.py \
+  --pdb <structure.pdb> --chain H \
+  --positions H37,H44,H45,H67,H69 \
   --thermompnn-dir ~/ThermoMPNN \
   --python ~/miniconda3/envs/thermoMPNN/bin/python \
   --output <outdir> --json
 ```
+
+**关键点**：
+- `ddG_backmutation <= -0.2` 支持回复突变；`>= 1.0` 反对；中间为中性/谨慎。
+- V2/V3 结构（WT=donor）测量的是 donor→human，输出用 `-ddG` 近似；**决策优先用 V0**。
+- 每条链按单体计算，丢失 VH/VL 界面；Fab 请同时看 H/L（`--chain all`），界面位点以结构接触/埋藏证据为准。
+- checkpoint 必须位于 `ThermoMPNN/models/`；`vanilla_model_weights/` 是 ProteinMPNN 权重，不会被使用。
+- 详见 `tools/stability_predictor/README.md`。
 
 ---
 
@@ -341,7 +358,7 @@ python3 scripts/humanize/cli.py setup-check
 1. **PTM 模块**：仅预测常见 PTM（N-糖基化、脱酰胺、氧化），不覆盖所有修饰
 2. **免疫原性模块**：仅使用 9 个常用 DRB1 allele，不覆盖所有 HLA 类型
 3. **结构预测**：IgFold 精度低于 AF3，但速度快 100 倍
-4. **稳定性预测**：使用 ThermoMPNN 预测 ΔΔG，仅反映相对突变效应，不预测绝对折叠稳定性 (ΔG)；不替代实验验证
+4. **稳定性预测**：使用 ThermoMPNN 预测 ΔΔG，仅反映相对突变效应，不预测绝对折叠稳定性 (ΔG)；单链计算丢失 VH/VL 界面，且 V2/V3 上的符号翻转是近似；不替代实验验证
 
 ---
 
