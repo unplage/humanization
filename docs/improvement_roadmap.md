@@ -2,14 +2,22 @@
 （人源化改进路线图与行业对比）
 
 本文回答三个问题：
+
 1. 当前版本（v0.1）在回复突变阶段还有哪些改进空间？
 2. 如何以**最少的回复突变**保留**最大的亲和力**？（业界证据 + 具体算法）
-3. 与行业方案（WeMol / BioPhi / CUMAb / 矩阵移植 / paratope 移植等）、专利与
-   公开案例的对比。
+3. 与行业方案（WeMol / BioPhi / CUMAb / BI 矩阵移植 / paratope 移植等）、专利与公开案例的对比。
 
-> 已落地实现的部分（`scripts/humanize/minimal.py`，本版已交付）：
-> CVI 同源性指标、最小回复突变集（set-cover）、框架矩阵变体、
-> paratope（SDR）精确移植变体。其余列为路线图。
+> 已落地实现的部分（`scripts/humanize/` + `tools/`）：
+> - 多策略 germline 选择（9 策略：fr/cdr/composite/cvi/min_backmut/current/adimab/pioneer/composite_3axis + auto）
+> - CVI 同源性指标、最小回复突变集（set-cover）、框架矩阵变体
+> - paratope（SDR）精确移植变体（V_SDR，需抗原复合物）
+> - V0–V3 梯度 + Vmin（最小回复集）+ V_opt（结构导向设计面板）
+> - 结构回注（AF3/Boltz：buried / CDR 接触 / 抗原接触 / pLDDT）
+> - 稳定性评估（ThermoMPNN ΔΔG，`tools/stability_predictor`）
+> - 人源化交叉验证（BioPhi Sapiens + OASis，`tools/biophi`）
+> - 免疫原性分析（HLAIIPred MHC-II，`tools/immunogenicity`）
+> - 结构生成（Boltz-2，`tools/boltz`）
+> 其余列为路线图。
 
 ---
 
@@ -17,23 +25,34 @@
 
 ### 1.1 已具备的能力
 
-- 文献位置表驱动的分级（T1/T2/T3）：vernier / 界面 / canonical / VHH hallmark / Cys
-- AF3 结构提示回注（buried / CDR 接触 / 抗原接触）
-- 三维评分（结构 0.55 + 免疫原性 0.30 + 化学 0.15）
-- V0–V3 梯度 + 本次新增：Vmin（最小回复集）、V_SDR（paratope 移植）、框架矩阵
+| 模块 | 说明 |
+|------|------|
+| Germline 选择 | 9 策略 + auto 路由（VH=adimab_frequency，VL=current）；锁定指定基因 `--force-germline` |
+| CDR 移植 | Kabat/Chothia/AbM/IMGT 四种 CDR 定义；VHH hallmark 保护（37/44/45/47）与二硫键 Cys |
+| 回复突变分层 | T1/T2/T3，基于文献位置表（vernier/canonical/interface/CDR 接触/VHH hallmark/Cys） |
+| 结构回注 | AF3/Boltz 结构：buried、CDR 接触（side-chain/backbone 分离）、抗原接触、pLDDT、relSASA |
+| 最小回复突变集 | Vmin（set-cover，framework→CDR 接触恢复）；无结构时回退 T1 |
+| 框架矩阵 | 备选 germline 的 V2 面板 + CVI 对比 |
+| Paratope 移植 | V_SDR：仅移植抗原接触 CDR 残基 + T1/T2 支柱（需抗原复合物） |
+| V_opt 面板 | 结构导向贪婪面板，逐步恢复 framework→CDR 接触（`--design-panel`） |
+| 稳定性评估 | ThermoMPNN ΔΔG，V0/V2/V3 方向性 dG_bm，`tools/stability_predictor` |
+| 人源化交叉验证 | BioPhi Sapiens + OASis 9-mer，`tools/biophi` |
+| 免疫原性 | HLAIIPred MHC-II 表位 + heuristic fallback，`tools/immunogenicity` |
+| 结构生成 | Boltz-2 Fab/VHH 预测，`tools/boltz` |
+| 报告 | Markdown / JSON / CSV / DOCX（含 6. Back-mutation Analysis 与 OAS top-5 频率列） |
 
 ### 1.2 主要差距（按影响排序）
 
 | # | 差距 | 影响 | 业界对标 |
 |---|------|------|----------|
-| 1 | ~~单 germline 决策~~（已实现多策略）：9 种 germline 选择策略（FR/CDR/综合/CVI/最小回复突变/频率加权/3 轴）+ 框架矩阵变体 | 已通过多策略选择 + matrix 备选变体覆盖 | BI 矩阵移植、CUMAb 千框架能量排序 |
-| 2 | **无能量/结构稳定性评分**：回复突变选择基于文献特征，不直接评估"该突变对 CDR 构象/界面/稳定性的贡献" | 可能多回/漏回突变；不能区分功能等价设计 | Rosetta ddG（CUMAb/AbEL）、MOE、AF3 能量代理 |
-| 3 | **无免疫原性 ML 打分**：仅用 germline 匹配 + 暴露度代理 | 暴露的非人源残基不一定免疫原性最强；T 细胞表位（MHC-II）未建模 | BioPhi OAS 打分、SITA、netMHCIIpan、Abzena EpiScreen |
-| 4 | **变体数量少（4-6 个）**：无法覆盖组合空间 | 亲和力丢失后需人工迭代 | 组合回复突变库 + 高通量筛选（BI 210 graft 矩阵、噬菌体/酵母展示） |
-| 5 | **无 VH/VL 不对称处理**：VL 框架对亲和力的影响权重未单独体现 | VL 框架选择失误是亲和力丢失主因（BI：VL <60% 同源 → 98% 失活） | BI 的 VL 优先策略 |
-| 6 | **接触集缺失**：之前没有 framework→CDR 接触对数据 | 无法做"恢复接触"的最小集计算（本版已补 cdr_partners） | — |
-| 7 | **CDR3 内残基无结构级支持判断**：CDR3 全部照搬 | 部分 CDR3 尾段由 J 区提供更优 | J 交界精细处理 |
-| 8 | **无 ML/生成式人源化** | 无法自动探索"非回复突变"式人源化路径 | HuAbDiffusion、语言模型人源化、ProteinMPNN 框架再设计（已接适配器） |
+| 1 | **无能量/结构稳定性评分**：回复突变选择基于文献特征，不直接评估"该突变对 CDR 构象/界面/稳定性的贡献" | 可能多回/漏回突变；不能区分功能等价设计 | Rosetta ddG（CUMAb/AbEL）、MOE、AF3 能量代理 |
+| 2 | **无免疫原性 ML 打分**：仅用 germline 匹配 + 暴露度代理 | 暴露的非人源残基不一定免疫原性最强；T 细胞表位（MHC-II）未建模 | BioPhi OAS 打分、SITA、netMHCIIpan、Abzena EpiScreen |
+| 3 | **变体数量少（4-6 个）**：无法覆盖组合空间 | 亲和力丢失后需人工迭代 | 组合回复突变库 + 高通量筛选（BI 210 graft 矩阵、噬菌体/酵母展示） |
+| 4 | **无 VH/VL 不对称处理**：VL 框架对亲和力的影响权重未单独体现 | VL 框架选择失误是亲和力丢失主因（BI：VL <60% 同源 → 98% 失活） | BI 的 VL 优先策略 |
+| 5 | **接触集缺失**：framework→CDR 接触对已补，但 VH/VL 界面双侧接触未纳入 universe | 无法做"成对回复"的最小集计算 | — |
+| 6 | **CDR3 内残基无结构级支持判断**：CDR3 全部照搬 | 部分 CDR3 尾段由 J 区提供更优 | J 交界精细处理 |
+| 7 | **无 ML/生成式人源化** | 无法自动探索"非回复突变"式人源化路径 | HuAbDiffusion、语言模型人源化、ProteinMPNN 框架再设计（已接适配器） |
+| 8 | **ProteinMPNN 框架再设计**：适配器已就绪（`tools/mpnn`），但需 ProteinMPNN repo + torch 环境，未默认集成到 pipeline | 可开发性优化（DD/NG/NS 等高风险 motif）的序列再设计 | ProteinMPNN（MIT） |
 
 ---
 
@@ -45,27 +64,17 @@
    对同一套鼠源 CDR 做 210 个 VH×VL 人类框架组合移植，发现：
    - 表达量与亲和力均与 **CVI（canonical+vernier+interface）残基同源性**显著相关；
    - **VL 框架同源性 < 60% 的移植 98% 丢失结合**；VH 同源性 30–70% 均可保留结合；
-   - **最高同源性的移植（Vκ1:VH1）不是最终最优**——Vκ4:VH9、Vκ8:VH11 等
-     中低同源组合在亲和力、功能、可开发性上全面更优。
-   → 含义：回复突变的"目标"不是恢复所有差异残基，而是**保住 CVI 残基**；
-     框架选择本身比回复突变数量更决定成败。
+   - **最高同源性的移植（Vκ1:VH1）不是最终最优**——Vκ4:VH9、Vκ8:VH11 等中低同源组合在亲和力、功能、可开发性上全面更优。
+   → 含义：回复突变的"目标"不是恢复所有差异残基，而是**保住 CVI 残基**；框架选择本身比回复突变数量更决定成败。
 
-2. **能量排序优于同源性直觉**（CUMAb/AbEL，Weizmann，bioRxiv 2022；
-   专利已申请）：在**数千个人类框架**上移植 CDR，用 Rosetta 原子模拟按能量与
-   结构完整性排序。结论：
+2. **能量排序优于同源性直觉**（CUMAb/AbEL，Weizmann，bioRxiv 2022；专利已申请）：在**数千个人类框架**上移植 CDR，用 Rosetta 原子模拟按能量与结构完整性排序。结论：
    - **非高同源框架常被选中**（与 BI 一致）；
-   - 多个编码数十个互不相同突变的框架组合**功能等价** → 存在"等效解空间"，
-     应输出多样性面板而非单点解。
+   - 多个编码数十个互不相同突变的框架组合**功能等价** → 存在"等效解空间"，应输出多样性面板而非单点解。
 
-3. **AI 精确 paratope 移植**（XtalPi Ailux，bioRxiv 2025）：不只移植整段 CDR，
-   而是用 AI 复合物结构鉴定**关键 paratope 残基**，只移植这些残基 + 必要支柱，
-   免疫原性显著降低且活性保持。
+3. **AI 精确 paratope 移植**（XtalPi Ailux，bioRxiv 2025）：不只移植整段 CDR，而是用 AI 复合物结构鉴定**关键 paratope 残基**，只移植这些残基 + 必要支柱，免疫原性显著降低且活性保持。
    → "最少回复突变"的极致形态：CDR 内部也做减法（本版 V_SDR 已实现骨架）。
 
-4. **亲和力丢失的实测机理**：BI 的结构分析显示 HCDR3 RMSD 在 1.08–5.01 Å 之间
-   波动，与同源性无关、与 VH/VL 框架配对相关 → CDR 构象主要由**框架支柱残基**
-   决定，与"vernier 位点"理论完全一致，也说明回复突变应聚焦**接触 CDR 的
-   框架残基**（本版 Vmin 的 set-cover 即按此设计）。
+4. **亲和力丢失的实测机理**：BI 的结构分析显示 HCDR3 RMSD 在 1.08–5.01 Å 之间波动，与同源性无关、与 VH/VL 框架配对相关 → CDR 构象主要由**框架支柱残基**决定，与"vernier 位点"理论完全一致，也说明回复突变应聚焦**接触 CDR 的框架残基**（本版 Vmin 的 set-cover 即按此设计）。
 
 ### 2.2 具体算法（已实现 / 路线图）
 
@@ -79,40 +88,30 @@
 无结构时回退：Tier-1（文献支柱）即最小安全集。
 ```
 - 输出：Vmin 变体 + "保留接触 x/y" 指标
-- 扩展（路线图）：把 universe 从 framework→CDR 接触扩展到
-  framework→antigen 接触（复合物结构）与 VH/VL 界面双侧接触（成对回复）。
+- 扩展（路线图）：把 universe 从 framework→CDR 接触扩展到 framework→antigen 接触（复合物结构）与 VH/VL 界面双侧接触（成对回复）。
 
 **B. 框架矩阵 / germline hopping（已实现，报告输出）**
 - 对 top-3 备选 germline 各生成一套 T1+T2 回复突变与 V2 类变体；
 - 每套报告 CVI 同源性 + 回复突变数；
-- 扩展（路线图）：按 BI 结论给 **VL 的 CDR 同源性更高权重**（VL 驱动亲和力），
-  按 VH 的 CVI 同源性预测可开发性；输出 3×3 VH×VL 矩阵。
+- 扩展（路线图）：按 BI 结论给 **VL 的 CDR 同源性更高权重**（VL 驱动亲和力），按 VH 的 CVI 同源性预测可开发性；输出 3×3 VH×VL 矩阵。
 
 **C. paratope（SDR）精确移植（已实现，V_SDR，需抗原复合物）**
 - 移植残基 = 抗原接触的 CDR 残基 + T1/T2 支柱；
 - 其余 CDR 残基回人源 germline（CDR 内部"减法"）；
-- 扩展（路线图）：若 donor 无复合物结构，用 AF3 复合物预测并校验
-  移植前后接触保留率 ≥ 90%。
+- 扩展（路线图）：若 donor 无复合物结构，用 AF3 复合物预测并校验移植前后接触保留率 ≥ 90%。
 
 **D. 能量/结构评分（路线图，优先级最高）**
-- 选项 1（轻量，无新依赖）：AF3 批量预测每个单点回复突变后的变体，
-  计算 (a) CDR 环 CA-RMSD vs donor，(b) VH/VL 界面面积变化，
-  (c) paratope 接触保留率 → 作为每位的"回复收益"分；
-- 选项 2（重）：接入 Rosetta `cartesian_ddg` / Flex ddG 逐位打分
-  （CUMAb 方法学），或 AbEL 的公开流程（https://github.com/Fleishman-Lab）；
+- 选项 1（轻量，无新依赖）：AF3 批量预测每个单点回复突变后的变体，计算 (a) CDR 环 CA-RMSD vs donor，(b) VH/VL 界面面积变化，(c) paratope 接触保留率 → 作为每位的"回复收益"分；
+- 选项 2（重）：接入 Rosetta `cartesian_ddg` / Flex ddG 逐位打分（CUMAb 方法学），或 AbEL 的公开流程；
 - 决策规则：当 p 回复后 CDR RMSD 无改善且无接触恢复 → 降级为"保持人源"。
 
 **E. 免疫原性 ML 打分（路线图）**
 - 接入 BioPhi 的 OAS 人源化打分（per-position humanness）；
-- 或 netMHCIIpan 4.0 对 9-mer/15-mer 肽段预测 MHC-II 结合（限服务器，
-  与 germline 匹配结合成"暴露 × 表位"复合免疫原性分）；
-- VHH 特例：FR2 hallmark 区被证实在 T 细胞激活中贡献表位
-  （Giraudet et al., MAbs 2025），人源化时应评估"部分 germline 化"
-  （如 37V、44G、45L、47W 逐个尝试的保守变体面板）。
+- 或 netMHCIIpan 4.0 对 9-mer/15-mer 肽段预测 MHC-II 结合（限服务器，与 germline 匹配结合成"暴露 × 表位"复合免疫原性分）；
+- VHH 特例：FR2 hallmark 区被证实在 T 细胞激活中贡献表位（Giraudet et al., MAbs 2025），人源化时应评估"部分 germline 化"（如 37V、44G、45L、47W 逐个尝试的保守变体面板）。
 
 **F. 组合变体设计（路线图）**
-- 固定 T1，对 T2/T3 用贪心/遗传算法按结构指标搜索 20–50 个组合变体，
-  输出"筛选面板"（酵母/噬菌体展示或 96 孔小试）；
+- 固定 T1，对 T2/T3 用贪心/遗传算法按结构指标搜索 20–50 个组合变体，输出"筛选面板"（酵母/噬菌体展示或 96 孔小试）；
 - 与 BI 的"矩阵移植 + liability 修复"流程对齐。
 
 ---
@@ -121,7 +120,7 @@
 
 | 方案 | 主体 | 核心方法 | 回复突变策略 | 对本文的启示 |
 |------|------|----------|--------------|--------------|
-| **WeMol**（药明康德，2023 上线） | 药明康德 | Web 抗体设计平台：IMGT/OAS 数据 + 结构建模 + 可开发性预测；人源化模块 = CDR 移植 + 回复突变 + 表位风险与 developability 报告 | 经典移植为主，平台整合结构/AI 评分；结合药明湿实验（表达/亲和力/可开发性）闭环反馈 | 平台化、报告化、与湿实验闭环是差距 |
+| **WeMol**（唯信智算，2023 上线） | 唯信智算（上海唯信智算技术有限公司） | Web 抗体设计平台：IMGT/OAS 数据 + 结构建模 + 可开发性预测；人源化模块 = CDR 移植 + 回复突变 + 表位风险与 developability 报告 | 经典移植为主，平台整合结构/AI 评分；结合湿实验（表达/亲和力/可开发性）闭环反馈 | 平台化、报告化、与湿实验闭环是差距 |
 | **BioPhi**（Prihoda et al., PLoS Comput Biol 2022） | OPIG 开源 | OAS 人类抗体库训练的逐位点人源化打分；germline 选择用 OAS 覆盖度 | 建议回复突变 = 高 humanness 优先 + 结构常识位点 | **逐位点 humanness 打分**可替代纯 germline 匹配，建议作为交叉验证集成 |
 | **CUMAb / AbEL**（Weizmann，2022） | 学术 | 数千框架移植 + Rosetta 能量排序 | "能量 + 结构完整性"联合选择框架与突变，几乎不依赖同源性 | 能量评分框架；非高同源框架优先 |
 | **矩阵移植**（Boehringer Ingelheim，JBC 2024） | 药企 | 210 组合（14 VL × 15 VH）湿实验矩阵 + PCA 选优 | 回复突变被"框架组合多样性"取代；CVI 同源性作 KPI | CVI 指标 + VH/VL 不对称 + 组合面板 |
@@ -131,7 +130,7 @@
 | **Abzena Composite Human Antibodies** | CRO | 多个人源 germline 片段拼接的"复合框架"，先验去除 T 细胞表位 | 框架层面避免回复突变需求 | "免回复突变"框架构建思路 |
 | **IgBLAST -humanize / OAS 社区** | NCBI/社区 | 最接近人源 germline 搜索 | — | 交叉验证 |
 
-> 注：WeMol 为商业平台，具体算法细节未公开；以上为公开资料（官网/会议）层面的描述。
+> 注：WeMol 为商业平台，具体算法细节未公开；以上为公开资料（官网/会议）层面的描述。**主体归属已更正。**
 
 ---
 
@@ -166,10 +165,11 @@
 
 | 优先级 | 改进 | 交付物 | 依赖 |
 |--------|------|--------|------|
-| **P0（本版已交付）** | CVI 同源性指标 | 报告 + JSON | 无 |
-| **P0（本版已交付）** | 最小回复突变集（set-cover） | Vmin 变体 + 接触保留指标 | AF3（无结构时回退 T1） |
-| **P0（本版已交付）** | 框架矩阵变体 | 备选 germline 的 V2 面板 + CVI 对比 | 无 |
-| **P0（本版已交付）** | Paratope 精确移植 | V_SDR 变体 | 抗原复合物结构 |
+| **P0（已交付）** | CVI 同源性指标 | 报告 + JSON | 无 |
+| **P0（已交付）** | 最小回复突变集（set-cover） | Vmin 变体 + 接触保留指标 | AF3（无结构时回退 T1） |
+| **P0（已交付）** | 框架矩阵变体 | 备选 germline 的 V2 面板 + CVI 对比 | 无 |
+| **P0（已交付）** | Paratope 精确移植 | V_SDR 变体 | 抗原复合物结构 |
+| **P0（已交付）** | V_opt 结构导向设计面板 | `--design-panel` 输出 | `--donor-structure` |
 | **P1** | 能量评分：AF3 逐位点回复模拟（CDR RMSD/界面/接触保留） | 每位"回复收益"分 + 决策规则 | AF3（服务器） |
 | **P1** | BioPhi OAS humanness 集成 | 逐位点 humanness 交叉验证 | pip install biophi（GitHub） |
 | **P1** | VH/VL 不对称权重 | germline 选择加权（VL 驱动亲和力、VH 驱动可开发性） | 无 |
@@ -182,21 +182,13 @@
 
 ## 7. 参考文献
 
-1. Gupta P, et al. Matrixed CDR grafting: A neoclassical framework for antibody
-   humanization and developability. *J Biol Chem* 300:105555 (2024)
-2. Tennenhouse A, et al. Reliable energy-based antibody humanization and
-   stabilization (CUMAb). *bioRxiv* 2022.08.14.503891 (2022)
-3. Wang H, et al. AI-Guided Precision in Antibody Humanization. *bioRxiv*
-   2025.03.09.641110 (2025, XtalPi/Ailux)
-4. Prihoda D, et al. BioPhi: A platform for antibody design, humanization, and
-   humanness evaluation. *PLoS Comput Biol* 18:e1009884 (2022)
-5. Liu D, et al. HuAbDiffusion: discrete language diffusion model for antibody
-   humanization. *Brief Bioinform* 26:bbaf658 (2025)
-6. Cun Y, et al. SITA: Predicting site-specific immunogenicity for therapeutic
-   antibodies. *J Pharm Anal* 15:101316 (2025)
-7. Giraudet R, et al. Immunogenicity of single-chain antibodies: germlining of a
-   VHH lowers T-cell activation from epitopes in FR2 and CDR regions. *MAbs*
-   17:2571406 (2025)
+1. Gupta P, et al. Matrixed CDR grafting: A neoclassical framework for antibody humanization and developability. *J Biol Chem* 300:105555 (2024)
+2. Tennenhouse A, et al. Reliable energy-based antibody humanization and stabilization (CUMAb). *bioRxiv* 2022.08.14.503891 (2022)
+3. Wang H, et al. AI-Guided Precision in Antibody Humanization. *bioRxiv* 2025.03.09.641110 (2025, XtalPi/Ailux)
+4. Prihoda D, et al. BioPhi: A platform for antibody design, humanization, and humanness evaluation. *PLoS Comput Biol* 18:e1009884 (2022)
+5. Liu D, et al. HuAbDiffusion: discrete language diffusion model for antibody humanization. *Brief Bioinform* 26:bbaf658 (2025)
+6. Cun Y, et al. SITA: Predicting site-specific immunogenicity for therapeutic antibodies. *J Pharm Anal* 15:101316 (2025)
+7. Giraudet R, et al. Immunogenicity of single-chain antibodies: germling of a VHH lowers T-cell activation from epitopes in FR2 and CDR regions. *MAbs* 17:2571406 (2025)
 8. Carter P, et al. Humanization of an anti-p185HER2 antibody. *PNAS* 89:4285 (1992)
 9. Queen C, et al. US 5,530,101 (humanized immunoglobulins)
 10. Boehringer Ingelheim. US20170334995A1 (anti-LAG3 antibodies)
