@@ -24,7 +24,8 @@ python3 scripts/humanize/cli.py run --input my_antibody.fasta --outdir outputs
 # server (full mode with structure validation):
 python3 scripts/humanize/cli.py run --input my_antibody.fasta --outdir outputs \
   --af3-mode local --af3-binary /path/run_alphafold.py \
-  --mpnn-mode local --mpnn-script /path/protein_mpnn.py
+  --mpnn-mode local --mpnn-script tools/mpnn/proteinmpnn_adapter.py \
+  --mpnn-python /path/to/miniconda3/envs/proteinMPNN/bin/python
 # tooling status:
 python3 scripts/humanize/cli.py setup-check
 ```

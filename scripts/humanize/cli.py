@@ -72,6 +72,7 @@ def cmd_run(args):
             mode=args.mpnn_mode,
             script=args.mpnn_script or "protein_mpnn.py",
             python_bin=args.mpnn_python or "",
+            chains_to_design=args.mpnn_chains or "",
             outdir=os.path.join(args.outdir, "mpnn"),
         ),
         interactive_indel=getattr(args, 'interactive_indel', False),
@@ -337,13 +338,35 @@ def cmd_stability(args):
     return stability_main()
 
 
+def _find_proteinmpnn_repo():
+    """Locate a ProteinMPNN checkout (dir containing protein_mpnn_run.py)."""
+    cands = []
+    env = os.environ.get("PROTEINMPNN_DIR", "")
+    if env:
+        cands.append(env)
+    cands += [
+        os.path.expanduser("~/ProteinMPNN"),
+        os.path.expanduser("~/ProteinMPNN-main"),
+        os.path.expanduser("~/ProteinMPNN/vanilla_proteinmpnn"),
+    ]
+    for c in cands:
+        c = os.path.abspath(os.path.expanduser(c))
+        if os.path.isfile(os.path.join(c, "protein_mpnn_run.py")):
+            return c
+    for name in ("protein_mpnn_run.py", "protein_mpnn.py"):
+        p = shutil.which(name)
+        if p:
+            return os.path.dirname(p)
+    return None
+
+
 def cmd_setup_check(args):
     checks = [
         ("python3", sys.executable),
         ("biopython", None),
         ("anarci", None),
         ("igblastn", shutil.which("igblastn")),
-        ("protein_mpnn.py", shutil.which("protein_mpnn.py")),
+        ("ProteinMPNN repo", None),  # Checked separately
         ("run_alphafold.py", shutil.which("run_alphafold.py")),
         ("ThermoMPNN repo", None),  # Checked separately
     ]
@@ -361,6 +384,9 @@ def cmd_setup_check(args):
                 path = "python module OK"
             except ImportError:
                 path = None
+        if name == "ProteinMPNN repo":
+            repo = _find_proteinmpnn_repo()
+            path = f"found at {repo}" if repo else None
         if name == "ThermoMPNN repo":
             # Check common locations
             tm_paths = [
@@ -382,6 +408,9 @@ def cmd_setup_check(args):
             if path is None:
                 path = "NOT FOUND (optional)"
         print(f"  {name:20s}: {path or 'NOT FOUND (optional)'}")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    adapter = os.path.join(root, "tools", "mpnn", "proteinmpnn_adapter.py")
+    print(f"  {'mpnn adapter':20s}: {adapter if os.path.isfile(adapter) else 'NOT FOUND'}")
     print("\n  portable mode (no external tools) is fully functional.")
     return 0
 
@@ -509,6 +538,9 @@ def main(argv=None):
                        help="python binary with torch/ProteinMPNN deps "
                             "(e.g. ~/miniconda3/envs/proteinMPNN/bin/python); "
                             "defaults to the current python")
+    p_run.add_argument("--mpnn-chains", default="",
+                       help="PDB chain id(s) to design with ProteinMPNN "
+                            "(default: auto-detect from the structure)")
     p_run.add_argument("--interactive-indel", action="store_true",
                        help="enable interactive FR indel selection (VH+VL)")
     p_run.add_argument("--af3-rmsd", action="store_true",

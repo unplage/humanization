@@ -2336,6 +2336,50 @@ def test_imgt_numbering_mode():
                   str(list(blob)[:3]))
 
 
+def test_mpnn_adapter_helpers():
+    print("mpnn adapter helpers")
+    import importlib.util
+
+    path = os.path.join(ROOT, "tools", "mpnn", "proteinmpnn_adapter.py")
+    spec = importlib.util.spec_from_file_location("proteinmpnn_adapter", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    check("parse_fixed splits on comma/space", mod.parse_fixed("1, 2,3") == [1, 2, 3])
+    check("parse_fixed empty -> []", mod.parse_fixed("") == [])
+    check("target_name strips extension", mod.target_name("/a/b/5L33.pdb") == "5L33")
+    check("is_cif detects .cif/.mmcif", mod._is_cif("x.cif") and mod._is_cif("x.mmcif")
+          and not mod._is_cif("x.pdb"))
+
+    def atom(serial, resseq, resn="ALA", chain="A", name=" N  "):
+        return ("ATOM  " + f"{serial:5d}" + " " + f"{name:4s}" + " " + f"{resn:3s}" + " "
+                + f"{chain:1s}" + f"{resseq:4d}" + " " + "   "
+                + f"{11.0:8.3f}{11.0:8.3f}{11.0:8.3f}{1.0:6.2f}{0.0:6.2f}"
+                + " " * 10 + f"{'N':>2s}")
+
+    def het(serial, resseq, resn="HOH", chain="A", name=" O  "):
+        return ("HETATM" + f"{serial:5d}" + " " + f"{name:4s}" + " " + f"{resn:3s}" + " "
+                + f"{chain:1s}" + f"{resseq:4d}" + " " + "   "
+                + f"{11.0:8.3f}{11.0:8.3f}{11.0:8.3f}{1.0:6.2f}{0.0:6.2f}"
+                + " " * 10 + f"{'O':>2s}")
+
+    # chain A residues 1,2,3,5 (gap at 4); water must be ignored
+    pdb = "\n".join([atom(1, 1), atom(2, 2), atom(3, 3), atom(4, 5),
+                     het(5, 101)]) + "\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".pdb", delete=False) as fh:
+        fh.write(pdb)
+        tmp = fh.name
+    try:
+        check("chain length counts numbered span (gap included)",
+              mod.pdb_chains_and_lengths(tmp) == {"A": 5},
+              str(mod.pdb_chains_and_lengths(tmp)))
+        check("gap detected (observed 4 < span 5)",
+              mod.chain_span_gaps(tmp).get("A") == (5, 4),
+              str(mod.chain_span_gaps(tmp)))
+    finally:
+        os.unlink(tmp)
+
+
 def main():
     test_numbering()
     test_chemical_liability_delta()
@@ -2381,6 +2425,7 @@ def main():
     test_design_panel()
     test_immunogenicity_integration()
     test_netmhciipan_parser()
+    test_mpnn_adapter_helpers()
     test_end_to_end()
     print()
     if FAILURES:

@@ -34,7 +34,7 @@ class MPNNConfig:
     python_bin: str = "python"   # python that has torch/ProteinMPNN deps
     num_seqs: int = 32
     batch_size: int = 8
-    chains_to_design: str = "A"
+    chains_to_design: str = ""   # empty/auto -> adapter picks the sole chain
     outdir: str = "mpnn"
 
 
@@ -226,6 +226,7 @@ def run_developability_optimization(
     is_vhh: bool = False,
     top_germlines: Optional[List[Tuple[GermlineGene, dict]]] = None,
     numbering: str = "kabat",
+    chains_to_design: Optional[str] = None,
 ) -> DevelopabilityOptimizationResult:
     """Optimize high-risk developability positions using ProteinMPNN.
     
@@ -354,7 +355,7 @@ def run_developability_optimization(
             "--out_folder", cfg.outdir,
             "--num_seq_per_target", str(cfg.num_seqs),
             "--batch_size", str(cfg.batch_size),
-            "--chains_to_design", cfg.chains_to_design,
+            "--chains_to_design", chains_to_design or cfg.chains_to_design,
             "--fixed_residues", fixed_str,
             "--seed", "0",
             "--suppress_print", "1",

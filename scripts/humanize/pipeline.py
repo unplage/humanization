@@ -684,6 +684,7 @@ def _process_chain(
                     structure_hints=hints,  # Pass Step 3 structure data
                     is_vhh=is_vhh, top_germlines=top,
                     numbering=config.numbering,
+                    chains_to_design=(donor_struct[1] if donor_struct else None),
                 )
             else:
                 # MPNN mode off - still classify positions for reporting
