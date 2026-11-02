@@ -75,14 +75,12 @@ KABAT_TO_IMGT_VH = {
     1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
     10: 11, 11: 12, 12: 13, 13: 14, 14: 15, 15: 16,
     16: 17, 17: 18, 18: 19, 19: 20, 20: 21, 21: 22,
-    22: 23, 23: 24, 24: 25, 25: 26,  # 22=Cys (1st-CYS), 26=FR1 end
+    22: 23, 23: 24, 24: 25, 25: 26, 30: 33,  # 22=Cys (1st-CYS), 26=FR1 end
+    # Kabat 27-33 (CDR1/FR1 boundary) -> IMGT 28-34; Kabat 30 (FR1 end) -> IMGT 33
 
     # CDR1 (Kabat 26-35 -> IMGT 27-38)
     # Note: IMGT has gaps at positions 31-34 for CDR1 length variation
     26: 27, 27: 28, 28: 29, 29: 30,
-    # Kabat 30-33 have no direct table entries here; bare positions are
-    # skipped by kabat_to_imgt_position (lettered CDR1 insertions go through
-    # _map_insertion)
     34: 35, 35: 36,  # Kabat 34-35 -> IMGT 35-36
 
     # FR2 (Kabat 36-50 -> IMGT 41-55)
@@ -103,7 +101,7 @@ KABAT_TO_IMGT_VH = {
     64: 72,  # Kabat 64 -> IMGT 72
     # Kabat 65 maps to gap at IMGT 73 (handled by alignment)
     66: 75, 67: 76, 68: 77, 69: 78, 70: 79, 71: 80,
-    # Kabat 72-74 map to IMGT gaps 81-82 (handled by alignment)
+    72: 81, 73: 82, 74: 83,  # Kabat 72-74 -> IMGT 81-83 (FR3)
     75: 84, 76: 85, 77: 86, 78: 87, 79: 88, 80: 89,
     81: 90, 82: 91,  # Kabat 81-82 -> IMGT 90-91
     # Kabat 82A-82C map to IMGT 92-94, handled by _map_insertion

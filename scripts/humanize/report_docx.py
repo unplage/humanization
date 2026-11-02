@@ -17,7 +17,9 @@ import os
 from datetime import date
 from typing import Dict, List, Optional
 
+from .biophi_aa_freq import get_top_aa_freqs
 from .config import TIER_LABELS
+from .imgt_numbering import kabat_to_imgt_position
 from .pipeline import ChainReport, RunResult
 
 MONO = "Consolas"
@@ -38,6 +40,17 @@ def _num(v, nd=2):
     if v is None:
         return "-"
     return f"{v:.{nd}f}"
+
+
+def _oas_top5_str(chain_type: str, gene_id: Optional[str],
+                  imgt_pos: Optional[str]) -> str:
+    """Format top-5 OAS amino-acid frequencies at a position (aa:freq,...)."""
+    if not imgt_pos:
+        return "—"
+    tops = get_top_aa_freqs(chain_type, gene_id, imgt_pos, top_n=5)
+    if not tops:
+        return "—"
+    return ", ".join(f"{aa}:{freq:.3f}" for aa, freq in tops)
 
 
 def _pos_key(p: str):
@@ -247,17 +260,27 @@ def build_docx(result: RunResult, out_path: str) -> str:
 
     # ============================ 6. BACK-MUTATIONS ============================
     h1("6. Back-mutation Analysis (回复突变分析)")
+    _num_space = (result.config.numbering if result.config else "kabat")
     for rep in result.chains:
         c = rep.input_chain
         h3(f"{c.name}")
+        chain_type = rep.backmut.chain_type
+        gene_id = rep.backmut.v_gene.gene_id if rep.backmut.v_gene else None
         rows = []
         for b in sorted(rep.backmut.candidates, key=lambda x: -x.composite):
             emp = f"{b.empirical_ddG:+.2f}" if b.empirical_ddG is not None else "-"
+            if _num_space == "imgt":
+                imgt_pos = b.position[1:] if b.position else None
+            else:
+                imgt_num = kabat_to_imgt_position(b.position, chain_type)
+                imgt_pos = str(imgt_num) if imgt_num is not None else None
+            oas = _oas_top5_str(chain_type, gene_id, imgt_pos)
             rows.append([b.position, b.donor_aa, b.human_aa, b.tier,
-                         f"{b.composite:.1f}", emp,
+                         f"{b.composite:.1f}", emp, oas,
                          "+".join(b.features) or "-"])
-        table(["Pos", "Donor", "Human", "Tier", "Score", "ddG(emp)", "Features"],
-              rows, widths=[0.7, 0.6, 0.6, 1.4, 0.7, 0.8, 2.4])
+        table(["Pos", "Donor", "Human", "Tier", "Score", "ddG(emp)",
+               "OAS top-5 aa freq", "Features"],
+              rows, widths=[0.7, 0.6, 0.6, 1.4, 0.7, 0.8, 1.8, 1.0])
         # rationale detail
         h4 = doc.add_paragraph()
         r4 = h4.add_run("Per-position rationale (top candidates)")
