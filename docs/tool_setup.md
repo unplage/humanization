@@ -70,9 +70,17 @@ ProteinMPNN re-designs the framework on the fixed backbone with CDRs,
 interface, vernier and VHH hallmark locked:
 
 ```bash
+export PROTEINMPNN_DIR=/path/to/ProteinMPNN   # upstream checkout
 python3 scripts/humanize/cli.py run --input seq.fasta \
-  --mpnn-mode local --mpnn-script /path/protein_mpnn.py
+  --mpnn-mode local --mpnn-script tools/mpnn/proteinmpnn_adapter.py \
+  --mpnn-python /path/to/miniconda3/envs/proteinMPNN/bin/python
 ```
+
+`tools/mpnn/proteinmpnn_adapter.py` translates the pipeline's legacy MPNN CLI
+to the current `protein_mpnn_run.py` interface. It needs a CPU or GPU PyTorch
+env (see `tools/mpnn/README.md`); point at it with `--mpnn-python`. The PDB
+chain to design is auto-detected, or set `--mpnn-chains A`. Check detection
+with `python3 scripts/humanize/cli.py setup-check`.
 
 The adapter generates the `--fixed_residues` list automatically, parses the
 `*fa` outputs, filters designs by human germline identity of the designed

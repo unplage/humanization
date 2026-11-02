@@ -52,7 +52,8 @@ python3 scripts/humanize/cli.py rmsd \
 # 5. 可开发性优化（可选，需要 ProteinMPNN）
 python3 scripts/humanize/cli.py run \
   --input data/examples/mouse_4d5_fab.fasta --outdir outputs \
-  --mpnn-mode local --mpnn-script /path/to/protein_mpnn.py
+  --mpnn-mode local --mpnn-script tools/mpnn/proteinmpnn_adapter.py \
+  --mpnn-python /path/to/miniconda3/envs/proteinMPNN/bin/python
 
 # 6. 查看报告（Markdown / Word / JSON）
 open outputs/humanization_report.md
@@ -208,7 +209,8 @@ pip install anarci  # 可选：提升 VH 编号准确性
 # 结构模式（AlphaFold3 + ProteinMPNN + 抗原复合物）
 python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
   --af3-mode local --af3-binary /path/run_alphafold.py \
-  --mpnn-mode local --mpnn-script /path/protein_mpnn.py \
+  --mpnn-mode local --mpnn-script tools/mpnn/proteinmpnn_adapter.py \
+  --mpnn-python /path/to/miniconda3/envs/proteinMPNN/bin/python \
   --antigen <抗原序列>            # 启用 V_SDR paratope 移植
 
 # 人源度交叉验证（BioPhi/Sapiens，Merck 开源）

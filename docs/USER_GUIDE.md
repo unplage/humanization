@@ -108,7 +108,9 @@ python3 scripts/humanize/cli.py run \
   --netmhciipan-alleles "HLA-..." \    # HLA 等位基因列表
   --netmhciipan-env <conda-env> \      # NetMHCIIpan 所在 conda 环境
   --mpnn-mode off|local \              # ProteinMPNN 模式
-  --mpnn-script <path> \               # protein_mpnn.py 路径
+  --mpnn-script <path> \               # adapter 路径 (tools/mpnn/proteinmpnn_adapter.py)
+  --mpnn-python <python> \             # 含 torch 的 Python (proteinMPNN env)
+  --mpnn-chains <chain> \              # 设计链 ID (默认自动识别)
 
 # 独立 CDR-RMSD：比较已有变体结构 vs donor（无需重跑 pipeline/AF3）
 python3 scripts/humanize/cli.py rmsd \
@@ -261,8 +263,10 @@ python3 scripts/humanize/cli.py run --input seq.fasta --outdir outputs \
 ### 5.3 ProteinMPNN 框架再设计
 
 ```bash
+export PROTEINMPNN_DIR=/path/to/ProteinMPNN
 python3 scripts/humanize/cli.py run --input seq.fasta \
-  --mpnn-mode local --mpnn-script /path/protein_mpnn.py
+  --mpnn-mode local --mpnn-script tools/mpnn/proteinmpnn_adapter.py \
+  --mpnn-python /path/to/miniconda3/envs/proteinMPNN/bin/python
 ```
 
 锁定 CDR+界面+vernier+hallmark 后重新设计框架；按人源同源性过滤输出。
@@ -275,7 +279,8 @@ python3 scripts/humanize/cli.py run --input seq.fasta \
 ```bash
 # 启用 MPNN 优化
 python3 scripts/humanize.cli.py run --input seq.fasta \
-  --mpnn-mode local --mpnn-script /path/protein_mpnn.py \
+  --mpnn-mode local --mpnn-script tools/mpnn/proteinmpnn_adapter.py \
+  --mpnn-python /path/to/miniconda3/envs/proteinMPNN/bin/python \
   --donor-structure path/to/structure.pdb  # 推荐：基于结构分类
 ```
 
