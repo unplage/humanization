@@ -949,6 +949,10 @@ def _apply(R, t, pt):
 def count_clashes(model: PDBModel, min_dist: float = 2.0) -> Dict:
     """Count inter-residue heavy-atom clashes below ``min_dist`` (grid-accelerated).
 
+    Covalent bonds are excluded: the peptide C(i)-N(i+1) bond and disulfide
+    SG-SG bonds are not steric clashes even though their length is below
+    ``min_dist``.
+
     Returns ``{n_clashes, worst, examples}``; ``examples`` are
     ``(chain,resseq,atom,chain,resseq,atom,distance)`` tuples (up to 5).
     """
@@ -975,7 +979,14 @@ def count_clashes(model: PDBModel, min_dist: float = 2.0) -> Dict:
                         res_j, name_j, xyz_j = heavy[j]
                         if res_i == res_j:
                             continue
+                        same_chain = res_i[0] == res_j[0]
+                        adjacent = same_chain and abs(res_i[1] - res_j[1]) == 1
+                        if adjacent and {name_i, name_j} == {"C", "N"}:
+                            continue
                         d = _dist(xyz_i, xyz_j)
+                        if (name_i == "SG" and name_j == "SG"
+                                and d < 2.5):
+                            continue
                         if d < min_dist:
                             n_clashes += 1
                             if worst is None or d < worst:
