@@ -12,6 +12,7 @@ scripts/custom_germline_humanize.py
 # External data
 af3/
 inputs/
+data/biophi/
 data/AbRSA/
 data/ncbi-igblast-1.22.0/
 data/benchmarks/TheraSAbDab_SeqStruc_OnlineDownload.xlsx
