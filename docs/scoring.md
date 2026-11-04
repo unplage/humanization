@@ -151,6 +151,12 @@ which only handled N-glycan and had inconsistent signs. Chemical weights are
 from the literature (Lu et al. 2018 deamidation; FRIDA 2024 isomerization;
 Booster et al. 2022 stability) plus expert consensus.
 
+**Overlap merge** (`backmut._liability_score`): overlapping motif matches
+are merged into one interval scored at the highest weight of its members —
+a region matching both N-glycan (0.80) and deamidation NG (0.55) counts
+once at 0.80 (one physical region, one risk). Adjacent but non-overlapping
+motifs stay separate, and isolated motifs keep their original magnitudes.
+
 ## 2. Tier assignment (final recommendation)
 
 | Tier | Rule | Meaning |

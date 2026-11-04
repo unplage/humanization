@@ -274,6 +274,21 @@ def _matrix_alternatives(
     return alts[:n]
 
 
+def _select_j_gene(donor: NumberedChain, db: "GermlineDB",
+                   numbering: str = "kabat"):
+    """Best human J gene: identity desc, usage-frequency desc, matched
+    length desc (industry-convention tiebreak). Shared by the forced-germline
+    and strategy paths so the two can never drift apart."""
+    from .germline import score_j_match
+    from .germline_frequency import get_j_frequency
+    j_scored = []
+    for jg in db.j_for(donor.chain_type):
+        idn, n = score_j_match(donor, jg, numbering)
+        j_scored.append((jg, idn, n, get_j_frequency(jg.gene_id)))
+    j_scored.sort(key=lambda t: (-t[1], -t[3], -t[2]))
+    return j_scored[0][0] if j_scored else None
+
+
 def _process_chain(
     chain: InputChain,
     fmt: str,
@@ -305,17 +320,8 @@ def _process_chain(
         if v_gene is None:
             raise RuntimeError(f"[{chain.name}] forced germline {forced_gene_id} not found in database")
         
-        # Select best J gene
-        from .germline import score_j_match
-        from .germline_frequency import get_j_frequency
-        j_genes = db.j_for(ctype)
-        j_scored = []
-        for jg in j_genes:
-            idn, n = score_j_match(donor, jg, config.numbering)
-            j_scored.append((jg, idn, n, get_j_frequency(jg.gene_id)))
-        # identity desc, then usage-frequency desc (industry convention tiebreak), then matched length
-        j_scored.sort(key=lambda t: (-t[1], -t[3], -t[2]))
-        j_gene = j_scored[0][0] if j_scored else None
+        # Select best J gene (shared helper: identity, frequency, length)
+        j_gene = _select_j_gene(donor, db, config.numbering)
         
         # Calculate identity for the forced gene
         from .germline import compare_to_germline
@@ -350,15 +356,8 @@ def _process_chain(
             v_gene, j_gene = choice.v_gene, choice.j_gene
         else:
             v_gene = candidate.gene
-            # 选择 J 基因
-            from .germline import score_j_match
-            j_genes = db.j_for(ctype)
-            j_scored = []
-            for jg in j_genes:
-                idn, n = score_j_match(donor, jg, config.numbering)
-                j_scored.append((jg, idn, n))
-            j_scored.sort(key=lambda t: (-t[1], -t[2]))
-            j_gene = j_scored[0][0] if j_scored else None
+            # 选择 J 基因（与 forced 路径共用 _select_j_gene：identity, 频率, 长度）
+            j_gene = _select_j_gene(donor, db, config.numbering)
             
             # 创建兼容的 choice 对象
             from .germline import GermlineChoice

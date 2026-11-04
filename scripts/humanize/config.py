@@ -198,9 +198,13 @@ LOOP_CLASS = {
 
 # Chemical liabilities (deamidation / isomerization / oxidation ...) are
 # surface chemistry: a buried liability is far less reactive than an exposed
-# one. The chemical term (human liability - donor liability) is scaled by the
-# substituted position's solvent exposure. `unknown` is 1.0 (conservative:
+# one. The chemical term (human liability - donor liability) is scaled by
+# the substituted position's solvent exposure. `unknown` is 1.0 (conservative:
 # without structure keep the sequence-only value).
+#
+# Overlapping motif matches are merged before scoring (backmut._liability_score):
+# one physical region counts once at its highest weight — e.g. 'NGS' scores
+# 0.80 (N-glycan), not 0.80+0.55 (N-glycan + NG deamidation).
 CHEMICAL_EXPOSURE_WEIGHT = {
     "exposed": 1.00,          # relSASA >= 0.50
     "intermediate": 0.60,     # 0.20 <= relSASA < 0.50
