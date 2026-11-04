@@ -79,31 +79,14 @@ class MultiStrategyResult:
 def _calculate_cvi_score(query: NumberedChain, gene: GermlineGene,
                          numbering: str = "kabat") -> float:
     """计算 CVI (canonical + vernier + interface) 同源性
-    
+
     基于 BI 2024 研究：CVI 同源性与表达量和亲和力保留显著相关。
-    位置集来自 schemespec（Kabat 即 config.CVI；IMGT 为对应表翻译，
-    与 minimal.cvi_homology 共用，避免口径漂移）。
+    委托 minimal.cvi_homology 作为单一口径（含 j_anchor 过滤与 FR 区过滤，
+    排除 H103/L98 等 J 区位点及 L90/94/97 等 CDR3 标注位点）——
+    旧独立实现漏过这些过滤，与报告中的 cvi_homology 数值漂移。
     """
-    if gene.numbered is None:
-        return 0.0
-    from .schemespec import get_spec
-    cvi_positions = get_spec(numbering).cvi.get(query.chain_type, frozenset())
-    
-    q = query.posmap()
-    g = gene.numbered.posmap()
-    ctype = query.chain_type
-    
-    n = 0
-    same = 0
-    for pos in cvi_positions:
-        pos_str = f"{ctype}{pos}"
-        if pos_str in q and pos_str in g:
-            if q[pos_str] and g[pos_str]:
-                n += 1
-                if q[pos_str] == g[pos_str]:
-                    same += 1
-    
-    return same / n if n > 0 else 0.0
+    from .minimal import cvi_homology
+    return cvi_homology(query, gene, numbering)
 
 
 def _estimate_n_backmutations(

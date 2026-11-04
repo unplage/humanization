@@ -81,8 +81,12 @@ def assemble_variants(
         if c.buried is True and c.cdr_contact is True:
             # Highest priority: buried + CDR contact
             t2a_positions.append(c.position)
-        elif c.buried is True and any(f in (c.features or "") for f in ["canonical", "vernier", "interface"]):
+        elif c.buried is True and any(
+                f in (c.features or []) for f in
+                ("canonical", "vernier", "interface_core", "interface_extended")):
             # Medium priority: buried + structural feature
+            # (feature names are "interface_core"/"interface_extended"; the
+            # bare string "interface" never matches a list member)
             t2b_positions.append(c.position)
         elif c.buried is False and c.cdr_contact is True:
             # Medium priority: exposed but contacts CDR

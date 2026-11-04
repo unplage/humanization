@@ -181,14 +181,41 @@ _LIABILITY_PATTERNS: Optional[List[Tuple[re.Pattern, float]]] = None
 
 
 def _liability_score(sequence: str) -> float:
-    """Sum of developability liability weights present in ``sequence``."""
+    """Sum of developability liability weights present in ``sequence``.
+
+    Overlapping motifs are merged into one interval scored at the highest
+    weight of its members: a region matching both N-glycan (0.80) and
+    deamidation NG (0.55) counts once at 0.80 — one physical region, one
+    risk. Adjacent (touching but non-overlapping) motifs stay separate, and
+    isolated motifs keep their original magnitudes.
+    """
     global _LIABILITY_PATTERNS
     if _LIABILITY_PATTERNS is None:
         from .config import LIABILITY_MOTIFS
         _LIABILITY_PATTERNS = [
             (re.compile(pat), weight) for pat, weight in LIABILITY_MOTIFS.values()
         ]
-    return sum(len(rx.findall(sequence)) * w for rx, w in _LIABILITY_PATTERNS)
+    matches = sorted(
+        (m.start(), m.end(), w)
+        for rx, w in _LIABILITY_PATTERNS
+        for m in rx.finditer(sequence)
+    )
+    total = 0.0
+    cur_s: Optional[int] = None
+    cur_e: int = 0
+    cur_w = 0.0
+    for s, e, w in matches:
+        if cur_s is None:
+            cur_s, cur_e, cur_w = s, e, w
+        elif s < cur_e:                    # overlap -> merge, keep max weight
+            cur_e = max(cur_e, e)
+            cur_w = max(cur_w, w)
+        else:                              # disjoint -> flush
+            total += cur_w
+            cur_s, cur_e, cur_w = s, e, w
+    if cur_s is not None:
+        total += cur_w
+    return total
 
 
 def _calibration_matches(entry: dict, donor_aa: str, human_aa: str) -> bool:
@@ -391,8 +418,17 @@ def _evaluate_fr4_structural(
     features = []
     scores = []
 
-    # 1. CDR3 contact (most important - FR4 follows CDR3)
-    cdr3_contact = structure.cdr_contact(chain_type, pos)
+    # 1. CDR3 contact (most important - FR4 follows CDR3).
+    # Prefer the per-loop distance when geometry is available: the generic
+    # cdr_contact hint is true for ANY CDR, so a position touching only
+    # CDR1/CDR2 was previously mislabelled "cdr3_contact". Fall back to the
+    # generic hint without loop geometry (portable / legacy hints).
+    dists = structure.loop_min_dist(pos)
+    if dists:
+        d3 = dists.get("CDR3")
+        cdr3_contact = (d3 is not None and d3 <= 4.5)
+    else:
+        cdr3_contact = structure.cdr_contact(chain_type, pos)
     if cdr3_contact:
         features.append("cdr3_contact")
         scores.append(FR4_STRUCTURAL_WEIGHTS["cdr3_contact"])
@@ -1151,7 +1187,9 @@ def _calculate_dev_risk_score(donor_aa: str, pos: str, donor, chain_type: str) -
                     risk_score = max(risk_score, 0.7)
                 elif "DG" in motif_name:
                     risk_score = max(risk_score, 0.8)
-                elif "M" in motif_name and len(match.group()) == 1:
+                elif motif_name == "oxidation (M)":
+                    # exact name match: substring "M" also appears in
+                    # "met-lyscleavage (MK)" and broke on rename
                     risk_score = max(risk_score, 0.5)
                 else:
                     risk_score = max(risk_score, 0.6)

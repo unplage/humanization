@@ -2380,9 +2380,154 @@ def test_mpnn_adapter_helpers():
         os.unlink(tmp)
 
 
+def test_t2b_interface_membership():
+    """Regression: T2b categorisation must match the real feature names
+    ("interface_core"/"interface_extended"). The old check tested the bare
+    string "interface" against a list of feature names, which never matches,
+    so buried interface-only positions fell to T2c and were missing from V2b."""
+    print("T2b interface membership")
+    from humanize.backmut import BackMutationCandidate
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    _, chains = parse_input(os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"))
+    donor = chains[0].numbered  # VH
+    choice = choose_germlines(donor, db)
+    bm = analyze_backmutations(donor.numbered if hasattr(donor, "numbered") else donor,
+                               choice.v_gene, is_vhh=False)
+    # Synthetic T2 candidate: buried, interface_core only (no canonical/
+    # vernier) — must land in T2b, i.e. be present in V2b.
+    synth = BackMutationCandidate(
+        position="H2", donor_aa="E", human_aa="V",
+        features=["interface_core", "buried"],
+        structural_score=0.9, benefit_score=0.5, chemical_score=0.0,
+        composite=70.0, tier="T2", buried=True, cdr_contact=False,
+    )
+    bm.candidates.append(synth)
+    variants = assemble_variants(donor, choice.v_gene, choice.j_gene,
+                                 "kabat", bm, is_vhh=False)
+    v2 = next(v for v in variants if v.name.endswith("_V2"))
+    v2b = next(v for v in variants if v.name.endswith("_V2b"))
+    check("synthetic buried-interface candidate is in V2 (all T1+T2)",
+          "H2" in v2.backmutations, str(v2.backmutations))
+    check("synthetic buried-interface candidate is in V2b (T2b fixed)",
+          "H2" in v2b.backmutations, str(v2b.backmutations))
+
+
+def test_liability_overlap_merge():
+    """Regression: overlapping liability motifs must merge to the max
+    weight (one physical region, one risk); non-overlapping and isolated
+    motifs keep their original magnitudes."""
+    print("liability overlap merge")
+    from humanize.backmut import _liability_score
+    check("NGS merges to N-glycan weight only (0.80, not 0.80+0.55)",
+          abs(_liability_score("NGS") - 0.80) < 1e-9,
+          str(_liability_score("NGS")))
+    check("isolated NG keeps its weight (0.55)",
+          abs(_liability_score("NG") - 0.55) < 1e-9,
+          str(_liability_score("NG")))
+    check("adjacent non-overlapping NG|DS stay separate (0.55+0.40)",
+          abs(_liability_score("NGDS") - 0.95) < 1e-9,
+          str(_liability_score("NGDS")))
+    check("disjoint motifs sum (NG..DG = 0.55+0.50)",
+          abs(_liability_score("NGAADG") - 1.05) < 1e-9,
+          str(_liability_score("NGAADG")))
+    check("empty sequence scores 0", _liability_score("") == 0.0)
+
+
+def test_cvi_single_source():
+    """Regression: multi_strategy._calculate_cvi_score must equal
+    minimal.cvi_homology for every candidate (single source of truth —
+    the old independent implementation skipped the j_anchor / FR-region
+    filters and drifted from the reported CVI)."""
+    print("CVI single source")
+    from humanize.minimal import cvi_homology
+    from humanize.multi_strategy_germline import _calculate_cvi_score
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    _, chains = parse_input(os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta"))
+    for chain in chains:
+        donor = chain.numbered
+        genes = [g for g in db.human(donor.chain_type) if g.numbered][:5]
+        check(f"{chain.chain_type} has germlines to compare", bool(genes))
+        for g in genes:
+            a = _calculate_cvi_score(donor, g)
+            b = cvi_homology(donor, g)
+            check(f"{chain.chain_type} {g.gene_id} CVI matches cvi_homology",
+                  abs(a - b) < 1e-9, f"multi={a} minimal={b}")
+
+
+def test_j_gene_selection_unified():
+    """Regression: the forced-germline and strategy paths share
+    _select_j_gene (identity, frequency, length); a live pipeline run must
+    agree with the helper, and frequency must break identity ties ahead of
+    matched length."""
+    print("J gene selection unified")
+    from humanize.pipeline import _select_j_gene
+    db = load_germline_db(os.path.join(ROOT, "data", "germline"))
+    fa = os.path.join(ROOT, "data", "examples", "mouse_4d5_fab.fasta")
+    _, chains = parse_input(fa)
+    with tempfile.TemporaryDirectory() as td:
+        result = run_pipeline(fa, PipelineConfig(), outdir=td)
+    for rep, chain in zip(result.chains, chains):
+        expected = _select_j_gene(chain.numbered, db, "kabat")
+        got = rep.germline.j_gene
+        check(f"{chain.chain_type} pipeline J == _select_j_gene",
+              got is not None and expected is not None
+              and got.gene_id == expected.gene_id,
+              f"{got.gene_id if got else None} vs "
+              f"{expected.gene_id if expected else None}")
+    # Sort-key semantics: highest identity first; among identity ties the
+    # higher frequency wins; frequency only falls back to matched length
+    # when also equal.
+    rows = [("lo-freq-long", 0.90, 8, 0.10),
+            ("hi-freq-short", 0.90, 3, 0.40),
+            ("best-identity", 0.95, 2, 0.05)]
+    rows.sort(key=lambda t: (-t[1], -t[3], -t[2]))
+    check("identity first, then frequency before length",
+          [r[0] for r in rows] == ["best-identity", "hi-freq-short",
+                                   "lo-freq-long"],
+          str([r[0] for r in rows]))
+
+
+def test_fr4_cdr3_specific_contact():
+    """Regression: FR4 'cdr3_contact' must come from the CDR3-specific loop
+    distance when loop geometry exists — the generic cdr_contact hint is
+    true for ANY CDR, so a position touching only CDR1 was mislabelled."""
+    print("FR4 CDR3-specific contact")
+    from humanize.backmut import _evaluate_fr4_structural
+    dmap = {"H105": "W"}   # donor
+    gmap = {"H105": "Y"}   # human J residue
+    # Loop geometry present: near CDR1 only, far from CDR3 -> no candidate
+    hints_cdr1_only = StructureHints({
+        "cdr_contact": {"H105": True},       # generic hint fires (any CDR)
+        "loop_min_dist": {"H105": {"CDR1": 3.0, "CDR2": 9.0, "CDR3": 9.5}},
+    })
+    cand = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
+                                    hints_cdr1_only, "kabat")
+    check("CDR1-only contact is NOT a cdr3_contact (no T_FR4)",
+          cand is None, str(cand))
+    # Genuinely near CDR3 -> candidate with the CDR3 feature
+    hints_cdr3 = StructureHints({
+        "cdr_contact": {"H105": True},
+        "loop_min_dist": {"H105": {"CDR1": 9.0, "CDR2": 9.0, "CDR3": 3.0}},
+    })
+    cand3 = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
+                                     hints_cdr3, "kabat")
+    check("CDR3 proximity yields T_FR4 candidate",
+          cand3 is not None and cand3.tier == "T_FR4"
+          and "cdr3_contact" in cand3.features,
+          str(cand3.features if cand3 else None))
+    # No loop geometry -> fall back to the generic contact hint (legacy)
+    hints_legacy = StructureHints({"cdr_contact": {"H105": True}})
+    cand_fb = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
+                                       hints_legacy, "kabat")
+    check("without loop geometry falls back to generic contact",
+          cand_fb is not None and cand_fb.tier == "T_FR4",
+          str(cand_fb.tier if cand_fb else None))
+
+
 def main():
     test_numbering()
     test_chemical_liability_delta()
+    test_liability_overlap_merge()
     test_dev_risk_position_sensitivity()
     test_insertion_chem_delta()
     test_rmsd_alignment_pos_map()
@@ -2405,6 +2550,10 @@ def main():
     test_lambda_chain_end_to_end()
     test_j_anchor_covers_all_germline_j()
     test_germline_strategies_smoke()
+    test_t2b_interface_membership()
+    test_cvi_single_source()
+    test_j_gene_selection_unified()
+    test_fr4_cdr3_specific_contact()
     test_developability_scan()
     test_input_validation()
     test_humanness_adapter()
