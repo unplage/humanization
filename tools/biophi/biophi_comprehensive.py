@@ -1357,6 +1357,14 @@ def write_markdown_report(
                 for h in sapiens["hotspots"][:5]
             )
             lines.append(f"- Sapiens hotspots (lowest): {hot}")
+        if sapiens.get("best_score_sequence"):
+            lines.append(
+                f"- Sapiens best-score sequence: `{sapiens['best_score_sequence']}`"
+            )
+        if sapiens.get("masked_sequence"):
+            lines.append(
+                f"- Sapiens masked sequence: `{sapiens['masked_sequence']}`"
+            )
         if oasis:
             v_names = ", ".join((oasis.get("v_germline_names") or [])[:3])
             j_names = ", ".join((oasis.get("j_germline_names") or [])[:3])
@@ -1368,6 +1376,18 @@ def write_markdown_report(
                 f"{oasis.get('num_peptides')}"
             )
             lines.append(f"- V germline: {v_names} | J germline: {j_names}")
+            if oasis.get("v_germline_names"):
+                lines.append(
+                    "- V germline candidates: "
+                    + ", ".join(oasis["v_germline_names"][:5])
+                )
+            top_freqs = oasis.get("top_freqs") or []
+            if top_freqs and top_freqs[0]:
+                rank1 = ", ".join(
+                    f"{p['position']}:{p['aa']}({p['freq']})"
+                    for p in top_freqs[0][:6]
+                )
+                lines.append(f"- Germline-family top freq (rank1, first 6): {rank1}")
         modes = (humanization or {}).get("per_record", {}).get(rid, {})
         for mode_name, data in modes.items():
             if not isinstance(data, dict) or "num_mutations" not in data:
@@ -1375,11 +1395,24 @@ def write_markdown_report(
             lines.append(
                 f"- Humanization [{mode_name}]: {data['num_mutations']} mutations"
             )
+            muts = data.get("mutations") or []
+            if muts:
+                shown = ", ".join(
+                    f"{m['position']} {m['parental']}→{m['humanized']}"
+                    for m in muts[:15]
+                )
+                more = f" …(+{len(muts) - 15} more)" if len(muts) > 15 else ""
+                lines.append(f"  - mutations: {shown}{more}")
             if data.get("germline", {}).get("v_top"):
                 lines.append(
                     f"  - germline used (top): {data['germline'].get('v_top')} / "
                     f"{data['germline'].get('j_top')}"
                 )
+                cands = (data["germline"].get("v_candidates") or [])[:5]
+                if cands:
+                    lines.append(
+                        "  - germline candidates: " + ", ".join(cands)
+                    )
             if data.get("oasis_before") and data.get("oasis_after"):
                 b, a = data["oasis_before"], data["oasis_after"]
                 lines.append(
@@ -1388,6 +1421,20 @@ def write_markdown_report(
                     f"(percentile {_fmt(b.get('oasis_percentile'))} -> "
                     f"{_fmt(a.get('oasis_percentile'))})"
                 )
+            proposals = data.get("top_scores") or []
+            if proposals:
+                shown_p = ", ".join(
+                    f"{p['position']}:{p['aa']}({p['score']})"
+                    for p in proposals[:6]
+                )
+                lines.append(f"  - top proposals (rank1): {shown_p}")
+            if data.get("alignment"):
+                lines.append("  - alignment:")
+                lines.append("")
+                lines.append("    ```")
+                for aln_line in data["alignment"].splitlines():
+                    lines.append(f"    {aln_line}")
+                lines.append("    ```")
         lines.append("")
 
     ab_results = (humanization or {}).get("full_antibody", [])
@@ -1395,9 +1442,51 @@ def write_markdown_report(
         lines += ["## Full-Antibody Humanization (VH+VL)", ""]
         for item in ab_results:
             lines.append(f"### {item.get('pair_key') or item.get('vh_id')}")
-            lines.append(f"- VH: {item['vh_id']} ({item['vh']['num_mutations']} mut)")
-            lines.append(f"- VL: {item['vl_id']} ({item['vl']['num_mutations']} mut)")
+            for side, label in (("vh", "VH"), ("vl", "VL")):
+                data = item.get(side) or {}
+                lines.append(
+                    f"- {label}: {data.get('id')} "
+                    f"({data.get('num_mutations')} mut)"
+                )
+                muts = data.get("mutations") or []
+                if muts:
+                    shown = ", ".join(
+                        f"{m['position']} {m['parental']}→{m['humanized']}"
+                        for m in muts[:15]
+                    )
+                    more = (
+                        f" …(+{len(muts) - 15} more)" if len(muts) > 15 else ""
+                    )
+                    lines.append(f"  - mutations: {shown}{more}")
+            if item.get("alignment"):
+                lines.append("- alignment:")
+                lines.append("")
+                lines.append("    ```")
+                for aln_line in item["alignment"].splitlines():
+                    lines.append(f"    {aln_line}")
+                lines.append("    ```")
             lines.append("")
+
+    paired = humanness.get("per_antibody") if humanness else None
+    if paired:
+        lines += [
+            "## Paired Antibody Humanness (VH+VL)",
+            "",
+            "| Pair | OASis identity | Percentile | Germline content "
+            "| Non-human peptides |",
+            "|------|----------------|------------|------------------"
+            "|-------------------|",
+        ]
+        for key, summary in paired.items():
+            nonhuman = summary.get("num_nonhuman_peptides")
+            total = summary.get("num_peptides")
+            lines.append(
+                f"| {_md_cell(key)} | {_fmt(summary.get('oasis_identity'))} | "
+                f"{_fmt(summary.get('oasis_percentile'))} | "
+                f"{_fmt(summary.get('germline_content'))} | "
+                f"{nonhuman}/{total} |"
+            )
+        lines.append("")
 
     if cross_validation and cross_validation.get("per_variant"):
         lines += [
@@ -1468,6 +1557,143 @@ def build_embeddings_payload(
         if data.get("embeddings"):
             out[rid] = data["embeddings"]
     return {"embeddings": out, "generated": _now(), "tool_version": TOOL_VERSION}
+
+
+# ---------------------------------------------------------------------------
+# Human-readable (CSV) projections of JSON-only content
+# ---------------------------------------------------------------------------
+
+
+def write_mutations_csv(path: Path, humanization: Optional[Dict[str, Any]]) -> bool:
+    """Flatten all humanization mutations -> long-format CSV."""
+    rows: List[Dict[str, Any]] = []
+    for rid, modes in (humanization or {}).get("per_record", {}).items():
+        for mode, data in modes.items():
+            if not isinstance(data, dict):
+                continue
+            for m in data.get("mutations") or []:
+                rows.append({
+                    "id": rid,
+                    "mode": mode,
+                    "position": m.get("position"),
+                    "parental": m.get("parental"),
+                    "humanized": m.get("humanized"),
+                    "region": m.get("region"),
+                    "in_cdr": m.get("in_cdr"),
+                })
+    for item in (humanization or {}).get("full_antibody", []):
+        for side in ("vh", "vl"):
+            data = item.get(side) or {}
+            for m in data.get("mutations") or []:
+                rows.append({
+                    "id": data.get("id"),
+                    "mode": f"full_antibody:{side}",
+                    "position": m.get("position"),
+                    "parental": m.get("parental"),
+                    "humanized": m.get("humanized"),
+                    "region": m.get("region"),
+                    "in_cdr": m.get("in_cdr"),
+                })
+    if not rows:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(path, rows, [
+        "id", "mode", "position", "parental", "humanized", "region", "in_cdr",
+    ])
+    return True
+
+
+def write_proposals_csv(path: Path, humanization: Optional[Dict[str, Any]]) -> bool:
+    """Flatten Sapiens mutation proposals (top/next scores) -> long CSV."""
+    kinds = (
+        ("top_scores", "parental_rank1"),
+        ("second_scores", "parental_rank2"),
+        ("third_scores", "parental_rank3"),
+        ("next_top_scores", "humanized_rank1"),
+        ("next_second_scores", "humanized_rank2"),
+    )
+    rows: List[Dict[str, Any]] = []
+    for rid, modes in (humanization or {}).get("per_record", {}).items():
+        for mode, data in modes.items():
+            if not isinstance(data, dict):
+                continue
+            for key, label in kinds:
+                for p in data.get(key) or []:
+                    rows.append({
+                        "id": rid,
+                        "mode": mode,
+                        "score_set": label,
+                        "position": p.get("position"),
+                        "aa": p.get("aa"),
+                        "score": p.get("score"),
+                    })
+    if not rows:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(path, rows, [
+        "id", "mode", "score_set", "position", "aa", "score",
+    ])
+    return True
+
+
+def write_heatmap_csv(path: Path, heatmap_payload: Dict[str, Any]) -> bool:
+    """Heatmap JSON -> long-format CSV (id, position, numbering, residue, score)."""
+    rows: List[Dict[str, Any]] = []
+    for rid, points in (heatmap_payload.get("heatmap") or {}).items():
+        for p in points:
+            rows.append({
+                "id": rid,
+                "position": p.get("position"),
+                "numbering": p.get("numbering"),
+                "residue": p.get("residue"),
+                "score": p.get("score"),
+            })
+    if not rows:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(path, rows, ["id", "position", "numbering", "residue", "score"])
+    return True
+
+
+def write_nonhuman_peptides_csv(path: Path, humanness: Dict[str, Any]) -> bool:
+    """Positional humanness (non-human 9-mer windows per residue) -> CSV."""
+    rows: List[Dict[str, Any]] = []
+    for rid, summary in (humanness.get("per_chain") or {}).items():
+        for entry in summary.get("positional_humanness") or []:
+            for pep in entry.get("nonhuman_peptides") or []:
+                rows.append({
+                    "id": rid,
+                    "position": entry.get("position"),
+                    "aa": entry.get("aa"),
+                    "peptide": pep.get("seq"),
+                    "fraction_oas_subjects": pep.get("fraction_oas_subjects"),
+                    "num_oas_subjects": pep.get("num_oas_subjects"),
+                })
+    if not rows:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(path, rows, [
+        "id", "position", "aa", "peptide",
+        "fraction_oas_subjects", "num_oas_subjects",
+    ])
+    return True
+
+
+def write_oasis_curve_csv(path: Path, humanness: Dict[str, Any]) -> bool:
+    """OASis curve bins -> long CSV (id, bin, cumulative_fraction)."""
+    rows: List[Dict[str, Any]] = []
+    for rid, summary in (humanness.get("per_chain") or {}).items():
+        for bin_label, value in (summary.get("oasis_curve") or {}).items():
+            rows.append({
+                "id": rid,
+                "bin": bin_label,
+                "cumulative_fraction": value,
+            })
+    if not rows:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(path, rows, ["id", "bin", "cumulative_fraction"])
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1690,9 +1916,13 @@ def cmd_sapiens(args: argparse.Namespace) -> int:
         _write_fasta(fa_path, humanized)
         outputs["humanized fasta"] = str(fa_path)
 
+    heatmap_payload = build_heatmap(sapiens_results)
     heatmap_path = outdir / f"{stem}_biophi_heatmap.json"
-    _write_json(heatmap_path, build_heatmap(sapiens_results))
+    _write_json(heatmap_path, heatmap_payload)
     outputs["heatmap json"] = str(heatmap_path)
+    heatmap_csv = outdir / f"{stem}_biophi_heatmap.csv"
+    if write_heatmap_csv(heatmap_csv, heatmap_payload):
+        outputs["heatmap csv"] = str(heatmap_csv)
 
     md_path = outdir / f"{stem}_biophi_full_sapiens.md"
     lines = [
@@ -1711,6 +1941,25 @@ def cmd_sapiens(args: argparse.Namespace) -> int:
             f"{_fmt(data.get('sapiens_mean'))} | {_fmt(data.get('sapiens_min'))} | "
             f"{_fmt(data.get('sapiens_max'))} | {data.get('n_below_0_5')} |"
         )
+    lines += ["", "## Per-record details", ""]
+    for rid, data in sapiens_results.items():
+        lines.append(f"### {_md_cell(rid)}")
+        lines.append(
+            f"- mean={_fmt(data.get('sapiens_mean'))} "
+            f"min={_fmt(data.get('sapiens_min'))} max={_fmt(data.get('sapiens_max'))} "
+            f"positions<0.5={data.get('n_below_0_5')}"
+        )
+        if data.get("hotspots"):
+            hot = ", ".join(
+                f"{h.get('numbering', h.get('position'))}({h['residue']})={h['score']}"
+                for h in data["hotspots"][:5]
+            )
+            lines.append(f"- hotspots (lowest): {hot}")
+        if data.get("best_score_sequence"):
+            lines.append(f"- best-score sequence: `{data['best_score_sequence']}`")
+        if data.get("masked_sequence"):
+            lines.append(f"- masked sequence: `{data['masked_sequence']}`")
+        lines.append("")
     lines += ["", "## Output files", ""]
     for kind, target in sorted(outputs.items()):
         lines.append(f"- {kind}: `{target}`")
@@ -1772,6 +2021,14 @@ def cmd_humanness(args: argparse.Namespace) -> int:
     _write_peptides_csv(peptides_path, humanness)
     if peptides_path.exists():
         outputs["peptide-level csv"] = str(peptides_path)
+
+    nonhuman_path = outdir / f"{stem}_biophi_nonhuman_peptides.csv"
+    if write_nonhuman_peptides_csv(nonhuman_path, humanness):
+        outputs["non-human peptide windows csv"] = str(nonhuman_path)
+
+    curve_path = outdir / f"{stem}_biophi_oasis_curve.csv"
+    if write_oasis_curve_csv(curve_path, humanness):
+        outputs["oasis curve csv"] = str(curve_path)
 
     xlsx_path = outdir / f"{stem}_biophi_oasis.xlsx"
     written = build_oasis_workbook(
@@ -1989,6 +2246,13 @@ def cmd_humanize(args: argparse.Namespace) -> int:
     )
     outputs["mutation summary csv"] = str(csv_path)
 
+    mut_path = outdir / f"{stem}_biophi_mutations.csv"
+    if write_mutations_csv(mut_path, humanization):
+        outputs["mutation detail csv"] = str(mut_path)
+    prop_path = outdir / f"{stem}_biophi_proposals.csv"
+    if write_proposals_csv(prop_path, humanization):
+        outputs["mutation proposals csv"] = str(prop_path)
+
     md_path = outdir / f"{stem}_biophi_humanize.md"
     lines = [
         f"# BioPhi humanization: {input_path.name}",
@@ -2006,7 +2270,27 @@ def cmd_humanize(args: argparse.Namespace) -> int:
             f"{_fmt(row['oasis_before'])} | {_fmt(row['oasis_after'])} | "
             f"{row['v_germline'] or 'N/A'} |"
         )
-    lines += ["", "## Output files", ""]
+    lines += ["", "## Mutation details", ""]
+    for rid, mode_dict in humanization.get("per_record", {}).items():
+        for mode, data in mode_dict.items():
+            if not isinstance(data, dict) or "mutations" not in data:
+                continue
+            muts = data.get("mutations") or []
+            lines.append(f"### {_md_cell(rid)} [{mode}] ({len(muts)} mut)")
+            if muts:
+                shown = ", ".join(
+                    f"{m['position']} {m['parental']}→{m['humanized']}"
+                    for m in muts[:20]
+                )
+                more = f" …(+{len(muts) - 20} more)" if len(muts) > 20 else ""
+                lines.append(f"- {shown}{more}")
+            if data.get("alignment"):
+                lines.append("")
+                lines.append("```")
+                lines.append(data["alignment"])
+                lines.append("```")
+            lines.append("")
+    lines += ["## Output files", ""]
     for kind, target in sorted(outputs.items()):
         lines.append(f"- {kind}: `{target}`")
     lines.append("")
@@ -2140,9 +2424,13 @@ def cmd_evaluate_all(args: argparse.Namespace) -> int:
     if scores_path.exists():
         outputs["full score matrix csv"] = str(scores_path)
 
+    heatmap_payload = build_heatmap(sapiens_results)
     heatmap_path = outdir / f"{stem}_biophi_heatmap.json"
-    _write_json(heatmap_path, build_heatmap(sapiens_results))
+    _write_json(heatmap_path, heatmap_payload)
     outputs["heatmap json"] = str(heatmap_path)
+    heatmap_csv = outdir / f"{stem}_biophi_heatmap.csv"
+    if write_heatmap_csv(heatmap_csv, heatmap_payload):
+        outputs["heatmap csv"] = str(heatmap_csv)
 
     if not args.no_embeddings:
         emb_path = outdir / f"{stem}_biophi_embeddings.json"
@@ -2154,6 +2442,12 @@ def cmd_evaluate_all(args: argparse.Namespace) -> int:
         _write_peptides_csv(peptides_path, humanness)
         if peptides_path.exists():
             outputs["peptide-level csv"] = str(peptides_path)
+        nonhuman_path = outdir / f"{stem}_biophi_nonhuman_peptides.csv"
+        if write_nonhuman_peptides_csv(nonhuman_path, humanness):
+            outputs["non-human peptide windows csv"] = str(nonhuman_path)
+        curve_path = outdir / f"{stem}_biophi_oasis_curve.csv"
+        if write_oasis_curve_csv(curve_path, humanness):
+            outputs["oasis curve csv"] = str(curve_path)
         xlsx_path = outdir / f"{stem}_biophi_oasis.xlsx"
         written = build_oasis_workbook(
             numbered, humanness, xlsx_path, args.min_fraction_subjects
@@ -2168,6 +2462,12 @@ def cmd_evaluate_all(args: argparse.Namespace) -> int:
                 fa_path = outdir / f"{stem}_biophi_humanized_{mode}.fa"
                 _write_fasta(fa_path, recs_out)
                 outputs[f"humanized fasta ({mode})"] = str(fa_path)
+        mut_path = outdir / f"{stem}_biophi_mutations.csv"
+        if write_mutations_csv(mut_path, humanization):
+            outputs["mutation detail csv"] = str(mut_path)
+        prop_path = outdir / f"{stem}_biophi_proposals.csv"
+        if write_proposals_csv(prop_path, humanization):
+            outputs["mutation proposals csv"] = str(prop_path)
 
     print("[7/7] Writing unified report...", file=sys.stderr, flush=True)
     environment = _environment_report(args)

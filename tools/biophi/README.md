@@ -261,7 +261,7 @@ For pipeline variants (`variants.fasta`):
 | `{stem}_biophi_eval.md` | Human-readable Markdown report with variant summary, per-variant details, cross-validation tables |
 | `{stem}_biophi_eval.csv` | Variant-level summary CSV (incl. pipeline back-mutation counts/CVI) |
 | `{stem}_biophi_scores.csv` | full Sapiens probability matrix |
-| `{stem}_biophi_heatmap.json` | Sapiens per-position heatmap mapped to Kabat positions (default on) |
+| `{stem}_biophi_heatmap.json` / `.csv` | Sapiens per-position heatmap mapped to Kabat positions (default on; JSON + long CSV) |
 | `{stem}_biophi_humanized.fa` | Sapiens-humanized FASTA (default on) |
 | `{stem}_biophi_oasis.xlsx` | Raw BioPhi OASis workbook (when `--run-oasis`) |
 
@@ -270,17 +270,26 @@ For pipeline variants (`variants.fasta`):
 | File | Contents |
 |------|----------|
 | `{stem}_biophi_comprehensive.json` | everything: sapiens (mean/matrix/best/masked), OASis per-chain + per-antibody, all humanization modes, cross-validation |
-| `{stem}_biophi_comprehensive.md` | full Markdown report |
+| `{stem}_biophi_comprehensive.md` | full Markdown report (summary, per-variant details incl. mutations/alignments/proposals, paired-antibody humanness, cross-validation) |
 | `{stem}_biophi_comprehensive.csv` | variant summary CSV |
 | `{stem}_biophi_scores.csv` | full Sapiens probability matrix |
+| `{stem}_biophi_heatmap.csv` / `.json` | per-position Sapiens scores (long CSV + JSON, Kabat-mapped when `--metadata` given) |
+| `{stem}_biophi_mutations.csv` | every humanization mutation (id, mode, position, parental→humanized, region, in_cdr) |
+| `{stem}_biophi_proposals.csv` | Sapiens mutation proposals — parental/humanized rank1-3 scores (Designer input) |
 | `{stem}_biophi_peptides.csv` | OASis peptide-level table (all chains) |
+| `{stem}_biophi_nonhuman_peptides.csv` | positional humanness: non-human 9-mer windows per residue |
+| `{stem}_biophi_oasis_curve.csv` | OASis curve bins (cumulative fraction per threshold) |
 | `{stem}_biophi_oasis.xlsx` | OASis workbook (Overview/VH/VL/curves/per-antibody sheets) |
-| `{stem}_biophi_heatmap.json` | Kabat-mapped per-position Sapiens scores |
-| `{stem}_biophi_embeddings.json` | residue + sequence embeddings (all layers) |
+| `{stem}_biophi_embeddings.json` | residue + sequence embeddings (all layers; numeric-only, no CSV counterpart) |
 | `{stem}_biophi_humanized_sapiens.fa` | Sapiens-humanized sequences |
 | `{stem}_biophi_humanized_cdr_grafting.fa` | CDR-grafted sequences |
 | `{stem}_biophi_humanized_manual.fa` | Designer (unchanged) sequences |
 | `{stem}_biophi_humanized_full_antibody.fa` | paired VH+VL humanized sequences |
+
+> JSON files remain the complete machine-readable record; every JSON-only
+> analysis (mutations, proposals, alignments, curves, non-human windows,
+> heatmap) now has a CSV and/or Markdown counterpart. The only exception is
+> `*_biophi_embeddings.json` (high-dimensional floats, kept as JSON).
 
 ### Key report sections (Markdown)
 

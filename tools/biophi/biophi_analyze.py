@@ -401,8 +401,8 @@ def _sapiens_outputs(records: List[Tuple[str, str]], scores: Dict[str, Dict[str,
         _write_csv(
             outdir / f"{stem}_biophi_scores.csv",
             matrix_rows,
-            ["id", "chain", "position", "input_aa", "sapiens_score",
-             *list("ACDEFGHIKLMNPQRSTVWY")],
+            ["id", "chain", "position", "numbering", "input_aa",
+             "sapiens_score", *list("ACDEFGHIKLMNPQRSTVWY")],
         )
 
     def _cell(value: object) -> str:
@@ -432,7 +432,30 @@ def _sapiens_outputs(records: List[Tuple[str, str]], scores: Dict[str, Dict[str,
         "antibody language model. Higher is more human-like; it is not a "
         "germline identity percentage.",
         "",
+        "## Per-record details",
+        "",
     ]
+    for rid, d in detail.items():
+        lines.append(f"### {_cell(rid)}")
+        lines.append(
+            f"- mean={_cell(d.get('mean'))} min={_cell(d.get('min'))} "
+            f"max={_cell(d.get('max'))} positions<0.5={d.get('n_below_0_5')}"
+        )
+        hotspots = d.get("hotspots") or []
+        if hotspots:
+            hot = ", ".join(
+                f"{h.get('numbering', h.get('position'))}({h.get('residue')})"
+                f"={h.get('score')}"
+                for h in hotspots
+            )
+            lines.append(f"- hotspots (lowest): {hot}")
+        if d.get("best_score_sequence"):
+            lines.append(
+                f"- best-score sequence: `{d['best_score_sequence']}`"
+            )
+        if d.get("masked_sequence"):
+            lines.append(f"- masked sequence: `{d['masked_sequence']}`")
+        lines.append("")
     (outdir / f"{stem}_biophi_sapiens.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -488,10 +511,24 @@ def cmd_sapiens(args: argparse.Namespace) -> int:
     # Per-position + full 20-aa matrix (default: on, fullest analysis)
     detail: Dict[str, Dict[str, Any]] = {}
     if not args.no_per_position:
+        numbering_map: Optional[Dict[str, List[str]]] = None
+        metadata_path = getattr(args, "metadata", None)
+        if metadata_path and Path(metadata_path).exists():
+            with open(metadata_path) as fh:
+                meta = json.load(fh)
+            variants_map = meta.get("variants", meta) if isinstance(meta, dict) else {}
+            numbering_map = {}
+            for rid, _seq in records:
+                parts = rid.split("|")
+                key = parts[1] if len(parts) > 1 else rid
+                labels = variants_map.get(key) or variants_map.get(rid)
+                if isinstance(labels, list):
+                    numbering_map[rid] = labels
         detail = _sapiens_per_position_python_api(
             records, env=args.env, timeout=args.timeout,
             hf_endpoint=args.hf_endpoint,
             scheme=args.scheme, cdr_definition=args.cdr_definition,
+            numbering_map=numbering_map,
             verbose=getattr(args, "verbose", False),
         )
 
@@ -567,8 +604,13 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 from sapiens.predict import predict_scores
 
 records_path, out_path, scheme, cdr_definition = sys.argv[1:5]
+numbering_path = sys.argv[5] if len(sys.argv) > 5 else ""
 with open(records_path) as fh:
     records = json.load(fh)
+numbering_map = {}
+if numbering_path and os.path.exists(numbering_path):
+    with open(numbering_path) as fh:
+        numbering_map = json.load(fh)
 
 def chain_type_for(record_id, seq):
     try:
@@ -593,34 +635,55 @@ def chain_type_for(record_id, seq):
 results = {}
 for record_id, seq in records:
     ct = chain_type_for(record_id, seq)
+    labels = numbering_map.get(record_id)
     try:
         df = predict_scores(seq, chain_type=ct)
         per_pos = []
         matrix = []
         observed = []
+        best_chars = []
         for idx, residue in enumerate(seq):
             row = df.iloc[idx]
             score = float(row[residue]) if residue in df.columns else None
             if score is not None:
                 observed.append(score)
+            best_aa = str(row.idxmax())
+            best_chars.append(best_aa)
+            label = labels[idx] if labels and idx < len(labels) else str(idx + 1)
             per_pos.append({
                 "position": idx + 1,
+                "numbering": label,
                 "residue": residue,
                 "score": round(score, 6) if score is not None else None,
             })
             entry = {
                 "position": idx + 1,
+                "numbering": label,
                 "input_aa": residue,
                 "sapiens_score": round(score, 6) if score is not None else None,
             }
             for aa in "ACDEFGHIKLMNPQRSTVWY":
                 entry[aa] = round(float(row[aa]), 6) if aa in df.columns else None
             matrix.append(entry)
+        best_seq = "".join(best_chars)
+        masked_seq = "".join(
+            b if a in "*X" else a for a, b in zip(seq, best_seq)
+        )
+        hotspots = sorted(
+            (p for p in per_pos if p["score"] is not None),
+            key=lambda p: p["score"],
+        )[:5]
         results[record_id] = {
             "chain": ct,
             "mean": round(sum(observed) / len(observed), 6) if observed else None,
+            "min": round(min(observed), 6) if observed else None,
+            "max": round(max(observed), 6) if observed else None,
+            "n_below_0_5": sum(1 for s in observed if s < 0.5),
             "per_position": per_pos,
             "matrix": matrix,
+            "best_score_sequence": best_seq,
+            "masked_sequence": masked_seq,
+            "hotspots": hotspots,
         }
     except Exception as exc:
         results[record_id] = {
@@ -637,14 +700,16 @@ def _sapiens_per_position_python_api(
     records: List[Tuple[str, str]], env: str = DEFAULT_ENV,
     timeout: int = 3600, hf_endpoint: Optional[str] = None,
     scheme: str = "kabat", cdr_definition: str = "kabat",
+    numbering_map: Optional[Dict[str, List[str]]] = None,
     verbose: bool = False,
-) -> Dict[str, Dict[str, object]]:
+) -> Dict[str, Dict[str, Any]]:
     """Per-position + full 20-aa matrix via the Sapiens Python API.
 
     Runs inside the biophi conda env (the BioPhi CLI ``--scores-only`` has a
     known bug that leaves position/residue fields empty).
 
-    Returns dict: {record_id: {"chain", "mean", "per_position", "matrix"}}.
+    Returns dict: {record_id: {"chain", "mean", "per_position", "matrix",
+    "best_score_sequence", "masked_sequence", "hotspots", ...}}.
     """
     with tempfile.TemporaryDirectory(prefix="biophi_perpos_") as td:
         td_path = Path(td)
@@ -655,16 +720,22 @@ def _sapiens_per_position_python_api(
         records_json.write_text(
             json.dumps([[rid, seq] for rid, seq in records]), encoding="utf-8"
         )
+        cmd_args = [str(records_json), str(out_json), scheme, cdr_definition]
+        if numbering_map:
+            numbering_json = td_path / "numbering.json"
+            numbering_json.write_text(
+                json.dumps(numbering_map), encoding="utf-8"
+            )
+            cmd_args.append(str(numbering_json))
         proc = _run_env_python(
-            env, helper,
-            [str(records_json), str(out_json), scheme, cdr_definition],
+            env, helper, cmd_args,
             timeout=timeout, hf_endpoint=hf_endpoint, verbose=verbose,
         )
         _check_process(proc, "Sapiens per-position helper")
         if not out_json.exists():
             raise ToolError("Sapiens per-position helper did not write its output")
         with out_json.open() as fh:
-            raw: Dict[str, Dict[str, object]] = json.load(fh)
+            raw: Dict[str, Dict[str, Any]] = json.load(fh)
     return raw
 
 
@@ -817,6 +888,9 @@ def build_parser() -> argparse.ArgumentParser:
                          choices=["kabat", "chothia", "imgt", "north"])
     sapiens.add_argument("--humanize", action="store_true",
                          help="Also write a Sapiens-humanized FASTA")
+    sapiens.add_argument("--metadata", default=None,
+                         help="variants_numbering.json for Kabat-mapped "
+                              "positions in scores/MD")
     sapiens.add_argument("--no-per-position", dest="no_per_position",
                          action="store_true",
                          help="Skip per-position scores + full matrix "
@@ -987,10 +1061,18 @@ def cmd_evaluate_variants(args: argparse.Namespace) -> int:
 
             # Per-position + full 20-aa matrix via Python API inside the env
             # (bypasses the broken CLI --scores-only)
+            numbering_map: Dict[str, List[str]] = {}
+            for rid, _seq in records:
+                parts = rid.split("|")
+                key = parts[1] if len(parts) > 1 else rid
+                labels = numbering_variants.get(key) or numbering_variants.get(rid)
+                if isinstance(labels, list):
+                    numbering_map[rid] = labels
             sapiens_detail = _sapiens_per_position_python_api(
                 records, env=args.env, timeout=args.timeout,
                 hf_endpoint=args.hf_endpoint,
                 scheme=args.scheme, cdr_definition=args.cdr_definition,
+                numbering_map=numbering_map,
                 verbose=args.verbose,
             )
 
@@ -1002,7 +1084,8 @@ def cmd_evaluate_variants(args: argparse.Namespace) -> int:
                     row.update(entry)
                     matrix_rows.append(row)
             if matrix_rows:
-                fieldnames = ["id", "chain", "position", "input_aa",
+                fieldnames = ["id", "chain", "position", "numbering",
+                              "input_aa",
                               "sapiens_score", *list("ACDEFGHIKLMNPQRSTVWY")]
                 _write_csv(
                     outdir / f"{stem}_biophi_scores.csv", matrix_rows, fieldnames
@@ -1117,6 +1200,14 @@ def cmd_evaluate_variants(args: argparse.Namespace) -> int:
             variant_data["sapiens_per_position"] = detail.get("per_position")
             if detail.get("mean") is not None:
                 variant_data["sapiens_mean_api"] = detail.get("mean")
+            if detail.get("best_score_sequence"):
+                variant_data["sapiens_best_score_sequence"] = (
+                    detail["best_score_sequence"]
+                )
+            if detail.get("masked_sequence"):
+                variant_data["sapiens_masked_sequence"] = detail["masked_sequence"]
+            if detail.get("hotspots"):
+                variant_data["sapiens_hotspots"] = detail["hotspots"]
 
         oasis_row = oasis_by_id.get(rid)
         if oasis_row:
@@ -1143,7 +1234,7 @@ def cmd_evaluate_variants(args: argparse.Namespace) -> int:
     # ---------------------------------------------------------------------
     if args.heatmap:
         print("[4/5] Writing heatmap...", file=sys.stderr, flush=True)
-        heatmap: Dict[str, object] = {}
+        heatmap: Dict[str, List[Dict[str, Any]]] = {}
         for v in unified["variants"]:
             rid = str(v["id"])
             labels = v.get("numbering")
@@ -1170,6 +1261,23 @@ def cmd_evaluate_variants(args: argparse.Namespace) -> int:
             outdir / f"{stem}_biophi_heatmap.json",
             {"heatmap": heatmap, "timestamp": _now()},
         )
+        # Long-format CSV companion for easy plotting / spreadsheets
+        csv_rows = []
+        for rid, points in heatmap.items():
+            for p in points:
+                csv_rows.append({
+                    "id": rid,
+                    "position": p.get("position"),
+                    "numbering": p.get("numbering"),
+                    "residue": p.get("residue"),
+                    "score": p.get("score"),
+                })
+        if csv_rows:
+            _write_csv(
+                outdir / f"{stem}_biophi_heatmap.csv",
+                csv_rows,
+                ["id", "position", "numbering", "residue", "score"],
+            )
 
     # ---------------------------------------------------------------------
     # 5. Write outputs
@@ -1213,6 +1321,8 @@ def cmd_evaluate_variants(args: argparse.Namespace) -> int:
         print(f"Wrote {outdir / f'{stem}_biophi_scores.csv'}", file=sys.stderr, flush=True)
     if args.heatmap:
         print(f"Wrote {outdir / f'{stem}_biophi_heatmap.json'}", file=sys.stderr, flush=True)
+        if (outdir / f"{stem}_biophi_heatmap.csv").exists():
+            print(f"Wrote {outdir / f'{stem}_biophi_heatmap.csv'}", file=sys.stderr, flush=True)
     if humanized_fasta_path:
         print(f"Wrote {humanized_fasta_path}", file=sys.stderr, flush=True)
 
@@ -1400,10 +1510,20 @@ def _write_eval_markdown(unified, path):
             if valid_positions:
                 hot = sorted(valid_positions, key=lambda p: p["score"])[:5]
                 hot_txt = ", ".join(
-                    f"{p.get('position')}({p.get('residue')})={p.get('score')}"
+                    f"{p.get('numbering', p.get('position'))}"
+                    f"({p.get('residue')})={p.get('score')}"
                     for p in hot
                 )
                 lines.append(f"- Sapiens hotspots (lowest): {hot_txt}")
+        if v.get("sapiens_best_score_sequence"):
+            lines.append(
+                f"- Sapiens best-score sequence: "
+                f"`{v['sapiens_best_score_sequence']}`"
+            )
+        if v.get("sapiens_masked_sequence"):
+            lines.append(
+                f"- Sapiens masked sequence: `{v['sapiens_masked_sequence']}`"
+            )
 
         pipe = v.get("pipeline")
         if pipe:
