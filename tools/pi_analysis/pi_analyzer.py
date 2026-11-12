@@ -184,7 +184,8 @@ def check_tools() -> None:
     print("\n  Notes:")
     print("    - Structure mode needs ANARCI + FreeSASA.")
     print("    - Sequence mode is fully portable (stdlib only).")
-    print("    - Install PROPKA3 for --structure-model propka.")
+    print("    - Default structure pKa model is PROPKA3; install propka3")
+    print("      (missing -> automatic heuristic fallback with a warning).")
     print("")
 
 
@@ -945,9 +946,10 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                              "(default), exclude = all Cys non-ionizable, "
                              "free = all Cys ionizable")
     parser.add_argument("--structure-model", choices=("heuristic", "propka", "none"),
-                        default="heuristic",
-                        help="Structure pKa model: heuristic (default), propka, "
-                             "or none (no microenvironment correction)")
+                        default="propka",
+                        help="Structure pKa model: propka (default; falls back to "
+                             "heuristic with a warning if PROPKA3 is missing), "
+                             "heuristic, or none (no microenvironment correction)")
     parser.add_argument("--termini", choices=("auto", "free", "capped", "blocked"),
                         default="auto",
                         help="Terminus model: auto (Fab capped, VHH free), free, "

@@ -2144,7 +2144,7 @@ def analyze_structure(
     sasa_engine: str = "auto",
     psa_binary: Optional[str] = None,
     disulfide_mode: str = "auto",
-    structure_model: str = "heuristic",
+    structure_model: str = "propka",
     tap_thresholds: str = "2024",
     termini_mode: str = "auto",
     ionic_strength: float = IONIC_STRENGTH_DEFAULT,
@@ -2282,9 +2282,10 @@ def analyze_structure(
     if structure_model == "propka":
         propka_pka, propka_termini, err = run_propka_full(pdb_path)
         if propka_pka is None:
-            raise RuntimeError(
-                "PROPKA requested but unavailable: {}. Install propka3 or use "
-                "--structure-model heuristic.".format(err))
+            warnings.append(
+                "PROPKA is unavailable ({}), falling back to the heuristic "
+                "pKa model. Install propka3 for PROPKA pKa values.".format(err))
+            structure_model = "heuristic"
     elif structure_model == "heuristic":
         if find_propka():
             warnings.append(

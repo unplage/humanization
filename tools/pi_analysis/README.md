@@ -45,7 +45,7 @@ numbers, use `--pka-set Bjellqvist`.
 
 ## Structure model
 
-### `--structure-model heuristic` (default)
+### `--structure-model heuristic` (fallback)
 
 For every ionizable side chain:
 
@@ -73,13 +73,14 @@ still reported so the construct-dependent difference is visible. If a chain is
 truncated before IMGT 1/127, that end is treated as blocked and a warning is
 emitted.
 
-### `--structure-model propka`
+### `--structure-model propka` (default)
 
 Runs PROPKA3 if `propka3`/`propka` is on `PATH`, parses the
 `SUMMARY OF THIS PREDICTION` section, uses per-residue pKa values and the
 predicted N/C-terminal pKa values when present.
-If PROPKA is missing the run fails with a clear error; use `heuristic` or
-install `propka3`.
+If PROPKA is missing the run **falls back to the heuristic model** with a
+warning (use `heuristic` explicitly to suppress the warning, or install
+`propka3`).
 
 ### `--structure-model none`
 
@@ -138,7 +139,7 @@ Structure mode:
 ```bash
 pip install anarci        # IMGT numbering
 pip install freesasa      # SASA
-pip install propka        # optional, --structure-model propka
+pip install propka        # default structure pKa model (falls back to heuristic)
 ```
 
 Sequence mode: no third-party dependencies.
@@ -186,7 +187,7 @@ python3 tools/pi_analysis/pi_analyzer.py --fasta inputs/antibody.fasta --all-for
 | `--ph` | `7.4` | Physiological pH for net charge |
 | `--formulation-ph` | `6.0` | Formulation pH for charge/patch reporting |
 | `--disulfide {auto,exclude,free}` | `auto` | Cys handling |
-| `--structure-model {heuristic,propka,none}` | `heuristic` | Structure pKa model |
+| `--structure-model {propka,heuristic,none}` | `propka` | Structure pKa model (propka falls back to heuristic if PROPKA3 is missing) |
 | `--termini {auto,free,capped,blocked}` | `auto` | Terminus model (Fab capped, VHH free) |
 | `--ionic-strength M` | `0.15` | Debye-Huckel screening ionic strength |
 | `--ph-grid START:STOP:STEP` | `4:10:0.5` | pH grid for the charge curve |
