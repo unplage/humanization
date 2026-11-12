@@ -50,8 +50,10 @@ numbers, use `--pka-set Bjellqvist`.
 For every ionizable side chain:
 
 1. Compute relative SASA with FreeSASA (or JOY `psa` if available).
-2. Apply a burial penalty: acidic groups raise pKa when buried; basic groups
-   lower pKa when buried.
+2. Apply a burial penalty: acidic groups raise pKa when buried (the charged
+   anion is destabilised in a hydrophobic environment), basic groups lower
+   pKa when buried (the charged cation is destabilised). Histidine follows
+   the basic convention.
 3. Apply salt-bridge and H-bond corrections (acidic pKa down, basic pKa up
    when the charged form is stabilised), screened by Debye-Huckel ionic
    strength (`--ionic-strength`, default 0.15 M).
@@ -59,6 +61,8 @@ For every ionizable side chain:
 
 Disulfide Cys is detected geometrically (SG-SG <= 2.5 A) or, if no SG atoms
 are present, from the conserved Kabat Cys positions (H 22/92, L 22/23/88).
+A conserved Cys is only assigned to the disulfide when **both** partners are
+present: a lone conserved Cys is a free thiol and stays ionizable.
 Disulfide Cys is treated as non-ionizable.
 
 Termini are reported as:
@@ -69,15 +73,37 @@ Termini are reported as:
 
 `--termini auto` selects capped for Fab and free for VHH. The selected model is
 used for pI, net charge, patches and recommendations; free/capped values are
-still reported so the construct-dependent difference is visible. If a chain is
-truncated before IMGT 1/127, that end is treated as blocked and a warning is
-emitted.
+still reported so the construct-dependent difference is visible.
+
+The completeness of the modelled C-terminus is checked per chain type, because
+the last FR4-IMGT position differs: a VH/VHH runs to IMGT 128 while a VL ends
+at IMGT 127 (as ANARCI numbers them). A chain truncated before its own
+boundary is treated as blocked at that end and a warning is emitted, so a
+missing FR4 residue never becomes a spurious charged terminus.
 
 ### `--structure-model propka` (default)
 
 Runs PROPKA3 if `propka3`/`propka` is on `PATH`, parses the
-`SUMMARY OF THIS PREDICTION` section, uses per-residue pKa values and the
-predicted N/C-terminal pKa values when present.
+`SUMMARY OF THIS PREDICTION` section, and uses the per-residue and
+N/C-terminal pKa values. PROPKA is run **on the trimmed Fv** (the same
+residues the SASA-based model sees), not on the whole input file, so that the
+two structure models describe the same molecular system and the
+structure-vs-sequence delta stays interpretable.
+
+PROPKA reports both the final pKa and the *model* pKa it started from. The
+difference between the two is the purely environmental contribution
+(desolvation, hydrogen bonds, salt bridges, charge interactions), which is
+independent of the free-solution reference. The tool therefore transfers that
+environmental contribution onto each bundled pKa set:
+
+```
+pKa_effective = pKa_set(model) + [pKa_PROPKA - pKa_model_PROPKA]
+```
+
+This keeps the pKa-set sensitivity analysis meaningful in PROPKA mode. (Using
+the raw PROPKA value for every set would collapse all five sets onto one
+number and report a spurious zero-width uncertainty.)
+
 If PROPKA is missing the run **falls back to the heuristic model** with a
 warning (use `heuristic` explicitly to suppress the warning, or install
 `propka3`).
@@ -91,26 +117,48 @@ control to see how much burial/salt-bridge/H-bond effects change the result.
 
 Before interpreting a structure, the tool reports:
 
-- mean/min/max CA B-factor (a pLDDT proxy for AF2/AF3 models);
+- mean/min/max CA B-factor, together with the **provenance** of the file;
 - missing side-chain heavy atoms, especially missing ionizable atoms;
 - CA-CA chain breaks (> 4.5 A);
 - truncated N/C termini.
 
-Low pLDDT/B-factor models, missing ionizable atoms and chain breaks produce
-warnings because they directly affect SASA and pI.
+The B-factor column means different things in different files, so the tool
+reads the provenance from the file header (`EXPDTA` / `REMARK 2 RESOLUTION` /
+`_exptl.method` -> experimental; AlphaFold/AF3 markers -> predicted) and
+interprets the numbers accordingly:
+
+| provenance | B-factor column | low value means | warning |
+|---|---|---|---|
+| experimental | crystallographic B-factor (A^2) | well ordered | mean > 60 A^2: partly disordered |
+| predicted | pLDDT (0-100) | low confidence | mean < 70: low confidence |
+| unknown | unknown | - | reported, not interpreted |
+
+Interpreting a crystal structure's low mean B-factor as "low confidence"
+(inverting its meaning) would have flagged every well-refined structure as
+unreliable, so the provenance is now established rather than guessed from the
+numeric range.
 
 ### Salt bridges and pKa uncertainty
 
 Two salt-bridge definitions are reported deliberately:
 
 - **TAP**: 3.2 A, both partners surface-exposed, one partner per residue;
-- **pKa microenvironment**: 4.0 A, burial allowed, multiple partners.
+- **pKa microenvironment**: 4.0 A, burial allowed, multiple partners,
+  and histidine included as a donor (a protonated imidazole does form
+  charge-assisted hydrogen bonds to carboxylates).
 
 They answer different questions and can differ substantially (for example,
-A reference Fab has 1 TAP salt bridge but 7 microenvironment pairs). The pKa model uses the
+a reference Fab has 1 TAP salt bridge but 7 microenvironment pairs). The pKa model uses the
 broader definition; the TAP metric remains comparable with published TAP
 output. Every run also reports the pI range across all five bundled pKa sets
 and a net-charge-vs-pH curve (`--ph-curve` prints it; JSON always contains it).
+
+Hydrogen bonds are detected with explicit donor/acceptor polarity: a
+carboxylate O or thiolate S is an acceptor, an ammonium/guanidinium/imidazole
+N is a donor, and a contact only counts when the two partners have
+complementary roles and the antecedent-donor...acceptor angle exceeds 120
+degrees. A D...D or K...K contact is therefore no longer reported as a
+hydrogen bond.
 
 ## Sequence fallback
 
@@ -124,6 +172,49 @@ python3 tools/pi_analysis/pi_analyzer.py --vh <VHH_SEQ>
 
 Sequence mode reports pI, capped pI, net charge and per-chain charge. It does
 not report TAP, SASA, charge patches or structure-aware pKa shifts.
+
+### What sequence mode can and cannot tell you
+
+A sequence determines **which** ionizable groups exist and their intrinsic
+pKa. It does not determine **where** they sit in the folded protein, and it
+is exactly the second part that moves the pI: a buried carboxylate gains
+~1.4 pH units, a salt-bridged one loses ~0.8.
+
+| Output | Sequence-only | Why |
+|--------|---------------|-----|
+| Fv/VHH pI, pKa-set sensitivity range | yes | free-solution titration |
+| net charge vs pH, per-chain pI and charge | yes | free-solution titration |
+| total-charge asymmetry (`Fv_chml`, `SFvCSP_total`) | yes | charge balance only |
+| `Ltot` (CDR length) | yes | exact from IMGT numbering |
+| TAP `PSH` / `PPC` / `PNC` / `SFvCSP` | **no** | defined on solvent-exposed charges and 3D distances |
+| structure-aware pI (burial / salt bridge / H-bond shifts) | **no** | needs the microenvironment |
+| 3D charge patches and the mutation candidates from them | **no** | patches are 3D clusters of exposed residues |
+| VH/VL interface, antigen contacts | **no** | needs the 3D complex |
+
+Measured on the 4D5 Fab (same terminus model, all five pKa sets), the
+structure-aware pI differs from the sequence pI by **-0.2 to -0.7 pH units**,
+with no consistent sign, and the structure mode additionally raised a real
+`PSH = red` hydrophobic-patch flag that sequence mode cannot raise at all.
+
+Because an absent flag reads like a clean flag, sequence mode states the
+omission explicitly:
+
+- the JSON carries `analysis_type` (`"sequence_only"` / `"structure"`) and
+  `unavailable_metrics`, a list of `{key, label, reason}` for every output
+  that needs a structure (with the physical reason, not just "n/a");
+- the text and Markdown reports open with a **SCOPE OF THIS ANALYSIS** block
+  listing them, and close with the warning that *an absent flag is not a
+  clean flag*;
+- the recommendation list carries the same statement as a `scope` entry, so
+  a machine-readable consumer sees it too.
+
+Structure mode reports `analysis_type: "structure"` and an empty
+`unavailable_metrics` list.
+
+**Practical route from sequence to structure:** a single-sequence predicted
+model (ESMFold / AF2) is enough to obtain the missing metrics. The tool
+recognises AlphaFold/AF3 files from their header and interprets their
+B-factor column as pLDDT, so a predicted model can be fed in directly.
 
 FASTA handling:
 
@@ -196,6 +287,7 @@ python3 tools/pi_analysis/pi_analyzer.py --fasta inputs/antibody.fasta --all-for
 | `--sasa {auto,psa,freesasa}` | `auto` | Surface engine |
 | `--psa-binary PATH` | - | JOY `psa` executable |
 | `--tap-thresholds {2024,2019,exscientia,legacy}` | `2024` | TAP flag bands |
+| `--patch-calibration FILE` | - | JSON file with local patch risk bands (replaces the documented defaults) |
 | `--max-patches N` | `12` | Patches shown in text/Markdown; 0 = all |
 | `--ionizable` | off | Include per-residue pKa table |
 | `--json`, `--markdown`, `--csv`, `--text`, `--all-formats` | off | Reports |
@@ -217,20 +309,29 @@ Batch runs also write `combined_pi_results.json`.
 
 The JSON contains:
 
+- `analysis_type`: `"sequence_only"` or `"structure"`, so a consumer can
+  branch on what was actually computed;
+- `unavailable_metrics`: the structure-dependent outputs that this run could
+  not produce (`{key, label, reason}` entries; empty in structure mode);
 - `sequence_pI` and `structure_pI` per pKa set (`pI_selected`, `pI_free`,
   `pI_capped`, `pI_blocked`, `delta_vs_sequence`);
 - `sensitivity`: selected pI for every bundled pKa set and the resulting range;
 - `charge_curve`: net charge sampled across pH;
-- `structure_quality`: B-factor/pLDDT proxy, missing side chains, chain breaks,
+- `structure_quality`: B-factor statistics **with the file provenance**
+  (`provenance`, `bfactor_meaning`), missing side chains, chain breaks,
   truncated termini;
 - per-chain pI (`free`/`capped`/`selected`) and net charge;
 - `fv`: selected/free/capped pI, pI range, net charge, total and surface
-  `Fv_chml`/`SFvCSP`, total and surface per-chain charges;
+  `Fv_chml`/`SFvCSP` (plus `SFvCSP_basis`, which records whether the `SFvCSP`
+  alias holds the surface or the total value), total and surface per-chain
+  charges;
 - `tap`: Ltot, PSH, PPC, PNC, SFvCSP, flags, risk summary, and both salt-bridge
   counts (`n_salt_bridges_tap` and `n_salt_bridges_pka`);
 - `patches`: 3D charge patches with residue rows, local risk basis and
   mutation candidates with sequence-level what-if `delta_pI_estimate` /
-  `delta_charge_formulation_estimate`;
+  `delta_charge_formulation_estimate` (patch IDs are unique across the pH
+  values);
+- `patch_calibration`: the risk bands actually applied and where they came from;
 - `ionizable_residues`: structure-aware pKa, exposure, salt bridge distance,
   H-bond distance, disulfide and shift reason;
 - `recommendations` and `warnings`.
@@ -261,6 +362,11 @@ It is a developability heuristic, not a hard requirement.
   definition. Sequence mode reports total charge (surface values are `null`).
   Use the surface `SFvCSP` for TAP comparability and the total values for
   biochemical charge balance.
+- The published thresholds are defined on the **surface** descriptors, so the
+  tool only compares them against `SFvCSP_surface` / `Fv_chml_surface`. The
+  `SFvCSP` alias follows the value that exists in the current mode and
+  `SFvCSP_basis` records which one it is (`surface` or `total`), so a
+  total-charge product is never silently judged against a surface threshold.
 - Balance the more charged chain using **exposed framework** positions; keep
   CDR, anchors, VHH hallmarks and FR4 untouched.
 
@@ -277,21 +383,45 @@ It is a developability heuristic, not a hard requirement.
 TAP flags are structure-only. See `tools/tap_profiler/README.md` for the
 published thresholds and the exact surface-reference caveat.
 
+The thresholds, the 7.5-9.0 pI window and the `|Fv_chml| <= 4` limit were all
+derived on mammalian IgG/Fab. For a VHH they are applied by analogy only: a
+camelid VHH has a longer CDR3, a different solvent-exposure profile and no VL
+partner, so the flag values are relative guidance rather than calibrated
+cut-offs. The tool states this explicitly in the VHH report.
+
 ### Charge patches
 
 Patches are built at both the formulation pH and pH 7.4:
 
 - exposed charged residues with rSASA >= 7.5 %;
-- clustered by 3D proximity (<= 8 A);
+- clustered by 3D proximity (<= 8 A; the patch graph uses its own 8 A
+  neighbour map, while the TAP metrics keep their published 7.5 A map);
 - charge computed at the requested pH (salt-bridged groups zeroed);
-- score is the pairwise `|q1*q2|/r^2` sum;
+- score is the pairwise `|q1*q2|/r^2` sum over like-charged pairs;
 - `score_tap` is the TAP-style ordered integer-charge score (`PPC`/`PNC`);
-- local risk is recalibrated for continuous partial charges: positive patches
-  use 0.50/2.00 bands, negative patches 0.60/2.50, with a 1.25x CDR-vicinity
-  penalty; `risk_basis` states which rule fired;
+- local risk uses bands on the fractional-charge score: positive patches
+  0.50/2.00, negative patches 0.60/2.50, with a 1.25x CDR-vicinity penalty;
+  `risk_basis` states which rule fired;
 - first/last residues of each chain are flagged and excluded from mutation
   candidates because they change the terminal pKa and can form
   pyroglutamate/processing liabilities.
+
+**The band values are a documented prior, not a validated threshold set.** The
+local score is an unordered fractional-charge sum, whereas the published TAP
+PPC/PNC bands are ordered integer-charge sums over the whole CDR vicinity, so
+the two scales are not interchangeable. A site with its own experimental data
+can replace the bands with `--patch-calibration FILE`:
+
+```json
+{
+  "positive": {"elevated": 0.5, "high": 2.0},
+  "negative": {"elevated": 0.6, "high": 2.5},
+  "cdr_factor": 1.25
+}
+```
+
+The bands actually used are reported in the JSON output under
+`patch_calibration`.
 
 Each patch reports its residues, CDR/framework composition, VH/VL interface
 flag and candidate substitutions.
@@ -317,11 +447,23 @@ flag and candidate substitutions.
 - **Mixed patch**: only act when one sign dominates (`|total charge| > 0.5`);
   otherwise the patch is approximately balanced.
 - Never mutate CDR residues, anchors, VHH hallmark positions (IMGT 42/49/50/52;
-  Kabat 37/44/45/47) or FR4.
+  Kabat 37/44/45/47) or FR4. The IMGT anchors (26/39, 55/66, 104/118) are
+  **excluded** from the candidate list, not merely flagged: they are the
+  conserved paratope framework that delimits each CDR loop.
 - VH/VL interface positions are flagged **high risk**: mutation can perturb
   chain pairing. Validate pairing and affinity.
 - Charge reversal (K/R -> D/E or D/E -> K/R) is reported separately and should
   be treated as a last resort.
+
+### Scope of the numbers
+
+- The pI reported is the **Fv** (variable domain) pI. cIEF and IEX measure the
+  intact molecule, whose charge also contains the constant regions (an IgG1 Fc
+  contributes roughly +7 at pH 7.4). The Fv pI is a variable-domain quantity
+  and is not directly comparable with an experimental IgG pI.
+- The pI window, the TAP thresholds and the charge-asymmetry limit come from
+  mammalian IgG/Fab work. For a VHH they are applied by analogy only, and the
+  report states this.
 
 ### Follow-up workflow
 

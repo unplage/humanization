@@ -41,6 +41,7 @@ from pi_core import (  # noqa: E402
     analyze_structure,
     clean_sequence,
     find_propka,
+    load_patch_calibration,
     normalize_pka_set,
 )
 
@@ -216,6 +217,30 @@ def format_text_report(
         _fmt(result.get("ionic_strength"), 3)))
     lines.append("")
 
+    # Scope block: state explicitly which outputs a sequence-only run could
+    # not compute, so that an absent developability flag is not read as a
+    # clean one.
+    if result.get("analysis_type") == "sequence_only":
+        missing = result.get("unavailable_metrics")
+        lines.append("-" * 88)
+        lines.append("  SCOPE OF THIS ANALYSIS")
+        lines.append("-" * 88)
+        lines.append("")
+        lines.append("  Sequence-only analysis: no three-dimensional structure was used.")
+        lines.append("  The following outputs require a structure and were NOT computed:")
+        lines.append("")
+        if isinstance(missing, list):
+            for item in missing:
+                if not isinstance(item, dict):
+                    continue
+                lines.append("    - {}".format(item.get("label", "")))
+                lines.append("      {}".format(item.get("reason", "")))
+        lines.append("")
+        lines.append("  An absent flag is NOT a clean flag: an antibody with a real")
+        lines.append("  hydrophobic-patch or charge-asymmetry flag is indistinguishable")
+        lines.append("  from a clean one in this mode.")
+        lines.append("")
+
     fv = result.get("fv", {})
     if isinstance(fv, dict):
         lines.append("-" * 88)
@@ -275,7 +300,7 @@ def format_text_report(
                 _signed(row["delta"]), _fmt(row["pI_capped"]),
                 _signed(row["q_ph74"]), _signed(row["q_form"])))
     else:
-        lines.append("  {:<14s} {:>9s} {:>9s} {:>9s}".format(
+        lines.append("  {:<14s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
             "pKa set", "seq pI", "struct pI", "capped", "q pH74"))
         lines.append("  {:<14s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
             "-" * 14, "-" * 9, "-" * 9, "-" * 9, "-" * 9))
@@ -464,10 +489,16 @@ def format_text_report(
     lines.append("-" * 88)
     lines.append("")
     lines.append("  pI is solved by bisection on the net-charge curve.")
-    lines.append("  Structure mode uses per-residue SASA burial, salt bridges and H-bonds;")
-    lines.append("  the heuristic pKa shift is clamped to +/-2 pH units and screened by")
-    lines.append("  Debye-Huckel ionic strength. PROPKA is optional. Patch clustering uses")
-    lines.append("  exposed charged residues (rSASA >= 7.5 %) within 8 A.")
+    if result.get("analysis_type") == "structure":
+        lines.append("  Structure mode uses per-residue SASA burial, salt bridges and H-bonds;")
+        lines.append("  the heuristic pKa shift is clamped to +/-2 pH units and screened by")
+        lines.append("  Debye-Huckel ionic strength. PROPKA is optional. Patch clustering uses")
+        lines.append("  exposed charged residues (rSASA >= 7.5 %) within 8 A.")
+    else:
+        lines.append("  Sequence mode applies the selected pKa set to every ionizable group")
+        lines.append("  without a microenvironment correction (no solvent exposure, salt bridge")
+        lines.append("  or hydrogen-bond terms), so the reported pI is the free-solution value")
+        lines.append("  of the modelled variable domains.")
     lines.append("  Computational pI is a screening estimate; confirm by cIEF/IEX.")
     lines.append("")
     return "\n".join(lines)
@@ -518,6 +549,24 @@ def save_markdown_report(
         result.get("termini_mode", "free"),
         _fmt(result.get("ionic_strength"), 3)))
     lines.append("")
+
+    if result.get("analysis_type") == "sequence_only":
+        missing = result.get("unavailable_metrics")
+        lines.append("> **Sequence-only analysis.** No three-dimensional "
+                     "structure was used, so the outputs below require a "
+                     "structure and were **not computed**:")
+        lines.append(">")
+        if isinstance(missing, list):
+            for item in missing:
+                if not isinstance(item, dict):
+                    continue
+                lines.append("> - **{}** — {}".format(
+                    item.get("label", ""), item.get("reason", "")))
+        lines.append(">")
+        lines.append("> An absent flag is **not** a clean flag: an antibody "
+                     "with a real hydrophobic-patch or charge-asymmetry flag "
+                     "is indistinguishable from a clean one in this mode.")
+        lines.append("")
 
     fv = result.get("fv", {})
     if isinstance(fv, dict):
@@ -878,8 +927,9 @@ def _load_fasta_chains(path: str) -> List[ChainInfo]:
         clean, _warnings = clean_sequence(seq)
         if not clean:
             raise ValueError("Empty sequence in FASTA record {!r}".format(name))
-        cleaned.append((name, clean))
-
+        # The raw sequence is kept so that analyze_sequence can report the
+        # cleaning warnings (dropped/substituted non-standard residues).
+        cleaned.append((name, seq))
     if len(cleaned) == 1:
         return [ChainInfo(name="VHH", chain_type="H", sequence=cleaned[0][1])]
 
@@ -973,6 +1023,11 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                         help="Path to the JOY psa executable")
     parser.add_argument("--tap-thresholds", choices=("2024", "2019", "exscientia", "legacy"),
                         default="2024", help="TAP flag thresholds (default: 2024)")
+    parser.add_argument("--patch-calibration", default=None, metavar="FILE",
+                        help="JSON file with local patch risk bands "
+                             "({'positive': {...}, 'negative': {...}, "
+                             "'cdr_factor': 1.25}); replaces the documented "
+                             "default bands")
     parser.add_argument("--max-patches", type=int, default=12,
                         help="Patches shown in text/Markdown; 0 = all (default: 12)")
     parser.add_argument("--ionizable", action="store_true",
@@ -1004,6 +1059,11 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
     except ValueError as exc:
         parser.error(str(exc))
 
+    try:
+        patch_calibration = load_patch_calibration(args.patch_calibration)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error("cannot read --patch-calibration: {}".format(exc))
+
     os.makedirs(args.output, exist_ok=True)
     results: List[Dict[str, object]] = []
 
@@ -1027,6 +1087,7 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 ionic_strength=args.ionic_strength,
                 ph_grid=ph_grid,
                 name=args.name,
+                patch_calibration=patch_calibration,
             )
         except Exception as exc:
             print("  ERROR: {}".format(exc), file=sys.stderr)
@@ -1064,6 +1125,7 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                     ionic_strength=args.ionic_strength,
                     ph_grid=ph_grid,
                     name=args.name or pdb_path.stem,
+                    patch_calibration=patch_calibration,
                 )
             except Exception as exc:
                 print("  ERROR: {}".format(exc), file=sys.stderr)
@@ -1071,7 +1133,8 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
             results.append(result)
             print(format_text_report(
                 result, "pI / Fv Charge Analysis: {}".format(result.get("name", "")),
-                max_patches=args.max_patches, show_ionizable=args.ionizable))
+                max_patches=args.max_patches, show_ionizable=args.ionizable,
+                show_charge_curve=args.ph_curve))
 
     else:
         if args.fasta:
@@ -1092,12 +1155,15 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 if not clean_vl:
                     print("  ERROR: empty --vl sequence", file=sys.stderr)
                     sys.exit(1)
+                # The raw sequences are passed on so that analyze_sequence
+                # can report the cleaning warnings (dropped/substituted
+                # non-standard residues).
                 chains = [
-                    ChainInfo(name="VH", chain_type="H", sequence=clean_vh),
-                    ChainInfo(name="VL", chain_type="L", sequence=clean_vl),
+                    ChainInfo(name="VH", chain_type="H", sequence=args.vh),
+                    ChainInfo(name="VL", chain_type="L", sequence=args.vl),
                 ]
             else:
-                chains = [ChainInfo(name="VHH", chain_type="H", sequence=clean_vh)]
+                chains = [ChainInfo(name="VHH", chain_type="H", sequence=args.vh)]
             input_path = ""
             default_name = "sequence"
 
@@ -1113,6 +1179,7 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 termini_mode=args.termini,
                 name=args.name or default_name,
                 input_path=input_path,
+                patch_calibration=patch_calibration,
             )
         except Exception as exc:
             print("  ERROR: {}".format(exc), file=sys.stderr)
@@ -1130,7 +1197,8 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(format_text_report(
                     result, "pI / Fv Charge Analysis: {}".format(result.get("name", "")),
-                    max_patches=args.max_patches, show_ionizable=args.ionizable))
+                    max_patches=args.max_patches, show_ionizable=args.ionizable,
+                    show_charge_curve=args.ph_curve))
             print("  Text report saved: {}".format(path))
         if args.json or args.all_formats:
             path = os.path.join(args.output, "{}_pi.json".format(stem))

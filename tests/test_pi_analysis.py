@@ -26,9 +26,11 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tools", "pi_analysis")
 sys.path.insert(0, TOOL)
+sys.path.insert(0, os.path.join(ROOT, "tools", "tap_profiler"))
 
 import pi_core  # noqa: E402
 import pi_analyzer  # noqa: E402
+import tap_core  # noqa: E402
 from pi_core import (  # noqa: E402
     ChainInfo,
     Patch,
@@ -485,6 +487,523 @@ def test_patch_risk_calibration():
           "balanced mixed patch should be low risk")
 
 
+# ---------------------------------------------------------------------------
+# Regression tests for the defects found in the scientific review
+# ---------------------------------------------------------------------------
+
+def test_propka_sensitivity_is_not_degenerate():
+    """PROPKA mode must still vary with the bundled pKa set.
+
+    Regression: the same PROPKA pKa dict was passed for every pKa set, so
+    all five sets returned an identical pI and the reported uncertainty was
+    a meaningless zero-width range.  PROPKA's *model* pKa is now used to
+    separate the environmental contribution, which is transferred onto each
+    bundled set.
+    """
+    import tools.pi_analysis.pi_core as core
+
+    def fake_propka(residues, timeout=600):
+        pka, model = {}, {}
+        for r in residues:
+            if r.aa in ("D", "E"):
+                v, m = 3.9, 3.8
+            elif r.aa in ("K", "R"):
+                v, m = 10.5, 10.5
+            elif r.aa == "H":
+                v, m = 6.0, 6.5
+            elif r.aa in ("C", "Y"):
+                v, m = 9.0, 9.0
+            else:
+                continue
+            pka[r.key] = v
+            model[r.key] = m
+        termini, tmodel = {}, {}
+        for ch in {r.chain for r in residues}:
+            termini[(ch, "N")] = 8.5
+            tmodel[(ch, "N")] = 8.0
+            termini[(ch, "C")] = 3.6
+            tmodel[(ch, "C")] = 3.2
+        return pka, model, termini, tmodel, None
+
+    original_run = core._run_propka_on_fv
+    original_find = core.find_propka
+    core._run_propka_on_fv = fake_propka
+    core.find_propka = lambda: "/usr/bin/propka3"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            pdb = os.path.join(tmp, "fv.pdb")
+            _write_synthetic_fv(pdb)
+            result = analyze_structure(
+                pdb, pka_set="IPC_protein", all_pka_sets=True,
+                structure_model="propka")
+    finally:
+        core._run_propka_on_fv = original_run
+        core.find_propka = original_find
+
+    values = result["sensitivity"]["pka_sets"]
+    check(len(values) == len(pi_core.PKA_SETS),
+          "every pKa set should be reported")
+    check(len(set(round(v, 6) for v in values.values())) > 1,
+          "PROPKA mode must not collapse all pKa sets onto one value: {}".format(
+              values))
+    rng = result["sensitivity"]["pI_selected_range"]
+    check(rng[1] > rng[0], "pKa-set sensitivity range must be non-degenerate")
+
+
+def test_patch_graph_uses_documented_8A_cutoff():
+    """Pairs at 7.5-8.0 A must join a patch (the documented cutoff is 8 A).
+
+    Regression: the patch graph reused the TAP 7.5 A neighbour map, so a
+    pair at 7.7 A was split into two patches.
+    """
+    from tap_core import Residue
+
+    def res(resseq, atoms):
+        r = Residue(chain="H", resseq=resseq, icode=" ", resname="ASP",
+                    aa="D", atoms=atoms)
+        r.imgt_pos = 30
+        r.rel_sasa = 50.0
+        return r
+
+    d1 = [(" OD1", "O", 0.0, 0.0, 0.0), (" OD2", "O", 0.0, 1.0, 0.0),
+          (" CG ", "C", -1.5, 0.5, 0.0), (" CB ", "C", -2.5, 1.5, 0.0)]
+    d2 = [(" OD1", "O", 7.7, 0.0, 0.0), (" OD2", "O", 7.7, 1.0, 0.0),
+          (" CG ", "C", 9.2, 0.5, 0.0), (" CB ", "C", 10.2, 1.5, 0.0)]
+    residues = [res(10, d1), res(20, d2)]
+
+    def groups_for(rs):
+        return {r.key: pi_core.IonizableGroup(
+            chain=r.chain, resseq=r.resseq, icode=r.icode, aa=r.aa,
+            kind="acid", pka_model=4.0, pka_eff=4.0, active=True,
+            structure_chain=r.chain) for r in rs}
+
+    near = tap_core.build_pair_distances(residues, cutoff=7.5)
+    wide = tap_core.build_pair_distances(residues, cutoff=pi_core.PATCH_CUTOFF)
+    patches_near = pi_core.cluster_patches(
+        residues, near, 6.0, groups_by_key=groups_for(residues))
+    patches_wide = pi_core.cluster_patches(
+        residues, wide, 6.0, groups_by_key=groups_for(residues))
+    check(len(patches_near) == 2,
+          "7.5 A map must not connect a 7.7 A pair (control)")
+    check(len(patches_wide) == 1,
+          "8.0 A map must connect a 7.7 A pair into one patch")
+
+
+def test_same_chain_for_vh_and_vl_is_rejected():
+    """--vh-chain == --vl-chain must fail loudly, not double-count."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pdb = os.path.join(tmp, "fv.pdb")
+        _write_synthetic_fv(pdb)
+        try:
+            analyze_structure(pdb, vh_chain="H", vl_chain="H",
+                              structure_model="heuristic")
+        except ValueError as exc:
+            check("different chains" in str(exc),
+                  "error should explain that the chains must differ")
+        else:
+            raise AssertionError("same chain for VH and VL must be rejected")
+
+
+def test_text_report_header_matches_columns():
+    """The non-structure pKa table header must list every data column."""
+    from tools.pi_analysis import pi_analyzer
+    result = analyze_sequence(
+        [ChainInfo(name="VH", chain_type="H", sequence=VH_4D5),
+         ChainInfo(name="VL", chain_type="L", sequence=VL_4D5)],
+        pka_set="IPC_protein")
+    text = pi_analyzer.format_text_report(result)
+    header = [ln for ln in text.splitlines() if "seq pI" in ln and "struct pI" in ln]
+    check(len(header) == 1, "expected exactly one pKa-set header")
+    for column in ("pKa set", "seq pI", "struct pI", "capped", "q pH74"):
+        check(column in header[0],
+              "header must list the {!r} column: {!r}".format(column, header[0]))
+    data = [ln for ln in text.splitlines()
+            if ln.strip().startswith("IPC_protein")]
+    check(len(data) == 1, "expected one data row")
+    check(len(data[0].split()) == 5,
+          "the data row must have five values: {!r}".format(data[0]))
+
+
+def test_ph_curve_reaches_saved_text_report():
+    """--ph-curve must also appear in the saved text report and in batch mode."""
+    out = tempfile.mkdtemp()
+    try:
+        pdb = os.path.join(out, "fv.pdb")
+        _write_synthetic_fv(pdb)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(TOOL, "pi_analyzer.py"),
+             "--pdb", pdb, "--structure-model", "heuristic",
+             "--text", "--ph-curve", "--output", out],
+            capture_output=True, text=True)
+        check(proc.returncode == 0,
+              "CLI failed: {}".format(proc.stderr[-400:]))
+        with open(os.path.join(out, "fv_pi.txt")) as fh:
+            text = fh.read()
+        check("NET CHARGE VS pH" in text,
+              "saved text report must contain the charge curve")
+    finally:
+        for name in os.listdir(out):
+            os.remove(os.path.join(out, name))
+        os.rmdir(out)
+
+
+def test_clean_sequence_warnings_are_reported():
+    """U/O substitution and dropped residues must be reported."""
+    seq = "EVQLUESGGGXQVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKDRYDFWSGYPPGEEYFQHWGQGTLVTVSS"
+    result = analyze_sequence(
+        [ChainInfo(name="VHH", chain_type="H", sequence=seq)],
+        pka_set="Bjellqvist")
+    joined = " ".join(result["warnings"]).lower()
+    check("selenocysteine" in joined,
+          "U -> C substitution must be warned about: {}".format(result["warnings"]))
+    check("non-standard" in joined,
+          "dropped residue must be warned about: {}".format(result["warnings"]))
+    check("U" not in result["chains"]["VHH"]["sequence"],
+          "selenocysteine must be substituted, not kept")
+
+
+def test_bfactor_provenance_semantics():
+    """A crystal B-factor must not be read as a low-confidence pLDDT."""
+    from tap_core import Residue
+
+    def write(path, header, bfactor):
+        with open(path, "w") as fh:
+            fh.write(header)
+            serial = 1
+            for cid, seq in (("H", VH_4D5), ("L", VL_4D5)):
+                for i, aa in enumerate(seq, 1):
+                    x = (i % 20) * 3.8
+                    y = (i // 20) * 3.8
+                    z = ((i * 7) % 9) * 0.9
+                    for name, dx, dy, dz, el in (
+                            (" CA ", 0, 0, 0, "C"), (" N  ", -1.2, 0.5, 0.1, "N"),
+                            (" C  ", 1.2, 0.5, -0.1, "C"), (" O  ", 1.7, 1.6, -0.1, "O")):
+                        fh.write(
+                            "ATOM  {:5d} {:4s} {:>3s} {:1s}{:4d}    "
+                            "{:8.3f}{:8.3f}{:8.3f}  1.00 {:6.2f}          {:>2s}\n".format(
+                                serial, name, ONE_TO_THREE[aa], cid, i,
+                                x + dx, y + dy, z + dz, bfactor, el))
+                        serial += 1
+            fh.write("END\n")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        crystal = os.path.join(tmp, "crystal.pdb")
+        write(crystal, "HEADER    X\nEXPDTA    X-RAY DIFFRACTION\n"
+                       "REMARK   2 RESOLUTION.    1.90 ANGSTROMS\n", 20.0)
+        predicted = os.path.join(tmp, "predicted.pdb")
+        write(predicted, "HEADER    ALPHAFOLD MONOMER\n"
+                         "REMARK   1 pLDDT per-residue confidence\n", 55.0)
+        unknown = os.path.join(tmp, "unknown.pdb")
+        write(unknown, "HEADER    SOMETHING\n", 30.0)
+
+        r_cryst = analyze_structure(crystal, structure_model="heuristic")
+        r_pred = analyze_structure(predicted, structure_model="heuristic")
+        r_unk = analyze_structure(unknown, structure_model="heuristic")
+
+    check(r_cryst["structure_quality"]["provenance"] == "experimental",
+          "EXPDTA must mark the structure as experimental")
+    check(r_pred["structure_quality"]["provenance"] == "predicted",
+          "AlphaFold marker must mark the structure as predicted")
+    check(r_unk["structure_quality"]["provenance"] == "unknown",
+          "an unrecognised header must stay 'unknown'")
+    check("crystallographic" in r_cryst["structure_quality"]["bfactor_meaning"],
+          "crystal B-factor meaning")
+    check("pLDDT" in r_pred["structure_quality"]["bfactor_meaning"],
+          "predicted-model B-factor meaning")
+
+    crystal_warnings = " ".join(r_cryst["warnings"]).lower()
+    check("low mean ca b-factor" not in crystal_warnings,
+          "a well-ordered crystal structure must not be called low-confidence")
+    check("plddt" not in crystal_warnings,
+          "crystal B-factors must not be reported as pLDDT")
+    pred_warnings = " ".join(r_pred["warnings"]).lower()
+    check("plddt" in pred_warnings,
+          "a low-pLDDT model must be reported as low confidence")
+
+
+def test_terminus_completeness_is_chain_type_specific():
+    """VH ends at IMGT 128, VL at 127; both must be checked correctly."""
+    check(pi_core.TRUE_TERMINUS_C_IMGT["H"] == 128,
+          "heavy-chain FR4 ends at IMGT 128")
+    check(pi_core.TRUE_TERMINUS_C_IMGT["L"] == 127,
+          "light-chain FR4 ends at IMGT 127")
+    check(pi_core._true_c_terminus("H") == 128, "H terminus threshold")
+    check(pi_core._true_c_terminus("L") == 127, "L terminus threshold")
+
+    from tap_core import Residue
+
+    def chain_ending_at(imgt_pos, chain_id="H"):
+        """A minimal two-residue chain: IMGT 1 at the N end, imgt_pos at C."""
+        residues = []
+        for resseq, pos in ((1, 1), (2, imgt_pos)):
+            r = Residue(chain=chain_id, resseq=resseq, icode=" ",
+                        resname="ALA", aa="A", atoms=[])
+            r.imgt_pos = pos
+            residues.append(r)
+        return residues
+
+    # A heavy chain truncated at IMGT 127 is missing its last FR4 residue.
+    quality = pi_core.assess_structure_quality(
+        chain_ending_at(127), "fab", chain_types={"H": "H"},
+        provenance="experimental")
+    check(any("C(IMGT 127" in t for t in quality["truncated_termini"]),
+          "a VH truncated at IMGT 127 must be reported: {}".format(
+              quality["truncated_termini"]))
+
+    # A complete heavy chain at IMGT 128 must not be reported.
+    quality = pi_core.assess_structure_quality(
+        chain_ending_at(128), "fab", chain_types={"H": "H"},
+        provenance="experimental")
+    check(not quality["truncated_termini"],
+          "a complete VH at IMGT 128 must not be reported as truncated: "
+          "{}".format(quality["truncated_termini"]))
+
+    # A light chain is complete at IMGT 127.
+    quality = pi_core.assess_structure_quality(
+        chain_ending_at(127, "L"), "fab", chain_types={"L": "L"},
+        provenance="experimental")
+    check(not quality["truncated_termini"],
+          "a complete VL at IMGT 127 must not be reported as truncated: "
+          "{}".format(quality["truncated_termini"]))
+
+    # A light chain truncated at IMGT 126 must be reported.
+    quality = pi_core.assess_structure_quality(
+        chain_ending_at(126, "L"), "fab", chain_types={"L": "L"},
+        provenance="experimental")
+    check(any("C(IMGT 126" in t for t in quality["truncated_termini"]),
+          "a VL truncated at IMGT 126 must be reported: {}".format(
+              quality["truncated_termini"]))
+
+
+def test_hbond_requires_donor_acceptor_polarity():
+    """D...D and K...K contacts are not hydrogen bonds."""
+    from tap_core import Residue
+
+    def res(resseq, aa, atoms, imgt):
+        r = Residue(chain="H", resseq=resseq, icode=" ", resname="XXX",
+                    aa=aa, atoms=atoms)
+        r.imgt_pos = imgt
+        return r
+
+    acid = [(" OD1", "O", 0.0, 0.0, 0.0), (" OD2", "O", 0.0, 1.0, 0.0),
+            (" CG ", "C", -1.5, 0.5, 0.0), (" CB ", "C", -2.5, 1.5, 0.0)]
+    acid2 = [(" OD1", "O", 3.0, 0.0, 0.0), (" OD2", "O", 3.0, 1.0, 0.0),
+             (" CG ", "C", 4.5, 0.5, 0.0), (" CB ", "C", 5.5, 1.5, 0.0)]
+    base = [(" NZ ", "N", 0.0, 0.0, 0.0), (" CE ", "C", -1.5, 0.5, 0.0),
+            (" CB ", "C", -2.5, 1.5, 0.0)]
+    base2 = [(" NZ ", "N", 3.0, 0.0, 0.0), (" CE ", "C", 4.5, 0.5, 0.0),
+             (" CB ", "C", 5.5, 1.5, 0.0)]
+    tyr = [(" OH ", "O", 0.0, 0.0, 0.0), (" CZ ", "C", -1.2, 0.6, 0.0),
+           (" CB ", "C", -2.4, 0.2, 0.6)]
+
+    dd = [res(10, "D", acid, 33), res(20, "D", acid2, 50)]
+    kk = [res(11, "K", base, 34), res(21, "K", base2, 51)]
+    ty = [res(12, "Y", tyr, 35), res(22, "D", acid2, 52)]
+
+    for label, pair in (("D...D", dd), ("K...K", kk)):
+        salt, _pairs, _d = pi_core.detect_salt_bridges(pair)
+        flagged, _dist = pi_core.detect_hbonds(pair, salt)
+        check(not flagged,
+              "{} is not a hydrogen bond (no donor/acceptor complement)".format(label))
+    salt, _pairs, _d = pi_core.detect_salt_bridges(ty)
+    flagged, _dist = pi_core.detect_hbonds(ty, salt)
+    check(flagged, "Tyr-OH donor -> Asp acceptor must be detected")
+
+
+def test_conserved_cys_requires_both_partners():
+    """A lone conserved Cys is a free thiol, not a disulfide partner."""
+    full = VL_4D5
+    broken = full.replace("YFCQQHYTTPPTFGQGTKVEIK", "YFAQQHYTTPPTFGQGTKVEIK")
+    found, warnings = pi_core.find_disulfide_cys_sequence(
+        [ChainInfo(name="VL", chain_type="L", sequence=full)])
+    check(len(found) == 2, "both conserved VL Cys should be excluded")
+    found_broken, warnings_broken = pi_core.find_disulfide_cys_sequence(
+        [ChainInfo(name="VL", chain_type="L", sequence=broken)])
+    check(len(found_broken) == 0,
+          "a lone conserved Cys must stay ionizable, got {}".format(found_broken))
+    check(warnings_broken, "an unpaired conserved Cys must produce a warning")
+
+
+def test_propka_parser_handles_blank_chain_column():
+    """PROPKA may leave the chain column empty; the pKa must not be misread."""
+    text = """
+SUMMARY OF THIS PREDICTION
+       Group      pKa  model-pKa   ligand atom-type
+   ASP  25      5.07       3.80
+   N+    1      8.96       8.00
+"""
+    side, model, termini, termini_model = pi_core._parse_propka_rows(text)
+    check(side[("", 25, " ")] == 5.07,
+          "the pKa must be read as 5.07, not the model-pKa: {}".format(side))
+    check(model[("", 25, " ")] == 3.80,
+          "the model-pKa must be captured separately: {}".format(model))
+    check(termini[("", "N")] == 8.96, "terminal pKa with a blank chain column")
+
+
+def test_region_and_patch_id_robustness():
+    """Out-of-range IMGT positions and duplicate patch IDs are handled."""
+    check(pi_core._region_imgt(200) == "unknown",
+          "an out-of-range position must not be called FR4")
+    check(pi_core._region_imgt(128) == "FR4", "FR4 range")
+    check(pi_core._region_imgt(None) == "", "unknown position")
+
+
+def test_patch_ids_are_unique_across_ph():
+    """Patch IDs must be unique in the JSON/CSV output."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pdb = os.path.join(tmp, "fv.pdb")
+        _write_synthetic_fv(pdb)
+        result = analyze_structure(pdb, structure_model="heuristic")
+    ids = [p["patch_id"] for p in result["patches"]]
+    check(len(ids) == len(set(ids)),
+          "patch IDs must be unique across pH values: {}".format(ids))
+
+
+def test_anchors_are_never_proposed_for_mutation():
+    """IMGT anchors are excluded from mutation candidates, not just flagged."""
+    from tap_core import Residue
+    anchor = Residue(chain="H", resseq=26, icode=" ", resname="LYS", aa="K",
+                      atoms=[])
+    anchor.imgt_pos = 26
+    anchor.is_anchor = True
+    anchor.rel_sasa = 50.0
+    patch = pi_core.Patch(patch_id=1, sign="positive", ph=6.0)
+    patch.residues = [{"label": "H26", "aa": "K", "region": "FR1",
+                       "rel_sasa": 50.0, "charge": 1.0,
+                       "in_cdr_vicinity": True}]
+    candidates = pi_core.mutation_candidates(patch, [anchor], kind="fab")
+    check(not candidates,
+          "an IMGT anchor must not be proposed for mutation")
+
+
+def test_patch_calibration_file_overrides_bands():
+    """A calibration file replaces the default patch risk bands."""
+    cal = pi_core.PatchCalibration(
+        pos={"elevated": 1.0, "high": 4.0},
+        neg={"elevated": 1.2, "high": 5.0},
+        cdr_factor=1.0, source="test")
+    risk, basis = pi_core._patch_risk(2.5, "positive", False, 3.0,
+                                      calibration=cal)
+    check(risk == "elevated",
+          "calibrated bands must be applied, got {}".format(risk))
+    default_risk, _ = pi_core._patch_risk(2.5, "positive", False, 3.0)
+    check(default_risk == "high",
+          "the default bands must still say high for 2.5")
+
+
+def test_charge_descriptor_semantics():
+    """TAP thresholds must only be applied to the surface descriptors."""
+    chains = [ChainInfo(name="VH", chain_type="H", sequence=VH_4D5),
+              ChainInfo(name="VL", chain_type="L", sequence=VL_4D5)]
+    seq_result = analyze_sequence(chains, pka_set="IPC_protein")
+    fv = seq_result["fv"]
+    check(fv["SFvCSP_surface"] is None,
+          "sequence mode has no surface SFvCSP")
+    check(fv["SFvCSP_basis"] == "total",
+          "sequence mode must record that the alias holds the total value")
+    check(fv["SFvCSP_total"] is not None, "total SFvCSP must be reported")
+
+
+def test_sequence_mode_declares_what_it_cannot_compute():
+    """A sequence-only run must state which outputs need a structure.
+
+    Regression: the sequence-only report simply omitted the TAP flags, the
+    charge patches and the structure-aware pI, which reads as "no flags
+    raised" rather than "not computed".  The result now carries an explicit
+    inventory and the reports say so.
+    """
+    from tools.pi_analysis import pi_analyzer
+    chains = [ChainInfo(name="VH", chain_type="H", sequence=VH_4D5),
+              ChainInfo(name="VL", chain_type="L", sequence=VL_4D5)]
+    result = analyze_sequence(chains, pka_set="IPC_protein")
+
+    check(result["analysis_type"] == "sequence_only",
+          "sequence mode must declare its analysis type")
+    missing = result["unavailable_metrics"]
+    check(isinstance(missing, list) and missing,
+          "sequence mode must list the metrics it cannot compute")
+    keys = {m["key"] for m in missing}
+    for expected in ("tap", "patches", "structure_pI"):
+        check(expected in keys,
+              "{} must be listed as structure-dependent".format(expected))
+    for item in missing:
+        check(item.get("label") and item.get("reason"),
+              "every entry needs a label and a reason: {}".format(item))
+
+    # The absence must also be stated in the human-readable reports.
+    text = pi_analyzer.format_text_report(result)
+    check("SCOPE OF THIS ANALYSIS" in text,
+          "the text report must contain a scope block")
+    check("NOT computed" in text,
+          "the scope block must say the metrics were not computed")
+    check("not a clean flag" in text.lower(),
+          "the scope block must warn that an absent flag is not a clean flag")
+    check("TAP flags" in text,
+          "the scope block must name the TAP metrics")
+
+    # A machine-readable warning must exist too.
+    scope_recs = [r for r in result["recommendations"]
+                   if r["category"] == "scope"]
+    check(any("NOT computed" in r["message"] for r in scope_recs),
+          "a sequence-mode recommendation must state the omission")
+
+    # Structure mode must not carry the warning.
+    with tempfile.TemporaryDirectory() as tmp:
+        pdb = os.path.join(tmp, "fv.pdb")
+        _write_synthetic_fv(pdb)
+        sres = analyze_structure(pdb, structure_model="heuristic")
+    check(sres["analysis_type"] == "structure",
+          "structure mode must declare its analysis type")
+    check(sres["unavailable_metrics"] == [],
+          "structure mode has no structure-dependent omission")
+    check("SCOPE OF THIS ANALYSIS" not in pi_analyzer.format_text_report(sres),
+          "the structure report must not carry the sequence-mode scope block")
+
+
+def test_multichar_cif_chain_ids_are_handled():
+    """mmCIF chain IDs longer than one character must not corrupt the PDB.
+
+    Regression: the SASA work PDB was written with the raw chain ID, so a
+    two-character ID pushed the resseq and coordinate columns out of
+    alignment and the structure could not be analysed at all.
+    """
+    cols = ["group_PDB", "id", "type_symbol", "label_atom_id", "label_alt_id",
+            "label_comp_id", "label_asym_id", "label_entity_id",
+            "label_seq_id", "pdbx_PDB_ins_code", "Cartn_x", "Cartn_y",
+            "Cartn_z", "occupancy", "B_iso_or_equiv", "auth_seq_id",
+            "auth_comp_id", "auth_asym_id", "pdbx_PDB_model_num"]
+    header = "data_test\nloop_\n" + "".join(
+        "_atom_site.{}\n".format(c) for c in cols)
+    rows = []
+    serial = 1
+    for chain_id, seq in (("HHL", VH_4D5), ("LGT", VL_4D5)):
+        for i, aa in enumerate(seq, 1):
+            for name, element, dx, dy, dz in (
+                    ("CA", "C", 0, 0, 0), ("N", "N", -1.2, 0.5, 0.1),
+                    ("C", "C", 1.2, 0.5, -0.1), ("O", "O", 1.7, 1.6, -0.1)):
+                rows.append(" ".join([
+                    "ATOM", str(serial), element, name, ".", ONE_TO_THREE[aa],
+                    chain_id, "1", str(i), "?",
+                    "{:.3f}".format((i % 20) * 3.8 + dx),
+                    "{:.3f}".format((i // 20) * 3.8 + dy),
+                    "{:.3f}".format(((i * 7) % 9) * 0.9 + dz),
+                    "1.00", "20.00", str(i), ONE_TO_THREE[aa], chain_id, "1"]))
+                serial += 1
+    with tempfile.TemporaryDirectory() as tmp:
+        cif = os.path.join(tmp, "multi.cif")
+        with open(cif, "w") as fh:
+            fh.write(header + "\n".join(rows) + "\n#\n")
+        result = analyze_structure(cif, pka_set="IPC_protein",
+                                   structure_model="heuristic")
+    check(result["input"]["chains"] == ["HHL", "LGT"],
+          "both multi-character chains must be found: {}".format(
+              result["input"]["chains"]))
+    check(result["structure_quality"]["n_residues"] > 0,
+          "residues must be parsed from a multi-character chain file")
+    check(result["fv"]["pI_selected"] is not None,
+          "pI must be computed for a multi-character chain file")
+
+
 def run_all_tests():
     tests = [
         test_pka_tables_and_aliases,
@@ -501,6 +1020,25 @@ def run_all_tests():
         test_termini_and_charge_curve,
         test_propka_termini_parser,
         test_patch_risk_calibration,
+        # regression tests for the scientific review
+        test_propka_sensitivity_is_not_degenerate,
+        test_patch_graph_uses_documented_8A_cutoff,
+        test_same_chain_for_vh_and_vl_is_rejected,
+        test_text_report_header_matches_columns,
+        test_ph_curve_reaches_saved_text_report,
+        test_clean_sequence_warnings_are_reported,
+        test_bfactor_provenance_semantics,
+        test_terminus_completeness_is_chain_type_specific,
+        test_hbond_requires_donor_acceptor_polarity,
+        test_conserved_cys_requires_both_partners,
+        test_propka_parser_handles_blank_chain_column,
+        test_region_and_patch_id_robustness,
+        test_patch_ids_are_unique_across_ph,
+        test_anchors_are_never_proposed_for_mutation,
+        test_patch_calibration_file_overrides_bands,
+        test_charge_descriptor_semantics,
+        test_multichar_cif_chain_ids_are_handled,
+        test_sequence_mode_declares_what_it_cannot_compute,
     ]
     passed = failed = 0
     for test in tests:

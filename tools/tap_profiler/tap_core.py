@@ -558,20 +558,42 @@ def write_work_pdb(residues: List[Residue], path: str
     exactly the residue keys we expect (insertion codes and original gaps can
     never desynchronise the mapping). Returns the (chain, resseq) keys in
     file order.
+
+    The PDB format only allows a single-character chain ID, but mmCIF files
+    may carry longer ``auth_asym_id`` values.  Such chains are mapped to
+    unused single characters here; the returned keys carry the *written*
+    label so that the SASA result mapping stays consistent with the file.
     """
     keys: List[Tuple[str, int]] = []
     serial = 1
     counters: Dict[str, int] = defaultdict(int)
+    chain_labels: Dict[str, str] = {}
+    used: set = set()
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    for res in residues:
+        if res.chain in chain_labels:
+            continue
+        label = res.chain if len(res.chain) == 1 and res.chain not in used else ""
+        if not label:
+            for cand in alphabet:
+                if cand not in used:
+                    label = cand
+                    break
+            if not label:
+                label = "X"
+        used.add(label)
+        chain_labels[res.chain] = label
     with open(path, "w") as fh:
         for res in residues:
             counters[res.chain] += 1
             resseq = counters[res.chain]
-            keys.append((res.chain, resseq))
+            keys.append((chain_labels[res.chain], resseq))
             for raw_name, element, x, y, z in res.atoms:
                 name = raw_name if len(raw_name) == 4 else " %-3s" % raw_name.strip()
                 fh.write("ATOM  {:5d} {:4s} {:>3s} {:1s}{:4d}    "
                          "{:8.3f}{:8.3f}{:8.3f}  1.00 20.00          {:>2s}\n"
-                         .format(serial, name, res.resname, res.chain, resseq,
+                         .format(serial, name, res.resname,
+                                 chain_labels[res.chain], resseq,
                                  x, y, z, element))
                 serial += 1
         fh.write("END\n")
