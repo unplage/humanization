@@ -53,7 +53,8 @@ For every ionizable side chain:
 2. Apply a burial penalty: acidic groups raise pKa when buried; basic groups
    lower pKa when buried.
 3. Apply salt-bridge and H-bond corrections (acidic pKa down, basic pKa up
-   when the charged form is stabilised).
+   when the charged form is stabilised), screened by Debye-Huckel ionic
+   strength (`--ionic-strength`, default 0.15 M).
 4. Clamp the total shift to +/-2 pH units.
 
 Disulfide Cys is detected geometrically (SG-SG <= 2.5 A) or, if no SG atoms
@@ -62,14 +63,21 @@ Disulfide Cys is treated as non-ionizable.
 
 Termini are reported as:
 
-- **free**: both N- and C-termini charged;
-- **capped**: C-terminus amidated/blocked;
-- **blocked**: both termini blocked (sequence table only).
+- **free**: both N- and C-termini charged (default for VHH);
+- **capped**: C-terminus amidated/blocked (default for Fab);
+- **blocked**: both termini blocked.
+
+`--termini auto` selects capped for Fab and free for VHH. The selected model is
+used for pI, net charge, patches and recommendations; free/capped values are
+still reported so the construct-dependent difference is visible. If a chain is
+truncated before IMGT 1/127, that end is treated as blocked and a warning is
+emitted.
 
 ### `--structure-model propka`
 
 Runs PROPKA3 if `propka3`/`propka` is on `PATH`, parses the
-`SUMMARY OF THIS PREDICTION` section, and uses the per-residue pKa values.
+`SUMMARY OF THIS PREDICTION` section, uses per-residue pKa values and the
+predicted N/C-terminal pKa values when present.
 If PROPKA is missing the run fails with a clear error; use `heuristic` or
 install `propka3`.
 
@@ -77,6 +85,31 @@ install `propka3`.
 
 Uses the model pKa values without microenvironment corrections. Useful as a
 control to see how much burial/salt-bridge/H-bond effects change the result.
+
+### Structure quality
+
+Before interpreting a structure, the tool reports:
+
+- mean/min/max CA B-factor (a pLDDT proxy for AF2/AF3 models);
+- missing side-chain heavy atoms, especially missing ionizable atoms;
+- CA-CA chain breaks (> 4.5 A);
+- truncated N/C termini.
+
+Low pLDDT/B-factor models, missing ionizable atoms and chain breaks produce
+warnings because they directly affect SASA and pI.
+
+### Salt bridges and pKa uncertainty
+
+Two salt-bridge definitions are reported deliberately:
+
+- **TAP**: 3.2 A, both partners surface-exposed, one partner per residue;
+- **pKa microenvironment**: 4.0 A, burial allowed, multiple partners.
+
+They answer different questions and can differ substantially (for example,
+A reference Fab has 1 TAP salt bridge but 7 microenvironment pairs). The pKa model uses the
+broader definition; the TAP metric remains comparable with published TAP
+output. Every run also reports the pI range across all five bundled pKa sets
+and a net-charge-vs-pH curve (`--ph-curve` prints it; JSON always contains it).
 
 ## Sequence fallback
 
@@ -154,7 +187,11 @@ python3 tools/pi_analysis/pi_analyzer.py --fasta inputs/antibody.fasta --all-for
 | `--formulation-ph` | `6.0` | Formulation pH for charge/patch reporting |
 | `--disulfide {auto,exclude,free}` | `auto` | Cys handling |
 | `--structure-model {heuristic,propka,none}` | `heuristic` | Structure pKa model |
-| `--vh-chain`, `--vl-chain` | auto | Explicit structure chain IDs |
+| `--termini {auto,free,capped,blocked}` | `auto` | Terminus model (Fab capped, VHH free) |
+| `--ionic-strength M` | `0.15` | Debye-Huckel screening ionic strength |
+| `--ph-grid START:STOP:STEP` | `4:10:0.5` | pH grid for the charge curve |
+| `--ph-curve` | off | Print charge-vs-pH in the text report |
+| `--vh-chain`, `--vl-chain` | auto | Explicit structure chain IDs (`--vh-chain` alone = VHH) |
 | `--sasa {auto,psa,freesasa}` | `auto` | Surface engine |
 | `--psa-binary PATH` | - | JOY `psa` executable |
 | `--tap-thresholds {2024,2019,exscientia,legacy}` | `2024` | TAP flag bands |
@@ -179,13 +216,22 @@ Batch runs also write `combined_pi_results.json`.
 
 The JSON contains:
 
-- `sequence_pI` and `structure_pI` per pKa set;
-- per-chain pI and net charge;
-- `fv`: Fv pI, net charge, `Fv_chml`, `SFvCSP`, surface charges;
-- `tap`: Ltot, PSH, PPC, PNC, SFvCSP, flags, risk summary;
-- `patches`: 3D charge patches with residue rows and mutation candidates;
-- `ionizable_residues`: structure-aware pKa, exposure, salt bridge, H-bond,
-  disulfide and shift reason;
+- `sequence_pI` and `structure_pI` per pKa set (`pI_selected`, `pI_free`,
+  `pI_capped`, `pI_blocked`, `delta_vs_sequence`);
+- `sensitivity`: selected pI for every bundled pKa set and the resulting range;
+- `charge_curve`: net charge sampled across pH;
+- `structure_quality`: B-factor/pLDDT proxy, missing side chains, chain breaks,
+  truncated termini;
+- per-chain pI (`free`/`capped`/`selected`) and net charge;
+- `fv`: selected/free/capped pI, pI range, net charge, total and surface
+  `Fv_chml`/`SFvCSP`, total and surface per-chain charges;
+- `tap`: Ltot, PSH, PPC, PNC, SFvCSP, flags, risk summary, and both salt-bridge
+  counts (`n_salt_bridges_tap` and `n_salt_bridges_pka`);
+- `patches`: 3D charge patches with residue rows, local risk basis and
+  mutation candidates with sequence-level what-if `delta_pI_estimate` /
+  `delta_charge_formulation_estimate`;
+- `ionizable_residues`: structure-aware pKa, exposure, salt bridge distance,
+  H-bond distance, disulfide and shift reason;
 - `recommendations` and `warnings`.
 
 ## Interpretation
@@ -209,6 +255,11 @@ It is a developability heuristic, not a hard requirement.
   self-interactions and higher viscosity.
 - `SFvCSP = Q_VH * Q_VL` is the TAP charge-symmetry parameter. The TAP 2024
   green region is `>= -6.0`; values below `-6.0` are amber.
+- Structure mode reports **total** and **surface** versions separately:
+  total uses all modelled ionizable groups, surface uses TAP's exposed-residue
+  definition. Sequence mode reports total charge (surface values are `null`).
+  Use the surface `SFvCSP` for TAP comparability and the total values for
+  biochemical charge balance.
 - Balance the more charged chain using **exposed framework** positions; keep
   CDR, anchors, VHH hallmarks and FR4 untouched.
 
@@ -233,7 +284,13 @@ Patches are built at both the formulation pH and pH 7.4:
 - clustered by 3D proximity (<= 8 A);
 - charge computed at the requested pH (salt-bridged groups zeroed);
 - score is the pairwise `|q1*q2|/r^2` sum;
-- risk uses the same score bands as TAP PPC/PNC plus a CDR-vicinity penalty.
+- `score_tap` is the TAP-style ordered integer-charge score (`PPC`/`PNC`);
+- local risk is recalibrated for continuous partial charges: positive patches
+  use 0.50/2.00 bands, negative patches 0.60/2.50, with a 1.25x CDR-vicinity
+  penalty; `risk_basis` states which rule fired;
+- first/last residues of each chain are flagged and excluded from mutation
+  candidates because they change the terminal pKa and can form
+  pyroglutamate/processing liabilities.
 
 Each patch reports its residues, CDR/framework composition, VH/VL interface
 flag and candidate substitutions.
@@ -287,20 +344,23 @@ After selecting candidate positions:
 On the AF3 reference Fab structure (`af3/antibody.pdb`, VH=A, VL=B):
 
 ```text
-Fv pI (free termini):        4.92
-Fv pI (capped C-terminus):   5.33
-Net charge @ pH 7.4:        -4.26
-Fv_chml:                    -9.00
-SFvCSP:                    -18.00
+Fv pI (selected, capped):    5.40
+Fv pI range (5 pKa sets):    5.40-5.71
+Fv pI (free termini):        5.00
+Net charge @ pH 7.4:        -2.38
+Fv_chml total / surface:    -8.17 / -9.00
+SFvCSP total / surface:    -15.26 / -18.00
 TAP: Ltot 49 green, PSH 126.3 green, PPC 0.00 green,
      PNC 0.24 green, SFvCSP -18.0 amber
+Salt bridges: TAP 1 / pKa microenvironment 7 (12 residues)
 ```
 
 Interpretation: acidic Fv with strong VH/VL charge asymmetry. The VH is
-strongly negative (`-6.2`) and the VL is positive (`+1.9`). The main levers
+strongly negative (`-5.27`) and the VL is positive (`+2.89`). The main levers
 are neutralising exposed VH framework acids and checking whether VL positive
-patches are needed for antigen binding. Because the Fv pI is ~4.9, a pH 6.0
-formulation is only ~1.1 units away; confirm colloidal stability and IEX/HCP
+patches are needed for antigen binding. The capped-Fab pI is ~5.4, so a pH 6.0
+formulation is only ~0.6 units away; the free/capped difference (0.4 units)
+matters for construct design. Confirm colloidal stability and IEX/HCP
 behaviour experimentally.
 
 ## Validation and limitations
@@ -309,8 +369,9 @@ behaviour experimentally.
   units for normal antibody domains. Biopython clamps its search to
   `[4.05, 12.0]`, so extremely acidic/basic peptides can differ.
 - The heuristic structure model is a screening tool, not a replacement for
-  PROPKA or experimental pI. Electrostatic coupling between groups, ionic
-  strength, excipients and conformational ensembles are not modelled.
+  PROPKA or experimental pI. Electrostatic coupling beyond the screened
+  Debye-Huckel term, specific-ion effects, excipients and conformational
+  ensembles are not modelled.
 - FreeSASA vs JOY `psa` changes ~7 % of surface/buried decisions; TAP parity
   requires `--sasa psa`.
 - Structure mode analyses the Fv/VHH only. It does not model the Fc, glycan,

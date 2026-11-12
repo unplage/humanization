@@ -131,19 +131,23 @@ def _pI_row(result: Dict[str, object], pka_set: str) -> Dict[str, object]:
     if not isinstance(struct_entry, dict):
         struct_entry = {}
 
-    use_struct = bool(struct_entry.get("pI_free") is not None)
+    use_struct = bool(struct_entry.get("pI_selected") is not None
+                      or struct_entry.get("pI_free") is not None)
     entry = struct_entry if use_struct else seq_entry
     return {
         "pka_set": pka_set,
-        "seq_pI": seq_entry.get("pI_free"),
-        "struct_pI": struct_entry.get("pI_free"),
-        "pI": entry.get("pI_free"),
+        "seq_pI": seq_entry.get("pI_selected", seq_entry.get("pI_free")),
+        "struct_pI": struct_entry.get("pI_selected",
+                                      struct_entry.get("pI_free")),
+        "pI": entry.get("pI_selected", entry.get("pI_free")),
+        "pI_free": entry.get("pI_free"),
         "pI_capped": entry.get("pI_capped"),
         "delta": struct_entry.get("delta_vs_sequence"),
         "q_ph74": (struct_entry.get("net_charge_ph74")
-                   if use_struct else seq_entry.get("net_charge_ph74_free")),
+                   if use_struct else seq_entry.get("net_charge_selected_ph",
+                                                    seq_entry.get("net_charge_ph74_free"))),
         "q_form": (struct_entry.get("net_charge_formulation_ph")
-                   if use_struct else None),
+                   if use_struct else seq_entry.get("net_charge_selected_formulation_ph")),
         "n_groups": struct_entry.get("n_groups"),
     }
 
@@ -189,6 +193,7 @@ def format_text_report(
     title: str = "pI / Fv Charge Analysis",
     max_patches: int = 12,
     show_ionizable: bool = False,
+    show_charge_curve: bool = False,
 ) -> str:
     lines: List[str] = []
     lines.append("=" * 88)
@@ -205,6 +210,9 @@ def format_text_report(
             result.get("structure_model", "heuristic"),
             result.get("sasa_engine", "n/a")))
     lines.append("  Disulfides:    {}".format(result.get("disulfide_mode", "auto")))
+    lines.append("  Termini mode:  {}   (ionic strength {})".format(
+        result.get("termini_mode", "free"),
+        _fmt(result.get("ionic_strength"), 3)))
     lines.append("")
 
     fv = result.get("fv", {})
@@ -213,6 +221,13 @@ def format_text_report(
         lines.append("  Fv SUMMARY")
         lines.append("-" * 88)
         lines.append("")
+        lines.append("  pI (selected, {}):     {}".format(
+            fv.get("termini_mode", result.get("termini_mode", "free")),
+            _fmt(fv.get("pI_selected"))))
+        rng = fv.get("pI_range")
+        if isinstance(rng, list) and len(rng) == 2:
+            lines.append("  pI range across sets:     {}-{}".format(
+                _fmt(rng[0]), _fmt(rng[1])))
         lines.append("  pI (free termini):        {}".format(_fmt(fv.get("pI_free"))))
         lines.append("  pI (capped C-terminus):   {}".format(_fmt(fv.get("pI_capped"))))
         lines.append("  Net charge @ pH {}:      {}".format(
@@ -220,14 +235,27 @@ def format_text_report(
         lines.append("  Net charge @ formulation: {}   (pH {})".format(
             _signed(fv.get("net_charge_formulation_ph")),
             _fmt(result.get("formulation_ph"), 1)))
-        if fv.get("Fv_chml") is not None:
-            lines.append("  Fv_chml (VH-VL charge):   {}".format(_signed(fv.get("Fv_chml"))))
-        if fv.get("SFvCSP") is not None:
-            lines.append("  SFvCSP (VH*VL charge):    {}".format(_fmt(fv.get("SFvCSP"))))
+        if fv.get("Fv_chml_surface") is not None:
+            lines.append("  Fv_chml total / surface:  {} / {}".format(
+                _signed(fv.get("Fv_chml_total")),
+                _signed(fv.get("Fv_chml_surface"))))
+        elif fv.get("Fv_chml_total") is not None:
+            lines.append("  Fv_chml (total charge):   {}".format(
+                _signed(fv.get("Fv_chml_total"))))
+        if fv.get("SFvCSP_surface") is not None:
+            lines.append("  SFvCSP total / surface:   {} / {}".format(
+                _fmt(fv.get("SFvCSP_total")), _fmt(fv.get("SFvCSP_surface"))))
+        elif fv.get("SFvCSP_total") is not None:
+            lines.append("  SFvCSP (total charge):    {}".format(
+                _fmt(fv.get("SFvCSP_total"))))
         if fv.get("surface_charge_vh") is not None:
             lines.append("  Surface charge VH / VL:   {} / {}".format(
                 _signed(fv.get("surface_charge_vh")),
                 _signed(fv.get("surface_charge_vl"))))
+        if fv.get("total_charge_vh") is not None:
+            lines.append("  Total charge VH / VL:     {} / {}".format(
+                _signed(fv.get("total_charge_vh")),
+                _signed(fv.get("total_charge_vl"))))
         lines.append("")
 
     lines.append("-" * 88)
@@ -247,14 +275,14 @@ def format_text_report(
                 _signed(row["q_ph74"]), _signed(row["q_form"])))
     else:
         lines.append("  {:<14s} {:>9s} {:>9s} {:>9s}".format(
-            "pKa set", "seq pI", "capped", "q pH74"))
-        lines.append("  {:<14s} {:>9s} {:>9s} {:>9s}".format(
-            "-" * 14, "-" * 9, "-" * 9, "-" * 9))
+            "pKa set", "seq pI", "struct pI", "capped", "q pH74"))
+        lines.append("  {:<14s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
+            "-" * 14, "-" * 9, "-" * 9, "-" * 9, "-" * 9))
         for s in _pka_sets(result):
             row = _pI_row(result, s)
-            lines.append("  {:<14s} {:>9s} {:>9s} {:>9s}".format(
-                s, _fmt(row["seq_pI"]), _fmt(row["pI_capped"]),
-                _signed(row["q_ph74"])))
+            lines.append("  {:<14s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
+                s, _fmt(row["seq_pI"]), _fmt(row["struct_pI"]),
+                _fmt(row["pI_capped"]), _signed(row["q_ph74"])))
     lines.append("")
 
     chains = result.get("chains", {})
@@ -263,15 +291,16 @@ def format_text_report(
         lines.append("  CHAINS")
         lines.append("-" * 88)
         lines.append("")
-        lines.append("  {:<8s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
-            "Chain", "Type", "Length", "pI free", "pI capped", "q pH74", "q form"))
-        lines.append("  {:<8s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
-            "-" * 8, "-" * 5, "-" * 7, "-" * 9, "-" * 9, "-" * 9, "-" * 9))
+        lines.append("  {:<8s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
+            "Chain", "Type", "Length", "pI sel", "pI free", "pI capped", "q pH74", "q form"))
+        lines.append("  {:<8s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
+            "-" * 8, "-" * 5, "-" * 7, "-" * 9, "-" * 9, "-" * 9, "-" * 9, "-" * 9))
         for name, c in chains.items():
             if not isinstance(c, dict):
                 continue
-            lines.append("  {:<8s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
+            lines.append("  {:<8s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s} {:>9s} {:>9s}".format(
                 str(name), str(c.get("chain_type", "")), str(c.get("length", "")),
+                _fmt(c.get("pI_selected", c.get("pI_free"))),
                 _fmt(c.get("pI_free")), _fmt(c.get("pI_capped")),
                 _signed(c.get("net_charge_ph74")),
                 _signed(c.get("net_charge_formulation_ph"))))
@@ -297,10 +326,50 @@ def format_text_report(
             lines.append("  {:<10s} {:>12s} {:>10s}".format(metric, shown, str(flag).upper()))
         lines.append("")
         lines.append("  Overall TAP risk: {}".format(tap.get("risk_summary", "UNKNOWN")))
-        lines.append("  Surface residues: {}; CDR vicinity: {}; salt bridges: {}".format(
-            tap.get("n_surface", "n/a"), tap.get("n_cdr_vicinity", "n/a"),
-            tap.get("n_salt_bridges", "n/a")))
+        lines.append("  Surface residues: {}; CDR vicinity: {}".format(
+            tap.get("n_surface", "n/a"), tap.get("n_cdr_vicinity", "n/a")))
+        lines.append("  Salt bridges: TAP {} (3.2 A exposed) / pKa microenvironment {} "
+                     "(4.0 A, {} partner residues)".format(
+                         tap.get("n_salt_bridges_tap", tap.get("n_salt_bridges", "n/a")),
+                         tap.get("n_salt_bridges_pka", "n/a"),
+                         tap.get("n_salt_bridge_residues_pka", "n/a")))
         lines.append("")
+
+    quality = result.get("structure_quality")
+    if isinstance(quality, dict):
+        lines.append("-" * 88)
+        lines.append("  STRUCTURE QUALITY")
+        lines.append("-" * 88)
+        lines.append("")
+        bf = quality.get("bfactor_mean")
+        lines.append("  CA B-factor / pLDDT proxy: {} (range {}-{}, pLDDT-like: {})".format(
+            _fmt(bf, 1), _fmt(quality.get("bfactor_min"), 1),
+            _fmt(quality.get("bfactor_max"), 1),
+            quality.get("bfactor_plddt_like", "n/a")))
+        lines.append("  Missing side chains: {}/{} ({} ionizable atom(s) missing)".format(
+            quality.get("n_missing_sidechain", "n/a"),
+            quality.get("n_residues", "n/a"),
+            quality.get("n_missing_ionizable_atoms", "n/a")))
+        lines.append("  Chain breaks (>{} A CA-CA): {}".format(
+            quality.get("ca_break_cutoff", 4.5),
+            quality.get("n_chain_breaks", "n/a")))
+        lines.append("  Truncated termini: {}".format(
+            ", ".join(str(t) for t in quality.get("truncated_termini", [])) or "none"))
+        lines.append("")
+
+    if show_charge_curve:
+        curve = result.get("charge_curve")
+        if isinstance(curve, list) and curve:
+            lines.append("-" * 88)
+            lines.append("  NET CHARGE VS pH")
+            lines.append("-" * 88)
+            lines.append("")
+            for point in curve:
+                if isinstance(point, dict):
+                    lines.append("  pH {:>5s}  q = {:>8s}".format(
+                        _fmt(point.get("ph"), 2),
+                        _signed(point.get("net_charge"))))
+            lines.append("")
 
     patches = result.get("patches", [])
     if isinstance(patches, list) and patches:
@@ -395,8 +464,9 @@ def format_text_report(
     lines.append("")
     lines.append("  pI is solved by bisection on the net-charge curve.")
     lines.append("  Structure mode uses per-residue SASA burial, salt bridges and H-bonds;")
-    lines.append("  the heuristic pKa shift is clamped to +/-2 pH units. PROPKA is optional.")
-    lines.append("  Patch clustering uses exposed charged residues (rSASA >= 7.5 %) within 8 A.")
+    lines.append("  the heuristic pKa shift is clamped to +/-2 pH units and screened by")
+    lines.append("  Debye-Huckel ionic strength. PROPKA is optional. Patch clustering uses")
+    lines.append("  exposed charged residues (rSASA >= 7.5 %) within 8 A.")
     lines.append("  Computational pI is a screening estimate; confirm by cIEF/IEX.")
     lines.append("")
     return "\n".join(lines)
@@ -443,6 +513,9 @@ def save_markdown_report(
         lines.append("- **Structure pKa**: {} (SASA: {})".format(
             result.get("structure_model", "heuristic"),
             result.get("sasa_engine", "n/a")))
+    lines.append("- **Termini mode**: {} (ionic strength {})".format(
+        result.get("termini_mode", "free"),
+        _fmt(result.get("ionic_strength"), 3)))
     lines.append("")
 
     fv = result.get("fv", {})
@@ -451,16 +524,27 @@ def save_markdown_report(
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
+        lines.append("| pI (selected, {}) | {} |".format(
+            fv.get("termini_mode", result.get("termini_mode", "free")),
+            _fmt(fv.get("pI_selected"))))
+        rng = fv.get("pI_range")
+        if isinstance(rng, list) and len(rng) == 2:
+            lines.append("| pI range across pKa sets | {}-{} |".format(
+                _fmt(rng[0]), _fmt(rng[1])))
         lines.append("| pI (free termini) | {} |".format(_fmt(fv.get("pI_free"))))
         lines.append("| pI (capped C-terminus) | {} |".format(_fmt(fv.get("pI_capped"))))
         lines.append("| Net charge @ pH {} | {} |".format(
             _fmt(result.get("ph"), 1), _signed(fv.get("net_charge_ph74"))))
         lines.append("| Net charge @ formulation | {} |".format(
             _signed(fv.get("net_charge_formulation_ph"))))
-        if fv.get("Fv_chml") is not None:
-            lines.append("| Fv_chml | {} |".format(_signed(fv.get("Fv_chml"))))
-        if fv.get("SFvCSP") is not None:
-            lines.append("| SFvCSP | {} |".format(_fmt(fv.get("SFvCSP"))))
+        if fv.get("Fv_chml_total") is not None:
+            lines.append("| Fv_chml total / surface | {} / {} |".format(
+                _signed(fv.get("Fv_chml_total")),
+                _signed(fv.get("Fv_chml_surface", "n/a"))))
+        if fv.get("SFvCSP_total") is not None:
+            lines.append("| SFvCSP total / surface | {} / {} |".format(
+                _fmt(fv.get("SFvCSP_total")),
+                _fmt(fv.get("SFvCSP_surface", "n/a"))))
         lines.append("")
 
     lines.append("## pI by pKa set")
@@ -475,26 +559,27 @@ def save_markdown_report(
                 _signed(row["delta"]), _fmt(row["pI_capped"]),
                 _signed(row["q_ph74"]), _signed(row["q_form"])))
     else:
-        lines.append("| pKa set | seq pI | capped | q pH74 |")
-        lines.append("|---------|--------|--------|--------|")
+        lines.append("| pKa set | seq pI | struct pI | capped | q pH74 |")
+        lines.append("|---------|--------|-----------|--------|--------|")
         for s in _pka_sets(result):
             row = _pI_row(result, s)
-            lines.append("| {} | {} | {} | {} |".format(
-                s, _fmt(row["seq_pI"]), _fmt(row["pI_capped"]),
-                _signed(row["q_ph74"])))
+            lines.append("| {} | {} | {} | {} | {} |".format(
+                s, _fmt(row["seq_pI"]), _fmt(row["struct_pI"]),
+                _fmt(row["pI_capped"]), _signed(row["q_ph74"])))
     lines.append("")
 
     chains = result.get("chains", {})
     if isinstance(chains, dict) and chains:
         lines.append("## Chains")
         lines.append("")
-        lines.append("| Chain | Type | Length | pI free | pI capped | q pH74 | q form |")
-        lines.append("|-------|------|--------|---------|-----------|--------|--------|")
+        lines.append("| Chain | Type | Length | pI sel | pI free | pI capped | q pH74 | q form |")
+        lines.append("|-------|------|--------|--------|---------|-----------|--------|--------|")
         for name, c in chains.items():
             if not isinstance(c, dict):
                 continue
-            lines.append("| {} | {} | {} | {} | {} | {} | {} |".format(
+            lines.append("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 name, c.get("chain_type", ""), c.get("length", ""),
+                _fmt(c.get("pI_selected", c.get("pI_free"))),
                 _fmt(c.get("pI_free")), _fmt(c.get("pI_capped")),
                 _signed(c.get("net_charge_ph74")),
                 _signed(c.get("net_charge_formulation_ph"))))
@@ -518,6 +603,32 @@ def save_markdown_report(
             lines.append("| {} | {} | {} |".format(metric, shown, str(flag).upper()))
         lines.append("")
         lines.append("**Overall TAP risk**: {}".format(tap.get("risk_summary", "UNKNOWN")))
+        lines.append("")
+        lines.append("Salt bridges: TAP {} (3.2 A exposed) / pKa microenvironment {} "
+                     "(4.0 A, {} partner residues).".format(
+                         tap.get("n_salt_bridges_tap", tap.get("n_salt_bridges", "n/a")),
+                         tap.get("n_salt_bridges_pka", "n/a"),
+                         tap.get("n_salt_bridge_residues_pka", "n/a")))
+        lines.append("")
+
+    quality = result.get("structure_quality")
+    if isinstance(quality, dict):
+        lines.append("## Structure quality")
+        lines.append("")
+        lines.append("- **CA B-factor / pLDDT proxy**: {} (range {}-{}, pLDDT-like: {})".format(
+            _fmt(quality.get("bfactor_mean"), 1),
+            _fmt(quality.get("bfactor_min"), 1),
+            _fmt(quality.get("bfactor_max"), 1),
+            quality.get("bfactor_plddt_like", "n/a")))
+        lines.append("- **Missing side chains**: {}/{} ({} ionizable atom(s) missing)".format(
+            quality.get("n_missing_sidechain", "n/a"),
+            quality.get("n_residues", "n/a"),
+            quality.get("n_missing_ionizable_atoms", "n/a")))
+        lines.append("- **Chain breaks**: {} (>{} A CA-CA)".format(
+            quality.get("n_chain_breaks", "n/a"),
+            quality.get("ca_break_cutoff", 4.5)))
+        lines.append("- **Truncated termini**: {}".format(
+            ", ".join(str(t) for t in quality.get("truncated_termini", [])) or "none"))
         lines.append("")
 
     patches = result.get("patches", [])
@@ -596,9 +707,10 @@ def save_markdown_report(
     lines.append("")
     lines.append("pI is solved by bisection on the net-charge curve. Structure mode uses")
     lines.append("per-residue SASA burial, salt bridges and H-bonds; the heuristic pKa shift")
-    lines.append("is clamped to +/-2 pH units. PROPKA is optional. Patch clustering uses")
-    lines.append("exposed charged residues (rSASA >= 7.5 %) within 8 A. Computational pI is a")
-    lines.append("screening estimate; confirm by cIEF/IEX.")
+    lines.append("is clamped to +/-2 pH units and screened by Debye-Huckel ionic strength.")
+    lines.append("PROPKA is optional. Patch clustering uses exposed charged residues")
+    lines.append("(rSASA >= 7.5 %) within 8 A. Computational pI is a screening estimate;")
+    lines.append("confirm by cIEF/IEX.")
     lines.append("")
     with open(output_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
@@ -626,13 +738,24 @@ def save_csv_reports(
         "structure_model": result.get("structure_model", ""),
         "ph": result.get("ph", ""),
         "formulation_ph": result.get("formulation_ph", ""),
+        "termini_mode": result.get("termini_mode", ""),
+        "ionic_strength": result.get("ionic_strength", ""),
+        "pI_selected": fv.get("pI_selected", ""),
         "pI_free": fv.get("pI_free", ""),
         "pI_capped": fv.get("pI_capped", ""),
+        "pI_range_low": (fv.get("pI_range") or [""])[0]
+                        if isinstance(fv.get("pI_range"), list) else "",
+        "pI_range_high": (fv.get("pI_range") or ["", ""])[1]
+                         if isinstance(fv.get("pI_range"), list) else "",
         "net_charge_ph74": fv.get("net_charge_ph74", ""),
         "net_charge_formulation_ph": fv.get("net_charge_formulation_ph", ""),
-        "Fv_chml": fv.get("Fv_chml", ""),
-        "SFvCSP": fv.get("SFvCSP", ""),
+        "Fv_chml_total": fv.get("Fv_chml_total", ""),
+        "Fv_chml_surface": fv.get("Fv_chml_surface", ""),
+        "SFvCSP_total": fv.get("SFvCSP_total", ""),
+        "SFvCSP_surface": fv.get("SFvCSP_surface", ""),
         "tap_risk": tap.get("risk_summary", ""),
+        "n_salt_bridges_tap": tap.get("n_salt_bridges_tap", ""),
+        "n_salt_bridges_pka": tap.get("n_salt_bridges_pka", ""),
         "n_patches": len(result.get("patches", []) or []),
         "n_warnings": len(result.get("warnings", []) or []),
     }
@@ -646,7 +769,8 @@ def save_csv_reports(
         with open(patch_path, "w", newline="", encoding="utf-8") as fh:
             fields = [
                 "name", "patch_id", "ph", "sign", "total_charge", "score",
-                "risk", "n_cdr", "n_framework", "n_anchor", "in_cdr_vicinity",
+                "score_tap", "risk", "risk_basis", "n_cdr", "n_framework",
+                "n_anchor", "in_cdr_vicinity", "terminal_residues",
                 "chains", "residues", "candidates",
             ]
             writer = csv.DictWriter(fh, fieldnames=fields)
@@ -672,15 +796,40 @@ def save_csv_reports(
                         "sign": p.get("sign", ""),
                         "total_charge": p.get("total_charge", ""),
                         "score": p.get("score", ""),
+                        "score_tap": p.get("score_tap", ""),
                         "risk": p.get("risk", ""),
+                        "risk_basis": p.get("risk_basis", ""),
                         "n_cdr": p.get("n_cdr", ""),
                         "n_framework": p.get("n_framework", ""),
                         "n_anchor": p.get("n_anchor", ""),
                         "in_cdr_vicinity": p.get("in_cdr_vicinity", ""),
+                        "terminal_residues": " ".join(
+                            str(r) for r in p.get("terminal_residues", [])),
                         "chains": " ".join(str(c) for c in p.get("chains", [])),
                         "residues": res_txt,
                         "candidates": cand_txt,
                     })
+
+
+def _parse_ph_grid(text: str) -> List[float]:
+    """Parse START:STOP:STEP (inclusive of START, not of STOP)."""
+    parts = [p.strip() for p in text.split(":")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError(
+            "--ph-grid must be START:STOP:STEP, e.g. 4:10:0.5")
+    try:
+        start, stop, step = (float(p) for p in parts)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--ph-grid values must be numeric")
+    if step <= 0 or stop <= start:
+        raise argparse.ArgumentTypeError(
+            "--ph-grid requires STOP > START and STEP > 0")
+    values: List[float] = []
+    x = start
+    while x <= stop + 1e-9:
+        values.append(round(x, 6))
+        x += step
+    return values
 
 
 def _parse_fasta(path: str) -> List[Tuple[str, str]]:
@@ -799,6 +948,18 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                         default="heuristic",
                         help="Structure pKa model: heuristic (default), propka, "
                              "or none (no microenvironment correction)")
+    parser.add_argument("--termini", choices=("auto", "free", "capped", "blocked"),
+                        default="auto",
+                        help="Terminus model: auto (Fab capped, VHH free), free, "
+                             "capped C-terminus, or blocked N- and C-termini "
+                             "(default: auto)")
+    parser.add_argument("--ionic-strength", type=float, default=0.15, metavar="M",
+                        help="Ionic strength for Debye-Huckel screening (default: 0.15 M)")
+    parser.add_argument("--ph-grid", default=None, metavar="START:STOP:STEP",
+                        help="pH grid for the charge-vs-pH curve "
+                             "(default: 4:10:0.5)")
+    parser.add_argument("--ph-curve", action="store_true",
+                        help="Print the net-charge-vs-pH curve in the text report")
     parser.add_argument("--vh-chain", default=None,
                         help="Explicit structure chain id for VH")
     parser.add_argument("--vl-chain", default=None,
@@ -830,10 +991,11 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
         parser.error("Specify --check, --pdb, --pdb-dir, --fasta, or --vh/--vl")
     if args.fasta and (args.vh or args.vl):
         parser.error("--fasta cannot be combined with --vh/--vl")
-    if args.vh_chain and not args.vl_chain or args.vl_chain and not args.vh_chain:
-        parser.error("--vh-chain and --vl-chain must be given together")
+    if args.vl_chain and not args.vh_chain:
+        parser.error("--vl-chain requires --vh-chain")
     if (args.vh_chain or args.vl_chain) and not (args.pdb or args.pdb_dir):
         parser.error("--vh-chain/--vl-chain require --pdb or --pdb-dir")
+    ph_grid = _parse_ph_grid(args.ph_grid) if args.ph_grid else None
 
     try:
         args.pka_set = normalize_pka_set(args.pka_set)
@@ -859,6 +1021,9 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 disulfide_mode=args.disulfide,
                 structure_model=args.structure_model,
                 tap_thresholds=args.tap_thresholds,
+                termini_mode=args.termini,
+                ionic_strength=args.ionic_strength,
+                ph_grid=ph_grid,
                 name=args.name,
             )
         except Exception as exc:
@@ -867,7 +1032,8 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
         results.append(result)
         print(format_text_report(
             result, "pI / Fv Charge Analysis: {}".format(result.get("name", "")),
-            max_patches=args.max_patches, show_ionizable=args.ionizable))
+            max_patches=args.max_patches, show_ionizable=args.ionizable,
+            show_charge_curve=args.ph_curve))
 
     elif args.pdb_dir:
         files = [p for p in Path(args.pdb_dir).rglob("*")
@@ -892,6 +1058,9 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                     disulfide_mode=args.disulfide,
                     structure_model=args.structure_model,
                     tap_thresholds=args.tap_thresholds,
+                    termini_mode=args.termini,
+                    ionic_strength=args.ionic_strength,
+                    ph_grid=ph_grid,
                     name=args.name or pdb_path.stem,
                 )
             except Exception as exc:
@@ -939,6 +1108,7 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 ph=args.ph,
                 formulation_ph=args.formulation_ph,
                 disulfide_mode=args.disulfide,
+                termini_mode=args.termini,
                 name=args.name or default_name,
                 input_path=input_path,
             )
@@ -948,7 +1118,8 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
         results.append(result)
         print(format_text_report(
             result, "pI / Fv Charge Analysis: {}".format(result.get("name", "")),
-            max_patches=args.max_patches, show_ionizable=args.ionizable))
+            max_patches=args.max_patches, show_ionizable=args.ionizable,
+            show_charge_curve=args.ph_curve))
 
     for result in results:
         stem = _result_stem(result)
@@ -983,6 +1154,8 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 "input": r.get("input", {}),
                 "pka_set": r.get("pka_set", ""),
                 "fv": r.get("fv", {}),
+                "sensitivity": r.get("sensitivity", {}),
+                "structure_quality": r.get("structure_quality", {}),
                 "tap": r.get("tap", {}),
                 "n_patches": len(r.get("patches", []) or []),
                 "recommendations": r.get("recommendations", []),

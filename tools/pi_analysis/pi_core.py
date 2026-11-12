@@ -171,10 +171,72 @@ SURFACE_REL_SASA = 7.5      # %, TAP definition
 INTERFACE_CUTOFF = 4.5      # A, VH/VL interface heavy-atom cutoff
 BURIED_REL_SASA = 10.0      # %, pKa microenvironment
 SOLVATED_REL_SASA = 25.0    # %, above this no burial pKa penalty
-SALT_BRIDGE_CUTOFF = 4.0    # A, donor N ... acceptor O
+SALT_BRIDGE_CUTOFF = 4.0    # A, donor N ... acceptor O (pKa microenvironment)
 HBOND_CUTOFF = 3.5          # A, polar N/O ... N/O
+HBOND_ANGLE_MIN = 90.0      # deg, antecedent-donor...acceptor angle
 DISULFIDE_CUTOFF = 2.5      # A, SG ... SG
 PATCH_CUTOFF = 8.0          # A, exposed charged-residue patch graph
+
+# Terminus modelling.  A Fab/VHH V-domain C-terminus is normally fused to a
+# constant domain or tag, so the "auto" default caps it for Fab and leaves it
+# free for a single-domain VHH.
+TERMINI_MODES = ("auto", "free", "capped", "blocked")
+TRUE_TERMINUS_N_IMGT = 1
+TRUE_TERMINUS_C_IMGT = 127   # VH FR4 ends at 128, VL/VHH at 127
+
+# Ionic strength / Debye-Hückel screening (approximate).
+IONIC_STRENGTH_DEFAULT = 0.15   # M, physiological
+DEBYE_KAPPA_COEFF = 0.3291      # 1/A at 298 K for I in mol/L
+
+# Local electrostatic patch score bands.  These are deliberately NOT the TAP
+# PPC/PNC thresholds: the local score is an unordered fractional-charge sum,
+# whereas TAP uses an ordered integer-charge sum over the whole CDR vicinity.
+PATCH_RISK_POS = {"elevated": 0.50, "high": 2.00}
+PATCH_RISK_NEG = {"elevated": 0.60, "high": 2.50}
+PATCH_CDR_FACTOR = 1.25
+
+# Structure quality.
+PLDDT_WARN = 70.0           # AF3-style pLDDT stored in the B-factor column
+CA_BREAK_CUTOFF = 4.5       # A, consecutive CA distance indicating a chain break
+MISSING_SIDECHAIN_FRACTION = 0.5
+
+# Expected heavy side-chain atoms (used only for completeness warnings).
+SIDECHAIN_HEAVY = {
+    "R": ("CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"),
+    "N": ("CB", "CG", "OD1", "ND2"),
+    "D": ("CB", "CG", "OD1", "OD2"),
+    "Q": ("CB", "CG", "CD", "OE1", "NE2"),
+    "E": ("CB", "CG", "CD", "OE1", "OE2"),
+    "H": ("CB", "CG", "ND1", "CD2", "CE1", "NE2"),
+    "I": ("CB", "CG1", "CG2", "CD1"),
+    "L": ("CB", "CG", "CD1", "CD2"),
+    "K": ("CB", "CG", "CD", "CE", "NZ"),
+    "M": ("CB", "CG", "SD", "CE"),
+    "F": ("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"),
+    "P": ("CB", "CG", "CD"),
+    "S": ("CB", "OG"),
+    "T": ("CB", "OG1", "CG2"),
+    "W": ("CB", "CG", "CD1", "CD2", "NE1", "CE2", "CE3", "CZ2", "CZ3", "CH2"),
+    "Y": ("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"),
+    "V": ("CB", "CG1", "CG2"),
+}
+
+# Atoms used to define the angle at a polar contact (antecedent -> donor or
+# acceptor).  Without explicit hydrogens this is the best available proxy.
+HBOND_ANTECEDENT = {
+    "D": {"OD1": "CG", "OD2": "CG"},
+    "E": {"OE1": "CD", "OE2": "CD"},
+    "C": {"SG": "CB"},
+    "Y": {"OH": "CZ"},
+    "H": {"ND1": "CG", "NE2": "CD2"},
+    "K": {"NZ": "CE"},
+    "R": {"NE": "CD", "NH1": "CZ", "NH2": "CZ"},
+    "N": {"OD1": "CG", "ND2": "CG"},
+    "Q": {"OE1": "CD", "NE2": "CD"},
+    "S": {"OG": "CB"},
+    "T": {"OG1": "CB"},
+    "W": {"NE1": "CD1"},
+}
 
 # Side-chain atoms used for microenvironment detection.
 ACID_ATOMS = {
@@ -256,6 +318,8 @@ class Terminus:
     aa: str
     pka: float
     blocked: bool = False
+    truncated: bool = False      # True when the modelled chain is not the true end
+    source: str = "model"        # "model", "propka", or "truncated"
 
     def charge(self, ph: float) -> float:
         if self.blocked:
@@ -273,7 +337,10 @@ class Patch:
     ph: float
     residues: List[Dict[str, object]] = field(default_factory=list)
     total_charge: float = 0.0
-    score: float = 0.0
+    score: float = 0.0            # local unordered fractional-charge sum
+    score_tap: float = 0.0        # TAP-style ordered integer-charge sum
+    risk_basis: str = ""
+    terminal_residues: List[str] = field(default_factory=list)
     n_cdr: int = 0
     n_framework: int = 0
     n_anchor: int = 0
@@ -337,6 +404,49 @@ def _pka_value(pka_set: str, aa: str, terminal: Optional[str] = None) -> float:
         overrides = table.get("Cterm_overrides", {})
         return float(overrides.get(aa, table["Cterm"]))  # type: ignore[union-attr]
     return float(table[aa])  # type: ignore[index]
+
+
+def resolve_termini_mode(mode: str, kind: str) -> str:
+    """Resolve the context-aware default terminus model.
+
+    A Fab VH/VL C-terminus is fused to CH1/CL, so the neutral default is a
+    capped C-terminus.  A single-domain VHH has a free C-terminus unless it is
+    fused to a tag.
+    """
+    if mode not in TERMINI_MODES:
+        raise ValueError(
+            "--termini must be one of {}".format(", ".join(TERMINI_MODES)))
+    if mode != "auto":
+        return mode
+    return "capped" if kind == "fab" else "free"
+
+
+def debye_kappa(ionic_strength: float) -> float:
+    """Approximate inverse Debye length in 1/A (298 K, I in mol/L)."""
+    if ionic_strength is None or ionic_strength <= 0.0:
+        return 0.0
+    return DEBYE_KAPPA_COEFF * math.sqrt(float(ionic_strength))
+
+
+def _screening_factor(distance: float, ionic_strength: float) -> float:
+    """Distance-dependent electrostatic screening factor in (0, 1]."""
+    kappa = debye_kappa(ionic_strength)
+    if kappa <= 0.0:
+        return 1.0
+    return math.exp(-kappa * max(0.0, float(distance)))
+
+
+def _angle_deg(a: Sequence[float], b: Sequence[float],
+               c: Sequence[float]) -> float:
+    """Angle ABC in degrees for three 3-D points."""
+    v1 = (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+    v2 = (c[0] - b[0], c[1] - b[1], c[2] - b[2])
+    n1 = math.sqrt(sum(v * v for v in v1))
+    n2 = math.sqrt(sum(v * v for v in v2))
+    if n1 <= 1e-9 or n2 <= 1e-9:
+        return 0.0
+    dot = sum(x * y for x, y in zip(v1, v2))
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot / (n1 * n2)))))
 
 
 def _region_imgt(pos: Optional[int]) -> str:
@@ -429,17 +539,37 @@ def isoelectric_point(groups: Sequence[IonizableGroup],
     return 0.5 * (lo + hi)
 
 
-def sequence_pi_table(chains: Sequence[ChainInfo], pka_set: str) -> Dict[str, object]:
-    """pI for the combined chains under free/capped/blocked termini."""
+def sequence_pi_table(
+    chains: Sequence[ChainInfo],
+    pka_set: str,
+    ph: float = 7.4,
+    formulation_ph: float = 6.0,
+    termini_mode: str = "auto",
+    kind: Optional[str] = None,
+) -> Dict[str, object]:
+    """pI for the combined chains under free/capped/blocked/selected termini."""
     groups, termini = _make_groups_from_sequence(chains, pka_set)
+    if kind is None:
+        kind = "fab" if len(chains) >= 2 else "vhh"
+    resolved = resolve_termini_mode(termini_mode, kind)
+    capped = resolved in ("capped", "blocked")
+    n_blocked = resolved == "blocked"
     return {
         "pI_free": isoelectric_point(groups, termini),
         "pI_capped": isoelectric_point(groups, termini, capped_cterm=True),
         "pI_blocked": isoelectric_point(groups, termini, capped_cterm=True,
                                         blocked_nterm=True),
-        "net_charge_ph74_free": net_charge(groups, termini, 7.4),
-        "net_charge_ph74_capped": net_charge(groups, termini, 7.4,
+        "pI_selected": isoelectric_point(
+            groups, termini, capped_cterm=capped, blocked_nterm=n_blocked),
+        "termini_mode": resolved,
+        "net_charge_ph74_free": net_charge(groups, termini, ph),
+        "net_charge_ph74_capped": net_charge(groups, termini, ph,
                                              capped_cterm=True),
+        "net_charge_selected_ph": net_charge(
+            groups, termini, ph, capped_cterm=capped, blocked_nterm=n_blocked),
+        "net_charge_selected_formulation_ph": net_charge(
+            groups, termini, formulation_ph,
+            capped_cterm=capped, blocked_nterm=n_blocked),
     }
 
 
@@ -448,8 +578,11 @@ def chain_pi_table(
     pka_set: str,
     ph: float = 7.4,
     formulation_ph: float = 6.0,
+    termini_mode: str = "free",
 ) -> Dict[str, Dict[str, object]]:
-    """Per-chain pI and charge."""
+    """Per-chain pI and charge at the resolved terminus model."""
+    capped = termini_mode in ("capped", "blocked")
+    n_blocked = termini_mode == "blocked"
     out: Dict[str, Dict[str, object]] = {}
     for chain in chains:
         groups, termini = _make_groups_from_sequence([chain], pka_set)
@@ -459,11 +592,174 @@ def chain_pi_table(
             "sequence": chain.sequence,
             "pI_free": isoelectric_point(groups, termini),
             "pI_capped": isoelectric_point(groups, termini, capped_cterm=True),
-            "net_charge_ph74": net_charge(groups, termini, ph),
-            "net_charge_formulation_ph": net_charge(groups, termini, formulation_ph),
+            "pI_selected": isoelectric_point(
+                groups, termini, capped_cterm=capped, blocked_nterm=n_blocked),
+            "net_charge_ph74": net_charge(
+                groups, termini, ph, capped_cterm=capped,
+                blocked_nterm=n_blocked),
+            "net_charge_ph74_free": net_charge(groups, termini, ph),
+            "net_charge_formulation_ph": net_charge(
+                groups, termini, formulation_ph, capped_cterm=capped,
+                blocked_nterm=n_blocked),
             "n_ionizable": len(groups),
         }
     return out
+
+
+def default_ph_grid(start: float = 4.0, stop: float = 10.0,
+                    step: float = 0.5) -> List[float]:
+    """Inclusive pH grid used for the titration/charge curve."""
+    if step <= 0:
+        raise ValueError("pH grid step must be positive")
+    values: List[float] = []
+    ph = float(start)
+    while ph <= stop + 1e-9:
+        values.append(round(ph, 3))
+        ph += step
+    return values
+
+
+def charge_curve(
+    groups: Sequence[IonizableGroup],
+    termini: Sequence[Terminus],
+    ph_values: Sequence[float],
+    capped_cterm: bool = False,
+    blocked_nterm: bool = False,
+) -> List[Dict[str, float]]:
+    """Net charge sampled across pH (for formulation/IEX planning)."""
+    return [
+        {"ph": round(float(ph), 3),
+         "net_charge": round(net_charge(
+             groups, termini, float(ph),
+             capped_cterm=capped_cterm, blocked_nterm=blocked_nterm), 4)}
+        for ph in ph_values
+    ]
+
+
+def assess_structure_quality(
+    residues: Sequence["tap_core.Residue"],
+    kind: str = "fab",
+) -> Dict[str, object]:
+    """Report model-quality features that affect pI/SASA reliability.
+
+    The B-factor column is interpreted as a pLDDT proxy when its values are
+    in the 0-100 range (typical of AlphaFold/AF3 models).  It is reported
+    regardless, because crystallographic B-factors are also useful context.
+    """
+    bfactors = [float(r.bfactor) for r in residues
+                if getattr(r, "bfactor", None) is not None]
+    mean_bf = sum(bfactors) / len(bfactors) if bfactors else None
+    plddt_like = bool(bfactors) and all(0.0 <= b <= 100.0 for b in bfactors)
+
+    missing_sidechain: List[str] = []
+    missing_ionizable: List[str] = []
+    for res in residues:
+        expected = SIDECHAIN_HEAVY.get(res.aa)
+        if not expected:
+            continue
+        names = {raw.strip() for raw, _e, _x, _y, _z in res.atoms}
+        present = sum(1 for name in expected if name in names)
+        frac = present / float(len(expected))
+        if frac < MISSING_SIDECHAIN_FRACTION:
+            missing_sidechain.append(_res_label(res))
+        if res.aa in IONIZABLE:
+            ion_atoms = ACID_ATOMS.get(res.aa, ()) + BASE_ATOMS.get(res.aa, ())
+            if ion_atoms and not any(name in names for name in ion_atoms):
+                missing_ionizable.append(_res_label(res))
+
+    chain_breaks: Dict[str, int] = {}
+    by_chain: Dict[str, List["tap_core.Residue"]] = defaultdict(list)
+    for res in residues:
+        by_chain[res.chain].append(res)
+    for chain, chain_res in by_chain.items():
+        breaks = 0
+        prev_ca: Optional[Tuple[float, float, float]] = None
+        for res in chain_res:
+            ca = _atom_map(res).get("CA")
+            if ca is None:
+                prev_ca = None
+                continue
+            if prev_ca is not None:
+                d2 = sum((a - b) ** 2 for a, b in zip(ca, prev_ca))
+                if math.sqrt(d2) > CA_BREAK_CUTOFF:
+                    breaks += 1
+            prev_ca = ca
+        if breaks:
+            chain_breaks[chain] = breaks
+
+    truncated_termini: List[str] = []
+    for chain, chain_res in by_chain.items():
+        if not chain_res:
+            continue
+        first, last = chain_res[0], chain_res[-1]
+        n_pos = getattr(first, "imgt_pos", None)
+        c_pos = getattr(last, "imgt_pos", None)
+        if n_pos is not None and int(n_pos) != TRUE_TERMINUS_N_IMGT:
+            truncated_termini.append("{}:N(IMGT {})".format(chain, n_pos))
+        if c_pos is not None and int(c_pos) < TRUE_TERMINUS_C_IMGT:
+            truncated_termini.append("{}:C(IMGT {})".format(chain, c_pos))
+
+    return {
+        "kind": kind,
+        "n_residues": len(residues),
+        "n_chains": len(by_chain),
+        "bfactor_mean": None if mean_bf is None else round(mean_bf, 1),
+        "bfactor_min": None if not bfactors else round(min(bfactors), 1),
+        "bfactor_max": None if not bfactors else round(max(bfactors), 1),
+        "bfactor_plddt_like": plddt_like,
+        "n_missing_sidechain": len(missing_sidechain),
+        "missing_sidechain_fraction": (
+            round(len(missing_sidechain) / float(len(residues)), 3)
+            if residues else 0.0),
+        "missing_sidechain": missing_sidechain[:50],
+        "n_missing_ionizable_atoms": len(missing_ionizable),
+        "missing_ionizable_atoms": missing_ionizable[:50],
+        "chain_breaks": chain_breaks,
+        "n_chain_breaks": sum(chain_breaks.values()),
+        "ca_break_cutoff": CA_BREAK_CUTOFF,
+        "truncated_termini": truncated_termini,
+    }
+
+
+def structure_quality_warnings(quality: Dict[str, object]) -> List[str]:
+    """Human-readable warnings derived from ``assess_structure_quality``."""
+    warnings: List[str] = []
+    mean_raw = quality.get("bfactor_mean")
+    mean_bf = float(mean_raw) if isinstance(mean_raw, (int, float)) else None
+    if (bool(quality.get("bfactor_plddt_like")) and mean_bf is not None
+            and mean_bf < PLDDT_WARN):
+        warnings.append(
+            "Low mean CA B-factor/pLDDT ({:.1f}); structure-aware pI and "
+            "charge patches may be unreliable. Prefer a higher-confidence "
+            "model or crystal structure.".format(mean_bf))
+    missing_raw = quality.get("n_missing_sidechain")
+    n_missing = int(missing_raw) if isinstance(missing_raw, (int, float)) else 0
+    missing_list = quality.get("missing_sidechain")
+    if not isinstance(missing_list, list):
+        missing_list = []
+    if n_missing:
+        warnings.append(
+            "{} residue(s) have incomplete side chains; SASA/salt-bridge/"
+            "H-bond microenvironment assignments may be unreliable "
+            "(first: {}).".format(
+                n_missing,
+                ", ".join(str(x) for x in missing_list[:8])))
+    breaks_raw = quality.get("n_chain_breaks")
+    n_breaks = int(breaks_raw) if isinstance(breaks_raw, (int, float)) else 0
+    if n_breaks:
+        warnings.append(
+            "{} chain break(s) detected (CA-CA > {:.1f} A); missing loops can "
+            "change burial and patch connectivity.".format(
+                n_breaks, CA_BREAK_CUTOFF))
+    truncated = quality.get("truncated_termini")
+    if not isinstance(truncated, list):
+        truncated = []
+    if truncated:
+        warnings.append(
+            "Truncated V-domain terminus/termini detected ({}); no artificial "
+            "free terminus charge was added at the cut.".format(
+                ", ".join(str(x) for x in truncated)))
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +834,16 @@ def _atom_map(res: "tap_core.Residue") -> Dict[str, Tuple[float, float, float]]:
     return {raw.strip(): (x, y, z) for raw, _elem, x, y, z in res.atoms}
 
 
-def detect_salt_bridges(residues: Sequence["tap_core.Residue"]) -> Tuple[Set[Tuple[str, int, str]], List[Dict[str, object]]]:
-    """Detect K/R ... D/E salt bridges (donor N ... acceptor O <= 4 A)."""
+def detect_salt_bridges(
+    residues: Sequence["tap_core.Residue"],
+) -> Tuple[Set[Tuple[str, int, str]], List[Dict[str, object]],
+           Dict[Tuple[str, int, str], float]]:
+    """Detect K/R ... D/E salt bridges (donor N ... acceptor O <= 4 A).
+
+    This is the pKa-microenvironment definition.  It intentionally differs
+    from TAP's stricter 3.2 A / exposed / one-partner rule; both are reported
+    so the two views cannot be confused.
+    """
     donors: List[Tuple[int, str, float, float, float]] = []
     acceptors: List[Tuple[int, str, float, float, float]] = []
     for idx, res in enumerate(residues):
@@ -556,6 +860,7 @@ def detect_salt_bridges(residues: Sequence["tap_core.Residue"]) -> Tuple[Set[Tup
     cutoff2 = SALT_BRIDGE_CUTOFF * SALT_BRIDGE_CUTOFF
     partners: Set[Tuple[str, int, str]] = set()
     pairs: List[Dict[str, object]] = []
+    min_dist: Dict[Tuple[str, int, str], float] = {}
     seen: Set[Tuple[int, int]] = set()
     for d_idx, d_name, x1, y1, z1 in donors:
         for a_idx, a_name, x2, y2, z2 in acceptors:
@@ -565,69 +870,102 @@ def detect_salt_bridges(residues: Sequence["tap_core.Residue"]) -> Tuple[Set[Tup
             if pair in seen:
                 continue
             d2 = (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2
-            if d2 <= cutoff2:
-                seen.add(pair)
-                r1, r2 = residues[d_idx], residues[a_idx]
-                partners.add(r1.key)
-                partners.add(r2.key)
-                pairs.append({
-                    "donor": _res_label(r1),
-                    "acceptor": _res_label(r2),
-                    "distance": round(math.sqrt(d2), 2),
-                })
-    return partners, pairs
+            if d2 > cutoff2:
+                continue
+            seen.add(pair)
+            dist = math.sqrt(d2)
+            r1, r2 = residues[d_idx], residues[a_idx]
+            partners.add(r1.key)
+            partners.add(r2.key)
+            for key in (r1.key, r2.key):
+                if key not in min_dist or dist < min_dist[key]:
+                    min_dist[key] = dist
+            pairs.append({
+                "donor": _res_label(r1),
+                "acceptor": _res_label(r2),
+                "distance": round(dist, 2),
+            })
+    return partners, pairs, min_dist
 
 
-def detect_hbonds(residues: Sequence["tap_core.Residue"],
-                  salt_bridge_keys: Set[Tuple[str, int, str]]) -> Set[Tuple[str, int, str]]:
-    """Flag ionizable side chains with a polar contact (N/O ... N/O <= 3.5 A).
+def detect_hbonds(
+    residues: Sequence["tap_core.Residue"],
+    salt_bridge_keys: Set[Tuple[str, int, str]],
+) -> Tuple[Set[Tuple[str, int, str]],
+           Dict[Tuple[str, int, str], float]]:
+    """Flag ionizable side chains in a polar contact (N/O ... N/O <= 3.5 A).
 
-    Backbone and side-chain N/O atoms are considered.  Salt-bridge partners
-    are excluded here because they are already handled separately.
+    Compared with a distance-only filter this version:
+      * uses the ionizable side-chain atom itself (not any residue N/O);
+      * requires a plausible antecedent-donor...acceptor angle;
+      * excludes covalent contacts and same-residue contacts;
+      * excludes salt-bridge partners (handled separately);
+      * ignores sequential backbone N/O contacts that are mostly peptide
+        geometry rather than a side-chain hydrogen bond.
     """
-    polar: List[Tuple[int, str, float, float, float]] = []
+    by_res: Dict[int, List[Tuple[str, float, float, float]]] = defaultdict(list)
+    atoms_by_res: Dict[int, Dict[str, Tuple[float, float, float]]] = {}
     for idx, res in enumerate(residues):
+        atoms = _atom_map(res)
+        atoms_by_res[idx] = atoms
         for raw_name, elem, x, y, z in res.atoms:
             name = raw_name.strip()
             if elem in ("N", "O") or name.startswith(("N", "O")):
-                polar.append((idx, name, x, y, z))
-    if not polar:
-        return set()
+                by_res[idx].append((name, x, y, z))
+    if not by_res:
+        return set(), {}
 
     cutoff2 = HBOND_CUTOFF * HBOND_CUTOFF
     flagged: Set[Tuple[str, int, str]] = set()
-    # Pre-group by residue for a cheap neighbour scan.
-    by_res: Dict[int, List[Tuple[str, float, float, float]]] = defaultdict(list)
-    for idx, name, x, y, z in polar:
-        by_res[idx].append((name, x, y, z))
-
+    min_dist: Dict[Tuple[str, int, str], float] = {}
     for idx, res in enumerate(residues):
         if res.aa not in IONIZABLE or res.key in salt_bridge_keys:
             continue
-        atoms = _atom_map(res)
+        atoms = atoms_by_res[idx]
         target_names = ACID_ATOMS.get(res.aa, ()) + BASE_ATOMS.get(res.aa, ())
         targets = [(n, atoms[n]) for n in target_names if n in atoms]
         if not targets:
             continue
-        found = False
+        antecedents = HBOND_ANTECEDENT.get(res.aa, {})
+        found_dist: Optional[float] = None
         for jdx, other in enumerate(residues):
-            if jdx == idx:
+            if jdx == idx or other.key in salt_bridge_keys:
                 continue
-            if other.key in salt_bridge_keys:
-                continue
+            sequential = abs(jdx - idx) == 1
             for name2, x2, y2, z2 in by_res.get(jdx, ()):
-                for _n1, (x1, y1, z1) in targets:
+                if sequential and name2 in ("N", "O", "OXT"):
+                    continue
+                other_atoms = atoms_by_res.get(jdx, {})
+                for name1, (x1, y1, z1) in targets:
                     d2 = (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2
-                    if d2 <= cutoff2:
-                        found = True
-                        break
-                if found:
+                    if d2 > cutoff2:
+                        continue
+                    dist = math.sqrt(d2)
+                    if dist < 1.8:       # covalent / overlapping
+                        continue
+                    ant1_name = antecedents.get(name1)
+                    if ant1_name and ant1_name in atoms:
+                        ang1 = _angle_deg(atoms[ant1_name],
+                                          (x1, y1, z1), (x2, y2, z2))
+                        if ang1 < HBOND_ANGLE_MIN:
+                            continue
+                    ant2_name = HBOND_ANTECEDENT.get(other.aa, {}).get(name2)
+                    if ant2_name and ant2_name in other_atoms:
+                        ang2 = _angle_deg(other_atoms[ant2_name],
+                                          (x2, y2, z2), (x1, y1, z1))
+                        if ang2 < HBOND_ANGLE_MIN:
+                            continue
+                    if found_dist is None or dist < found_dist:
+                        found_dist = dist
                     break
-            if found:
+                if found_dist is not None:
+                    break
+            if found_dist is not None:
                 break
-        if found:
+        if found_dist is not None:
             flagged.add(res.key)
-    return flagged
+            min_dist[res.key] = found_dist
+    return flagged, min_dist
 
 
 def _res_label(res: "tap_core.Residue") -> str:
@@ -661,11 +999,16 @@ def _burial_factor(rel_sasa_frac: Optional[float]) -> float:
 
 
 def _pka_shift(aa: str, rel_sasa_frac: Optional[float],
-               salt_bridge: bool, hbond: bool) -> Tuple[float, str]:
+               salt_distance: Optional[float],
+               hbond_distance: Optional[float],
+               ionic_strength: float = IONIC_STRENGTH_DEFAULT) -> Tuple[float, str]:
     """Transparent empirical pKa shift for the structure-aware fallback.
 
     Acidic groups: burial raises pKa (charged state penalised); salt bridge /
     H-bond lower it (charged state stabilised).  Basic groups mirror this.
+    Salt-bridge and H-bond stabilisation is screened by an approximate
+    Debye-Hückel factor exp(-kappa*r), so a high-ionic-strength formulation
+    does not over-reward long-range contacts.
     """
     burial = _burial_factor(rel_sasa_frac)
     if aa in ("D", "E"):
@@ -682,12 +1025,16 @@ def _pka_shift(aa: str, rel_sasa_frac: Optional[float],
     reasons: List[str] = []
     if burial > 0.0:
         reasons.append("buried {:.0f}%".format(burial * 100))
-    if salt_bridge:
-        delta += -0.8 if aa in ACIDIC else 0.8
-        reasons.append("salt bridge")
-    if hbond:
-        delta += -0.3 if aa in ACIDIC else 0.3
-        reasons.append("H-bond")
+    if salt_distance is not None:
+        screen = _screening_factor(salt_distance, ionic_strength)
+        delta += (-0.8 if aa in ACIDIC else 0.8) * screen
+        reasons.append("salt bridge {:.1f} A (screen {:.2f})".format(
+            salt_distance, screen))
+    if hbond_distance is not None:
+        screen = _screening_factor(hbond_distance, ionic_strength)
+        delta += (-0.3 if aa in ACIDIC else 0.3) * screen
+        reasons.append("H-bond {:.1f} A (screen {:.2f})".format(
+            hbond_distance, screen))
     delta = max(-2.0, min(2.0, delta))
     return delta, ", ".join(reasons)
 
@@ -700,6 +1047,10 @@ def structure_groups(
     hbond_keys: Set[Tuple[str, int, str]],
     propka_pka: Optional[Dict[Tuple[str, int, str], float]] = None,
     model: str = "heuristic",
+    salt_distances: Optional[Dict[Tuple[str, int, str], float]] = None,
+    hbond_distances: Optional[Dict[Tuple[str, int, str], float]] = None,
+    ionic_strength: float = IONIC_STRENGTH_DEFAULT,
+    propka_termini: Optional[Dict[Tuple[str, str], float]] = None,
 ) -> Tuple[List[IonizableGroup], List[Terminus]]:
     """Build per-residue pKa groups for a structure-aware pI."""
     groups: List[IonizableGroup] = []
@@ -711,6 +1062,10 @@ def structure_groups(
         disulfide = key in disulfide_keys
         salt = key in salt_bridge_keys
         hbond = key in hbond_keys
+        salt_dist = salt_distances.get(key) if salt_distances else (
+            SALT_BRIDGE_CUTOFF if salt else None)
+        hbond_dist = hbond_distances.get(key) if hbond_distances else (
+            HBOND_CUTOFF if hbond else None)
         kind = "acid" if res.aa in ACIDIC else "base"
         pka_model = _pka_value(pka_set, res.aa)
         reason = ""
@@ -720,14 +1075,16 @@ def structure_groups(
             reason = "disulfide (non-ionizable)"
         elif propka_pka is not None and key in propka_pka:
             pka_eff = float(propka_pka[key])
-            active = True
-            reason = "PROPKA"
+            active = pka_eff < 20.0
+            reason = ("PROPKA" if active else
+                      "PROPKA non-ionizable (pKa >= 20)")
         elif model == "none":
             pka_eff = pka_model
             active = True
             reason = "no microenvironment correction"
         else:
-            delta, reason = _pka_shift(res.aa, rel, salt, hbond)
+            delta, reason = _pka_shift(
+                res.aa, rel, salt_dist, hbond_dist, ionic_strength)
             pka_eff = pka_model + delta
             active = True
         groups.append(IonizableGroup(
@@ -749,13 +1106,23 @@ def structure_groups(
             structure_chain=res.chain,
             shift_reason=reason,
         ))
-    termini = _structure_termini(residues, pka_set)
+    termini = _structure_termini(residues, pka_set, propka_termini)
     return groups, termini
 
 
-def _structure_termini(residues: Sequence["tap_core.Residue"],
-                       pka_set: str) -> List[Terminus]:
-    """N/C termini for each Fv chain, using the first/last modelled residue."""
+def _structure_termini(
+    residues: Sequence["tap_core.Residue"],
+    pka_set: str,
+    propka_termini: Optional[Dict[Tuple[str, str], float]] = None,
+) -> List[Terminus]:
+    """N/C termini for each Fv chain, using the first/last modelled residue.
+
+    If a chain is truncated (the first/last modelled residue is not the true
+    V-domain terminus), no artificial free terminus is created at the cut:
+    the terminus is marked blocked so a missing loop does not become an
+    unphysical charged group.  PROPKA N+/C- values are used when available.
+    """
+    propka_termini = propka_termini or {}
     by_chain: Dict[str, List["tap_core.Residue"]] = defaultdict(list)
     for res in residues:
         by_chain[res.chain].append(res)
@@ -764,13 +1131,29 @@ def _structure_termini(residues: Sequence["tap_core.Residue"],
         if not chain_res:
             continue
         first, last = chain_res[0], chain_res[-1]
+        n_pos = getattr(first, "imgt_pos", None)
+        c_pos = getattr(last, "imgt_pos", None)
+        n_true = n_pos is None or int(n_pos) == TRUE_TERMINUS_N_IMGT
+        c_true = c_pos is None or int(c_pos) >= TRUE_TERMINUS_C_IMGT
+        n_pka = propka_termini.get((chain, "N"))
+        c_pka = propka_termini.get((chain, "C"))
         termini.append(Terminus(
             chain=chain, kind="N", aa=first.aa,
-            pka=_pka_value(pka_set, first.aa, "N"),
+            pka=float(n_pka) if n_pka is not None else _pka_value(
+                pka_set, first.aa, "N"),
+            blocked=not n_true,
+            truncated=not n_true,
+            source=("propka" if n_pka is not None else
+                    ("truncated" if not n_true else "model")),
         ))
         termini.append(Terminus(
             chain=chain, kind="C", aa=last.aa,
-            pka=_pka_value(pka_set, last.aa, "C"),
+            pka=float(c_pka) if c_pka is not None else _pka_value(
+                pka_set, last.aa, "C"),
+            blocked=not c_true,
+            truncated=not c_true,
+            source=("propka" if c_pka is not None else
+                    ("truncated" if not c_true else "model")),
         ))
     return termini
 
@@ -787,9 +1170,12 @@ def find_propka() -> Optional[str]:
     return None
 
 
-def parse_propka_pka(text: str) -> Dict[Tuple[str, int, str], float]:
-    """Parse the SUMMARY OF THIS PREDICTION section of a PROPKA ``.pka`` file."""
+def parse_propka_summary(
+    text: str,
+) -> Tuple[Dict[Tuple[str, int, str], float], Dict[Tuple[str, str], float]]:
+    """Parse PROPKA side-chain and N+/C- terminal pKa values."""
     out: Dict[Tuple[str, int, str], float] = {}
+    termini: Dict[Tuple[str, str], float] = {}
     in_summary = False
     for line in text.splitlines():
         if "SUMMARY OF THIS PREDICTION" in line:
@@ -799,14 +1185,22 @@ def parse_propka_pka(text: str) -> Dict[Tuple[str, int, str], float]:
             continue
         stripped = line.strip()
         if not stripped:
-            if out:
+            if out or termini:
                 break
             continue
         if stripped.startswith(("Group", "SUMMARY", "---", "pKa")):
             continue
         parts = stripped.split()
-        if len(parts) < 4 or parts[0] not in (
-                "ASP", "GLU", "HIS", "CYS", "TYR", "LYS", "ARG"):
+        if len(parts) < 4:
+            continue
+        group = parts[0]
+        if group in ("N+", "N", "C-", "C"):
+            if group in ("N+", "N"):
+                termini[(parts[2], "N")] = float(parts[3])
+            else:
+                termini[(parts[2], "C")] = float(parts[3])
+            continue
+        if group not in ("ASP", "GLU", "HIS", "CYS", "TYR", "LYS", "ARG"):
             continue
         m = re.match(r"^(\d+)([A-Za-z]*)$", parts[1])
         if not m:
@@ -819,29 +1213,38 @@ def parse_propka_pka(text: str) -> Dict[Tuple[str, int, str], float]:
         except (ValueError, IndexError):
             continue
         out[(chain, resseq, icode)] = pka
-    return out
+    return out, termini
 
 
-def run_propka(pdb_path: str, timeout: int = 600) -> Tuple[Optional[Dict[Tuple[str, int, str], float]], Optional[str]]:
-    """Run PROPKA on a structure and return {(chain, resseq, icode): pKa}."""
+def parse_propka_pka(text: str) -> Dict[Tuple[str, int, str], float]:
+    """Backward-compatible wrapper returning only side-chain pKa values."""
+    return parse_propka_summary(text)[0]
+
+
+def run_propka_full(
+    pdb_path: str,
+    timeout: int = 600,
+) -> Tuple[Optional[Dict[Tuple[str, int, str], float]],
+           Dict[Tuple[str, str], float], Optional[str]]:
+    """Run PROPKA and return (side-chain pKa, terminal pKa, error)."""
     exe = find_propka()
     if not exe:
-        return None, "PROPKA not found on PATH (install propka3 or use --structure-model heuristic)"
+        return None, {}, "PROPKA not found on PATH (install propka3 or use --structure-model heuristic)"
     with tempfile.TemporaryDirectory() as tmpdir:
         local = os.path.join(tmpdir, os.path.basename(pdb_path))
         try:
             shutil.copy(pdb_path, local)
         except OSError as exc:
-            return None, "cannot copy structure for PROPKA: {}".format(exc)
+            return None, {}, "cannot copy structure for PROPKA: {}".format(exc)
         try:
             proc = subprocess.run(
                 [exe, os.path.basename(local)],
                 cwd=tmpdir, capture_output=True, text=True, timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return None, "PROPKA failed: {}".format(exc)
+            return None, {}, "PROPKA failed: {}".format(exc)
         if proc.returncode != 0:
-            return None, "PROPKA exited {}: {}".format(
+            return None, {}, "PROPKA exited {}: {}".format(
                 proc.returncode, (proc.stderr or proc.stdout).strip()[:400])
         stem = os.path.splitext(os.path.basename(local))[0]
         pka_path = os.path.join(tmpdir, stem + ".pka")
@@ -851,33 +1254,58 @@ def run_propka(pdb_path: str, timeout: int = 600) -> Tuple[Optional[Dict[Tuple[s
                 with open(pka_path) as fh:
                     text = fh.read()
             except OSError as exc:
-                return None, "cannot read PROPKA output: {}".format(exc)
+                return None, {}, "cannot read PROPKA output: {}".format(exc)
         else:
             text = proc.stdout
-        parsed = parse_propka_pka(text)
+        parsed, termini = parse_propka_summary(text)
         if not parsed:
-            return None, "PROPKA produced no parsable pKa values"
-        return parsed, None
+            return None, {}, "PROPKA produced no parsable pKa values"
+        return parsed, termini, None
+
+
+def run_propka(
+    pdb_path: str,
+    timeout: int = 600,
+) -> Tuple[Optional[Dict[Tuple[str, int, str], float]], Optional[str]]:
+    """Backward-compatible PROPKA runner returning only side-chain pKa."""
+    pka, _termini, err = run_propka_full(pdb_path, timeout=timeout)
+    return pka, err
 
 
 # ---------------------------------------------------------------------------
 # Patch clustering
 # ---------------------------------------------------------------------------
 
-def _patch_risk(score: float, sign: str, in_cdr: bool) -> str:
-    # TAP's published PPC/PNC green/red boundaries are a useful scale even
-    # though a local patch score is not identical to the CDR-vicinity TAP sum.
-    if sign == "positive":
-        if score >= 4.22:
-            return "high"
-        if score >= 1.32:
-            return "elevated"
+def _patch_risk(score: float, sign: str, in_cdr: bool,
+                total_charge: float = 0.0) -> Tuple[str, str]:
+    """Classify a local electrostatic patch.
+
+    The local score is an unordered fractional-charge sum, so the published
+    TAP PPC/PNC bands do not apply directly.  The bands below are expressed
+    in the same physical units and are intentionally transparent.  A patch
+    in the CDR vicinity is boosted by ``PATCH_CDR_FACTOR`` because
+    CDR-proximal charge clusters are more likely to affect antigen binding
+    and polyspecificity.
+    """
+    if sign == "mixed" and abs(total_charge) < 0.5:
+        return "low", "balanced mixed patch"
+    effective = score * (PATCH_CDR_FACTOR if in_cdr else 1.0)
+    dominant = sign
+    if sign == "mixed":
+        dominant = "positive" if total_charge > 0 else "negative"
+    bands = PATCH_RISK_POS if dominant == "positive" else PATCH_RISK_NEG
+    if effective >= bands["high"]:
+        risk = "high"
+    elif effective >= bands["elevated"]:
+        risk = "elevated"
     else:
-        if score >= 4.42:
-            return "high"
-        if score >= 2.00:
-            return "elevated"
-    return "low"
+        risk = "low"
+    basis = ("local unordered fractional-charge score {:.3f}; effective "
+             "{:.3f}{}".format(
+                 score, effective,
+                 " (x{:.2f} CDR vicinity)".format(PATCH_CDR_FACTOR)
+                 if in_cdr else ""))
+    return risk, basis
 
 
 def cluster_patches(
@@ -888,9 +1316,11 @@ def cluster_patches(
     min_rel_sasa_pct: float = SURFACE_REL_SASA,
     cutoff: float = PATCH_CUTOFF,
     interface_keys: Optional[Set[Tuple[str, int, str]]] = None,
+    terminal_keys: Optional[Set[Tuple[str, int, str]]] = None,
 ) -> List[Patch]:
     """Cluster exposed charged residues into 3D patches at a given pH."""
     interface_keys = interface_keys or set()
+    terminal_keys = terminal_keys or set()
     nodes: List[int] = []
     node_charge: Dict[int, float] = {}
     for idx, res in enumerate(residues):
@@ -963,14 +1393,35 @@ def cluster_patches(
                     if d and d > 1e-6:
                         score += abs(qi * qj) / (d * d)
 
+        # TAP-style ordered-pair sum with formal integer charges, reported
+        # for cross-checking against the published PPC/PNC scale.  It is not
+        # used for the local risk decision because TAP's thresholds apply to
+        # the whole CDR vicinity, not to an isolated patch.
+        score_tap = 0.0
+        for i in members:
+            qi = getattr(residues[i], "charge", 0.0) or 0.0
+            for j in members:
+                if j == i:
+                    continue
+                qj = getattr(residues[j], "charge", 0.0) or 0.0
+                if not ((qi > 0 and qj > 0) or (qi < 0 and qj < 0)):
+                    continue
+                d = pair_dist.get((i, j) if i < j else (j, i))
+                if d and d > 1e-6:
+                    score_tap += abs(qi * qj) / (d * d)
+
         res_rows: List[Dict[str, object]] = []
         n_cdr = n_fw = n_anchor = 0
         in_vicinity = False
         chains: List[str] = []
+        terminal_labels: List[str] = []
         for i in members:
             res = residues[i]
             label = _res_label(res)
             region = _region_imgt(getattr(res, "imgt_pos", None))
+            is_terminal = res.key in terminal_keys
+            if is_terminal:
+                terminal_labels.append(label)
             if res.is_cdr:
                 n_cdr += 1
             else:
@@ -991,10 +1442,12 @@ def cluster_patches(
                 "charge": round(node_charge[i], 3),
                 "is_cdr": bool(res.is_cdr),
                 "is_anchor": bool(res.is_anchor),
+                "is_terminus": bool(is_terminal),
                 "in_cdr_vicinity": bool(getattr(res, "in_cdr_vicinity", False)),
                 "is_interface": res.key in interface_keys,
             })
 
+        risk, risk_basis = _patch_risk(score, sign, in_vicinity, total_q)
         patch = Patch(
             patch_id=patch_id,
             sign=sign,
@@ -1002,15 +1455,61 @@ def cluster_patches(
             residues=sorted(res_rows, key=lambda r: (-abs(float(str(r["charge"]))), str(r["label"]))),
             total_charge=round(total_q, 3),
             score=round(score, 3),
+            score_tap=round(score_tap, 3),
+            risk_basis=risk_basis,
+            terminal_residues=terminal_labels,
             n_cdr=n_cdr,
             n_framework=n_fw,
             n_anchor=n_anchor,
             in_cdr_vicinity=in_vicinity,
             chains=chains,
-            risk=_patch_risk(score, sign, n_cdr > 0),
+            risk=risk,
         )
         patches.append(patch)
     return patches
+
+
+def _sequence_effect(
+    chains: Sequence[ChainInfo],
+    chain_index: int,
+    position: int,
+    mutant: str,
+    pka_set: str,
+    ph: float,
+    formulation_ph: float,
+    termini_mode: str,
+    kind: str,
+) -> Dict[str, Optional[float]]:
+    """Estimate the sequence-level effect of one substitution."""
+    baseline = sequence_pi_table(
+        chains, pka_set, ph=ph, formulation_ph=formulation_ph,
+        termini_mode=termini_mode, kind=kind)
+    mutated: List[ChainInfo] = []
+    for idx, chain in enumerate(chains):
+        seq = chain.sequence
+        if idx == chain_index and 0 <= position < len(seq):
+            seq = seq[:position] + mutant + seq[position + 1:]
+        mutated.append(ChainInfo(
+            name=chain.name, chain_type=chain.chain_type, sequence=seq,
+            structure_chain=chain.structure_chain))
+    after = sequence_pi_table(
+        mutated, pka_set, ph=ph, formulation_ph=formulation_ph,
+        termini_mode=termini_mode, kind=kind)
+    raw_base_pi = baseline.get("pI_selected")
+    raw_new_pi = after.get("pI_selected")
+    raw_base_q = baseline.get("net_charge_selected_formulation_ph")
+    raw_new_q = after.get("net_charge_selected_formulation_ph")
+    base_pi = float(raw_base_pi) if isinstance(raw_base_pi, (int, float)) else None
+    new_pi = float(raw_new_pi) if isinstance(raw_new_pi, (int, float)) else None
+    base_q = float(raw_base_q) if isinstance(raw_base_q, (int, float)) else None
+    new_q = float(raw_new_q) if isinstance(raw_new_q, (int, float)) else None
+    return {
+        "delta_pI_estimate": (None if base_pi is None or new_pi is None
+                              else round(new_pi - base_pi, 3)),
+        "delta_charge_formulation_estimate": (
+            None if base_q is None or new_q is None
+            else round(new_q - base_q, 3)),
+    }
 
 
 def mutation_candidates(
@@ -1018,21 +1517,55 @@ def mutation_candidates(
     residues: Sequence["tap_core.Residue"],
     interface_keys: Optional[Set[Tuple[str, int, str]]] = None,
     vhh_hallmark_keys: Optional[Set[Tuple[str, int, str]]] = None,
+    terminal_keys: Optional[Set[Tuple[str, int, str]]] = None,
+    pka_set: str = "IPC_protein",
+    ph: float = 7.4,
+    formulation_ph: float = 6.0,
+    termini_mode: str = "auto",
+    kind: str = "fab",
 ) -> List[Dict[str, object]]:
     """Suggest conservative framework-local substitutions for a charged patch.
 
     Only residues that move the patch toward neutrality are proposed.  CDR,
-    FR4, VHH-hallmark and (optionally) VH/VL-interface positions are excluded
-    or flagged, because those changes carry affinity/pairing risk.
+    FR4, VHH-hallmark, chain termini and (optionally) VH/VL-interface
+    positions are excluded or flagged, because those changes carry
+    affinity/pairing/processing risk.
+
+    Each candidate also carries a sequence-level what-if estimate
+    (``delta_pI_estimate`` / ``delta_charge_formulation_estimate``) so the
+    user can rank hypotheses before building variants.  The estimate is
+    sequence-based and does not model the structural relaxation of the
+    mutation.
     """
     interface_keys = interface_keys or set()
     vhh_hallmark_keys = vhh_hallmark_keys or set()
+    terminal_keys = terminal_keys or set()
     by_label = {_res_label(r): r for r in residues}
     target_sign = patch.sign
     if target_sign == "mixed":
         if abs(patch.total_charge) < 0.5:
             return []
         target_sign = "positive" if patch.total_charge > 0 else "negative"
+
+    # Chain sequences and residue -> (chain index, sequence position) map.
+    chain_order: List[str] = []
+    chain_residues: Dict[str, List["tap_core.Residue"]] = defaultdict(list)
+    for res in residues:
+        if res.chain not in chain_residues:
+            chain_order.append(res.chain)
+        chain_residues[res.chain].append(res)
+    chain_infos: List[ChainInfo] = []
+    pos_by_key: Dict[Tuple[str, int, str], Tuple[int, int]] = {}
+    for ci, cid in enumerate(chain_order):
+        chain_res = chain_residues[cid]
+        seq = "".join(r.aa for r in chain_res)
+        chain_infos.append(ChainInfo(
+            name="VH" if ci == 0 and kind == "fab" else (
+                "VL" if kind == "fab" else "VHH"),
+            chain_type="H" if ci == 0 else "L",
+            sequence=seq, structure_chain=cid))
+        for pi, res in enumerate(chain_res):
+            pos_by_key[res.key] = (ci, pi)
 
     out: List[Dict[str, object]] = []
     for row in patch.residues:
@@ -1049,8 +1582,13 @@ def mutation_candidates(
             continue
         if res.key in vhh_hallmark_keys:
             continue
-        if aa in ("C",):
-            # Cys is not a charge-patch residue in practice; keep safe.
+        if res.key in terminal_keys:
+            # Changing the first/last residue also changes the terminal pKa
+            # and can create pyroglutamate/processing liabilities.
+            continue
+        if aa in ("C", "Y"):
+            # Cys is handled as a disulfide; Tyr is an aromatic residue whose
+            # mutation is rarely a charge-engineering solution.
             continue
         if target_sign == "negative" and aa in BASIC:
             continue
@@ -1077,6 +1615,17 @@ def mutation_candidates(
         else:
             rationale = ("framework-exposed charge; neutral-polar swap reduces "
                          "the patch without introducing an opposite charge")
+
+        effects: Dict[str, Dict[str, Optional[float]]] = {}
+        loc = pos_by_key.get(res.key)
+        if loc is not None:
+            ci, pos = loc
+            for mutant in neutral[:3]:
+                effects[mutant] = _sequence_effect(
+                    chain_infos, ci, pos, mutant, pka_set, ph,
+                    formulation_ph, termini_mode, kind)
+        first = neutral[0] if neutral else None
+        first_effect = effects.get(first, {}) if first else {}
         out.append({
             "label": str(row["label"]),
             "aa": aa,
@@ -1084,8 +1633,13 @@ def mutation_candidates(
             "rel_sasa": row.get("rel_sasa"),
             "charge": row.get("charge"),
             "is_interface": is_interface,
+            "is_terminus": False,
             "preferred_substitutions": neutral,
             "charge_reversal_options": reversal,
+            "substitution_effects": effects,
+            "delta_pI_estimate": first_effect.get("delta_pI_estimate"),
+            "delta_charge_formulation_estimate": first_effect.get(
+                "delta_charge_formulation_estimate"),
             "risk": risk,
             "rationale": rationale,
         })
@@ -1123,22 +1677,22 @@ def build_recommendations(result: Dict[str, object]) -> List[Dict[str, str]]:
     if isinstance(seq, dict):
         entry = seq.get(pka_set, {}) if pka_set in seq else {}
         if isinstance(entry, dict):
-            pi_seq = entry.get("pI_free")
+            pi_seq = entry.get("pI_selected", entry.get("pI_free"))
 
     pi_struct = None
     if isinstance(struct, dict):
         entry = struct.get(pka_set, {}) if pka_set in struct else {}
         if isinstance(entry, dict):
-            pi_struct = entry.get("pI_free")
+            pi_struct = entry.get("pI_selected", entry.get("pI_free"))
 
     # Prefer the structure-aware value when a structure was analysed.
-    pi_free = pi_struct if pi_struct is not None else pi_seq
-    if pi_free is None and isinstance(fv, dict):
-        pi_free = fv.get("pI_free")
+    pi_selected = pi_struct if pi_struct is not None else pi_seq
+    if pi_selected is None and isinstance(fv, dict):
+        pi_selected = fv.get("pI_selected", fv.get("pI_free"))
 
     # --- pI window ---------------------------------------------------------
-    if pi_free is not None:
-        pi = float(str(pi_free))
+    if pi_selected is not None:
+        pi = float(str(pi_selected))
         if pi < PI_LOW:
             add(
                 "pI", "caution",
@@ -1182,6 +1736,24 @@ def build_recommendations(result: Dict[str, object]) -> List[Dict[str, str]]:
     # --- structure vs sequence --------------------------------------------
     if pi_struct is not None and pi_seq is not None:
         delta = float(str(pi_struct)) - float(str(pi_seq))
+    # also compute selected delta if available
+    pi_seq_sel = None
+    if isinstance(seq, dict):
+        entry = seq.get(pka_set, {}) if pka_set in seq else {}
+        if isinstance(entry, dict):
+            pi_seq_sel = entry.get("pI_selected")
+    if pi_struct is not None and pi_seq_sel is not None:
+        delta_sel = float(str(pi_struct)) - float(str(pi_seq_sel))
+        if abs(delta_sel) >= 0.5:
+            add(
+                "pI", "info",
+                "Structure-aware pI differs from sequence pI by {:+.2f} pH units (selected model)".format(delta_sel),
+                "Buried/salt-bridged ionizable groups shift the effective "
+                "pI. Use the structure-aware value for formulation and "
+                "chromatography planning, but confirm by cIEF. The "
+                "fallback microenvironment model is a screening "
+                "heuristic; install PROPKA for a stronger prediction.",
+            )
         if abs(delta) >= 0.5:
             add(
                 "pI", "info",
@@ -1274,8 +1846,8 @@ def build_recommendations(result: Dict[str, object]) -> List[Dict[str, str]]:
                 )
 
     # --- formulation -------------------------------------------------------
-    if pi_free is not None:
-        pi = float(str(pi_free))
+    if pi_selected is not None:
+        pi = float(str(pi_selected))
         form_ph = result.get("formulation_ph", 6.0)
         try:
             dist = abs(float(str(form_ph)) - pi)
@@ -1342,11 +1914,19 @@ def analyze_sequence(
     ph: float = 7.4,
     formulation_ph: float = 6.0,
     disulfide_mode: str = "auto",
+    termini_mode: str = "auto",
+    kind: Optional[str] = None,
+    ph_grid: Optional[Sequence[float]] = None,
     name: str = "",
     input_path: str = "",
 ) -> Dict[str, object]:
     """Sequence-only pI analysis (no structure)."""
     pka_set = normalize_pka_set(pka_set)
+    if kind is None:
+        kind = "fab" if len(chains) >= 2 else "vhh"
+    resolved_termini = resolve_termini_mode(termini_mode, kind)
+    capped = resolved_termini in ("capped", "blocked")
+    n_blocked = resolved_termini == "blocked"
     warnings: List[str] = []
     chains = [
         ChainInfo(name=c.name, chain_type=c.chain_type,
@@ -1377,47 +1957,95 @@ def analyze_sequence(
     else:
         raise ValueError("--disulfide must be auto, exclude, or free")
 
-    sets = list(PKA_SETS) if all_pka_sets else [pka_set]
-    seq_table: Dict[str, object] = {}
-    for s in sets:
-        seq_table[s] = sequence_pi_table(chains, s)
+    # Compute every pKa set once: the selected set is reported and the full
+    # set provides the pKa-model uncertainty range.
+    all_tables: Dict[str, object] = {}
+    for s in PKA_SETS:
+        all_tables[s] = sequence_pi_table(
+            chains, s, ph=ph, formulation_ph=formulation_ph,
+            termini_mode=termini_mode, kind=kind)
+    seq_table: Dict[str, object] = (
+        all_tables if all_pka_sets else {pka_set: all_tables[pka_set]})
 
-    chain_table = chain_pi_table(chains, pka_set, ph=ph, formulation_ph=formulation_ph)
+    selected_pis: List[float] = []
+    for entry in all_tables.values():
+        if isinstance(entry, dict):
+            value = entry.get("pI_selected")
+            if isinstance(value, (int, float)):
+                selected_pis.append(float(value))
+    pI_range = ([round(min(selected_pis), 3), round(max(selected_pis), 3)]
+                if selected_pis else None)
+
+    chain_table = chain_pi_table(
+        chains, pka_set, ph=ph, formulation_ph=formulation_ph,
+        termini_mode=resolved_termini)
     groups, termini = _make_groups_from_sequence(chains, pka_set)
     pi_free = isoelectric_point(groups, termini)
     pi_capped = isoelectric_point(groups, termini, capped_cterm=True)
-    q74 = net_charge(groups, termini, ph)
-    qform = net_charge(groups, termini, formulation_ph)
+    pi_selected = isoelectric_point(
+        groups, termini, capped_cterm=capped, blocked_nterm=n_blocked)
+    q74 = net_charge(groups, termini, ph, capped_cterm=capped,
+                     blocked_nterm=n_blocked)
+    qform = net_charge(groups, termini, formulation_ph, capped_cterm=capped,
+                       blocked_nterm=n_blocked)
+    q74_free = net_charge(groups, termini, ph)
     q74_capped = net_charge(groups, termini, ph, capped_cterm=True)
 
     fv: Dict[str, object] = {
         "pI_free": pi_free,
         "pI_capped": pi_capped,
+        "pI_selected": pi_selected,
+        "pI_range": pI_range,
+        "termini_mode": resolved_termini,
         "net_charge_ph": q74,
         "net_charge_ph74": q74,
+        "net_charge_ph74_free": q74_free,
         "net_charge_formulation_ph": qform,
         "net_charge_ph74_capped": q74_capped,
         "Fv_chml": None,
+        "Fv_chml_total": None,
+        "Fv_chml_surface": None,
         "SFvCSP": None,
+        "SFvCSP_total": None,
+        "SFvCSP_surface": None,
         "surface_charge_vh": None,
         "surface_charge_vl": None,
+        "total_charge_vh": None,
+        "total_charge_vl": None,
     }
     if len(chains) >= 2:
         q_by_chain = {}
         for c in chains:
             g, t = _make_groups_from_sequence([c], pka_set)
-            q_by_chain[c.name] = net_charge(g, t, ph)
+            q_by_chain[c.name] = net_charge(
+                g, t, ph, capped_cterm=capped, blocked_nterm=n_blocked)
         if "VH" in q_by_chain and "VL" in q_by_chain:
-            fv["Fv_chml"] = q_by_chain["VH"] - q_by_chain["VL"]
+            chml = q_by_chain["VH"] - q_by_chain["VL"]
+            fv["Fv_chml"] = chml          # back-compatible total-charge alias
+            fv["Fv_chml_total"] = chml
             fv["SFvCSP"] = q_by_chain["VH"] * q_by_chain["VL"]
-            fv["surface_charge_vh"] = q_by_chain["VH"]
-            fv["surface_charge_vl"] = q_by_chain["VL"]
+            fv["SFvCSP_total"] = fv["SFvCSP"]
+            fv["SFvCSP_surface"] = None
+            fv["total_charge_vh"] = q_by_chain["VH"]
+            fv["total_charge_vl"] = q_by_chain["VL"]
+
+    curve = charge_curve(
+        groups, termini, ph_grid or default_ph_grid(),
+        capped_cterm=capped, blocked_nterm=n_blocked)
+    sensitivity = {
+        "pka_sets": {
+            s: (entry.get("pI_selected") if isinstance(entry, dict) else None)
+            for s, entry in all_tables.items()},
+        "pI_selected_range": pI_range,
+        "termini_mode": resolved_termini,
+    }
 
     result: Dict[str, object] = {
         "name": name or "sequence",
         "input": {
             "type": "sequence",
             "path": input_path,
+            "kind": kind,
             "chains": [{"name": c.name, "chain_type": c.chain_type,
                         "length": len(c.sequence)} for c in chains],
         },
@@ -1426,13 +2054,17 @@ def analyze_sequence(
         "ph": ph,
         "formulation_ph": formulation_ph,
         "disulfide_mode": disulfide_mode,
+        "termini_mode": resolved_termini,
         "sequence_pI": seq_table,
         "structure_pI": {},
+        "sensitivity": sensitivity,
+        "charge_curve": curve,
         "chains": chain_table,
         "fv": fv,
         "tap": {},
         "patches": [],
         "ionizable_residues": [],
+        "structure_quality": None,
         "recommendations": [],
         "warnings": warnings,
     }
@@ -1514,6 +2146,9 @@ def analyze_structure(
     disulfide_mode: str = "auto",
     structure_model: str = "heuristic",
     tap_thresholds: str = "2024",
+    termini_mode: str = "auto",
+    ionic_strength: float = IONIC_STRENGTH_DEFAULT,
+    ph_grid: Optional[Sequence[float]] = None,
     name: str = "",
 ) -> Dict[str, object]:
     """Structure-aware pI + TAP + charge-patch analysis for an Fv/VHH."""
@@ -1522,12 +2157,17 @@ def analyze_structure(
         raise ValueError("--structure-model must be heuristic, propka, or none")
     if disulfide_mode not in ("auto", "exclude", "free"):
         raise ValueError("--disulfide must be auto, exclude, or free")
+    if ionic_strength < 0.0:
+        raise ValueError("--ionic-strength must be >= 0")
 
     warnings: List[str] = []
     all_residues = tap_core.load_residues(pdb_path)
     vh, vl, chain_warnings, kind = _select_chains_structure(
         all_residues, vh_chain, vl_chain)
     warnings.extend(chain_warnings)
+    resolved_termini = resolve_termini_mode(termini_mode, kind)
+    capped = resolved_termini in ("capped", "blocked")
+    n_blocked = resolved_termini == "blocked"
 
     # Number and trim the Fv chains to the V domain.
     fvi: List["tap_core.Residue"] = []
@@ -1567,6 +2207,12 @@ def analyze_structure(
         if dist <= INTERFACE_CUTOFF and fvi[i].chain != fvi[j].chain:
             interface_keys.add(fvi[i].key)
             interface_keys.add(fvi[j].key)
+    terminal_keys: Set[Tuple[str, int, str]] = set()
+    for cid in chain_order:
+        chain_res = [r for r in fvi if r.chain == cid]
+        if chain_res:
+            terminal_keys.add(chain_res[0].key)
+            terminal_keys.add(chain_res[-1].key)
     psh, ppc, pnc = tap_core.compute_surface_scores(fvi, pair_dist)
     ltot = sum(1 for r in fvi if r.is_cdr)
 
@@ -1625,14 +2271,16 @@ def analyze_structure(
                     "No disulfide bond detected; Cys treated as ionizable "
                     "(use --disulfide exclude to force exclusion).")
 
-    # Microenvironment interactions.
-    salt_keys, salt_pairs = detect_salt_bridges(fvi)
-    hbond_keys = detect_hbonds(fvi, salt_keys)
+    # Microenvironment interactions.  The pKa salt-bridge definition is
+    # intentionally broader than TAP's exposed 3.2 A rule; both are reported.
+    salt_keys, salt_pairs, salt_dists = detect_salt_bridges(fvi)
+    hbond_keys, hbond_dists = detect_hbonds(fvi, salt_keys)
 
-    # Optional PROPKA.
+    # Optional PROPKA (side-chain and terminal pKa).
     propka_pka = None
+    propka_termini: Dict[Tuple[str, str], float] = {}
     if structure_model == "propka":
-        propka_pka, err = run_propka(pdb_path)
+        propka_pka, propka_termini, err = run_propka_full(pdb_path)
         if propka_pka is None:
             raise RuntimeError(
                 "PROPKA requested but unavailable: {}. Install propka3 or use "
@@ -1642,6 +2290,10 @@ def analyze_structure(
             warnings.append(
                 "PROPKA is installed but --structure-model heuristic was "
                 "selected; use --structure-model propka for PROPKA pKa values.")
+
+    # Structure quality (pLDDT proxy, missing side chains, chain breaks).
+    quality = assess_structure_quality(fvi, kind)
+    warnings.extend(structure_quality_warnings(quality))
 
     # Sequence pI table (using the modelled V-domain sequences).
     chains_info: List[ChainInfo] = []
@@ -1655,49 +2307,92 @@ def analyze_structure(
     if len(chains_info) == 1:
         chains_info[0].name = "VHH"
 
-    sets = list(PKA_SETS) if all_pka_sets else [pka_set]
-    seq_table: Dict[str, object] = {}
-    struct_table: Dict[str, object] = {}
-    for s in sets:
-        seq_table[s] = sequence_pi_table(chains_info, s)
-        groups, termini = structure_groups(
+    propka_arg = propka_pka if structure_model == "propka" else None
+    propka_term_arg = propka_termini if structure_model == "propka" else None
+
+    # Compute every pKa set: the selected set is reported and the full set
+    # provides the pKa-model uncertainty range.
+    all_struct: Dict[str, Dict[str, object]] = {}
+    all_seq: Dict[str, Dict[str, object]] = {}
+    selected_pis: List[float] = []
+    for s in PKA_SETS:
+        groups_s, termini_s = structure_groups(
             fvi, s, disulfide_keys, salt_keys, hbond_keys,
-            propka_pka=propka_pka if structure_model == "propka" else None,
+            propka_pka=propka_arg,
             model=structure_model,
+            salt_distances=salt_dists,
+            hbond_distances=hbond_dists,
+            ionic_strength=ionic_strength,
+            propka_termini=propka_term_arg,
         )
-        pi_free = isoelectric_point(groups, termini)
-        pi_capped = isoelectric_point(groups, termini, capped_cterm=True)
-        q74 = net_charge(groups, termini, ph)
-        qform = net_charge(groups, termini, formulation_ph)
-        seq_entry = seq_table[s]  # type: ignore[assignment]
+        pi_free = isoelectric_point(groups_s, termini_s)
+        pi_capped = isoelectric_point(groups_s, termini_s, capped_cterm=True)
+        pi_blocked = isoelectric_point(
+            groups_s, termini_s, capped_cterm=True, blocked_nterm=True)
+        pi_selected = isoelectric_point(
+            groups_s, termini_s, capped_cterm=capped, blocked_nterm=n_blocked)
+        q74 = net_charge(groups_s, termini_s, ph, capped_cterm=capped,
+                         blocked_nterm=n_blocked)
+        qform = net_charge(groups_s, termini_s, formulation_ph,
+                           capped_cterm=capped, blocked_nterm=n_blocked)
+        if pi_selected is not None:
+            selected_pis.append(float(pi_selected))
+        seq_entry = sequence_pi_table(
+            chains_info, s, ph=ph, formulation_ph=formulation_ph,
+            termini_mode=termini_mode, kind=kind)
+        all_seq[s] = seq_entry
         delta = None
-        if isinstance(seq_entry, dict) and seq_entry.get("pI_free") is not None and pi_free is not None:
-            delta = pi_free - float(seq_entry["pI_free"])
-        struct_table[s] = {
+        delta_free = None
+        if isinstance(seq_entry, dict):
+            seq_sel = seq_entry.get("pI_selected")
+            seq_free = seq_entry.get("pI_free")
+            if isinstance(seq_sel, (int, float)) and pi_selected is not None:
+                delta = pi_selected - float(seq_sel)
+            if isinstance(seq_free, (int, float)) and pi_free is not None:
+                delta_free = pi_free - float(seq_free)
+        all_struct[s] = {
             "pI_free": pi_free,
             "pI_capped": pi_capped,
+            "pI_blocked": pi_blocked,
+            "pI_selected": pi_selected,
             "net_charge_ph": q74,
             "net_charge_ph74": q74,
             "net_charge_formulation_ph": qform,
             "delta_vs_sequence": delta,
+            "delta_vs_sequence_free": delta_free,
             "model": structure_model,
-            "n_groups": len(groups),
+            "n_groups": len(groups_s),
         }
+
+    seq_table: Dict[str, Dict[str, object]] = (
+        all_seq if all_pka_sets else {pka_set: all_seq[pka_set]})
+    struct_table: Dict[str, Dict[str, object]] = (
+        all_struct if all_pka_sets else {pka_set: all_struct[pka_set]})
+    pI_range = ([round(min(selected_pis), 3), round(max(selected_pis), 3)]
+                if selected_pis else None)
 
     # Per-chain table and charge descriptors at the selected pKa set.
     groups, termini = structure_groups(
         fvi, pka_set, disulfide_keys, salt_keys, hbond_keys,
-        propka_pka=propka_pka if structure_model == "propka" else None,
+        propka_pka=propka_arg,
         model=structure_model,
+        salt_distances=salt_dists,
+        hbond_distances=hbond_dists,
+        ionic_strength=ionic_strength,
+        propka_termini=propka_term_arg,
     )
     groups_by_key = {(g.structure_chain, g.resseq, g.icode): g for g in groups}
     chain_table: Dict[str, Dict[str, object]] = {}
+    total_q_by_chain: Dict[str, float] = {}
     for cid, ctype, label in ((vh, "H", "VH"), (vl, "L", "VL")):
         if cid is None:
             continue
         chain_groups = [g for g in groups if g.structure_chain == cid]
         chain_termini = [t for t in termini if t.chain == cid]
         seq = "".join(r.aa for r in fvi if r.chain == cid)
+        q_sel = net_charge(chain_groups, chain_termini, ph,
+                           capped_cterm=capped, blocked_nterm=n_blocked)
+        total_q_by_chain[label] = q_sel
         chain_table[label] = {
             "chain_type": ctype,
             "structure_chain": cid,
@@ -1706,28 +2401,53 @@ def analyze_structure(
             "pI_free": isoelectric_point(chain_groups, chain_termini),
             "pI_capped": isoelectric_point(chain_groups, chain_termini,
                                            capped_cterm=True),
-            "net_charge_ph74": net_charge(chain_groups, chain_termini, ph),
+            "pI_selected": isoelectric_point(
+                chain_groups, chain_termini, capped_cterm=capped,
+                blocked_nterm=n_blocked),
+            "net_charge_ph74": q_sel,
+            "net_charge_ph74_free": net_charge(chain_groups, chain_termini, ph),
             "net_charge_formulation_ph": net_charge(
-                chain_groups, chain_termini, formulation_ph),
+                chain_groups, chain_termini, formulation_ph,
+                capped_cterm=capped, blocked_nterm=n_blocked),
             "n_ionizable": len(chain_groups),
         }
 
-    pi_free = struct_table[pka_set]["pI_free"]  # type: ignore[index]
-    pi_capped = struct_table[pka_set]["pI_capped"]  # type: ignore[index]
-    q74 = struct_table[pka_set]["net_charge_ph74"]  # type: ignore[index]
-    qform = struct_table[pka_set]["net_charge_formulation_ph"]  # type: ignore[index]
+    pi_free = float(str(struct_table[pka_set]["pI_free"]))
+    pi_capped = float(str(struct_table[pka_set]["pI_capped"]))
+    pi_selected = float(str(struct_table[pka_set]["pI_selected"]))
+    q74 = float(str(struct_table[pka_set]["net_charge_ph74"]))
+    qform = float(str(struct_table[pka_set]["net_charge_formulation_ph"]))
+
+    total_vh = total_q_by_chain.get("VH", total_q_by_chain.get("VHH"))
+    total_vl = total_q_by_chain.get("VL")
+    fv_chml_total = (total_vh - total_vl
+                     if total_vh is not None and total_vl is not None else None)
+    fv_chml_surface = (qh - ql
+                       if qh is not None and ql is not None else None)
+    sfvcsp_total = (total_vh * total_vl
+                    if total_vh is not None and total_vl is not None else None)
 
     # Surface charges use TAP's exposed-residue definition at pH 7.4.
     fv: Dict[str, object] = {
         "pI_free": pi_free,
         "pI_capped": pi_capped,
+        "pI_selected": pi_selected,
+        "pI_range": pI_range,
+        "termini_mode": resolved_termini,
         "net_charge_ph": q74,
         "net_charge_ph74": q74,
         "net_charge_formulation_ph": qform,
-        "Fv_chml": (qh - ql) if (qh is not None and ql is not None) else None,
+        "Fv_chml": (fv_chml_surface if fv_chml_surface is not None
+                    else fv_chml_total),
+        "Fv_chml_total": fv_chml_total,
+        "Fv_chml_surface": fv_chml_surface,
         "SFvCSP": sfvcsp,
+        "SFvCSP_surface": sfvcsp,
+        "SFvCSP_total": sfvcsp_total,
         "surface_charge_vh": qh,
         "surface_charge_vl": ql,
+        "total_charge_vh": total_vh,
+        "total_charge_vl": total_vl,
     }
 
     # Patch analysis at formulation and physiological pH.
@@ -1735,28 +2455,37 @@ def analyze_structure(
     for patch_ph in sorted({float(formulation_ph), float(ph)}):
         for patch in cluster_patches(
                 fvi, pair_dist, patch_ph, groups_by_key=groups_by_key,
-                interface_keys=interface_keys):
+                interface_keys=interface_keys, terminal_keys=terminal_keys):
             row = {
                 "patch_id": patch.patch_id,
                 "sign": patch.sign,
                 "ph": patch.ph,
                 "total_charge": patch.total_charge,
                 "score": patch.score,
+                "score_tap": patch.score_tap,
                 "risk": patch.risk,
+                "risk_basis": patch.risk_basis,
                 "n_cdr": patch.n_cdr,
                 "n_framework": patch.n_framework,
                 "n_anchor": patch.n_anchor,
                 "in_cdr_vicinity": patch.in_cdr_vicinity,
+                "terminal_residues": patch.terminal_residues,
                 "chains": patch.chains,
                 "residues": patch.residues,
                 "mutation_candidates": mutation_candidates(
                     patch, fvi, interface_keys=interface_keys,
-                    vhh_hallmark_keys=vhh_hallmark_keys),
+                    vhh_hallmark_keys=vhh_hallmark_keys,
+                    terminal_keys=terminal_keys,
+                    pka_set=pka_set, ph=ph,
+                    formulation_ph=formulation_ph,
+                    termini_mode=resolved_termini, kind=kind),
             }
             patches.append(row)
 
     ionizable_rows = []
     for g in sorted(groups, key=lambda x: (x.structure_chain or "", x.resseq, x.icode)):
+        key = (None if g.structure_chain is None
+               else (g.structure_chain, g.resseq, g.icode))
         ionizable_rows.append({
             "label": g.label,
             "chain": g.structure_chain,
@@ -1772,10 +2501,40 @@ def analyze_structure(
             "salt_bridge": g.salt_bridge,
             "hbond": g.hbond,
             "disulfide": g.disulfide,
+            "salt_bridge_distance": (None if key is None or key not in salt_dists
+                                     else round(salt_dists[key], 2)),
+            "hbond_distance": (None if key is None or key not in hbond_dists
+                               else round(hbond_dists[key], 2)),
             "charge_ph74": round(g.charge(ph), 3),
             "charge_formulation_ph": round(g.charge(formulation_ph), 3),
             "reason": g.shift_reason,
         })
+
+    curve = charge_curve(
+        groups, termini, ph_grid or default_ph_grid(),
+        capped_cterm=capped, blocked_nterm=n_blocked)
+    sensitivity = {
+        "pka_sets": {
+            s: (entry.get("pI_selected") if isinstance(entry, dict) else None)
+            for s, entry in all_struct.items()},
+        "pI_selected_range": pI_range,
+        "termini_mode": resolved_termini,
+        "structure_model": structure_model,
+        "sasa_engine": engine,
+        "ionic_strength": ionic_strength,
+    }
+
+    if pI_range and (pI_range[1] - pI_range[0]) >= 0.5:
+        warnings.append(
+            "pI is sensitive to the pKa model (selected pI range {:.2f}-{:.2f} "
+            "across bundled sets); report a range rather than a single value."
+            .format(pI_range[0], pI_range[1]))
+    if pi_capped is not None and pi_free is not None and abs(pi_capped - pi_free) >= 0.5:
+        warnings.append(
+            "Terminus model changes Fv pI by {:+.2f} units (free vs capped). "
+            "The selected '{}' value is used for recommendations; confirm the "
+            "construct's C-terminal fusion state.".format(
+                pi_capped - pi_free, resolved_termini))
 
     result: Dict[str, object] = {
         "name": name or os.path.splitext(os.path.basename(pdb_path))[0],
@@ -1794,8 +2553,12 @@ def analyze_structure(
         "disulfide_mode": disulfide_mode,
         "structure_model": structure_model,
         "sasa_engine": engine,
+        "termini_mode": resolved_termini,
+        "ionic_strength": ionic_strength,
         "sequence_pI": seq_table,
         "structure_pI": struct_table,
+        "sensitivity": sensitivity,
+        "charge_curve": curve,
         "chains": chain_table,
         "fv": fv,
         "tap": {
@@ -1807,11 +2570,20 @@ def analyze_structure(
             "n_cdr_vicinity": counts["n_cdr_vicinity"],
             "n_cdr_residues": counts["n_cdr"],
             "n_salt_bridges": counts["n_salt_bridges"],
+            "n_salt_bridges_tap": counts["n_salt_bridges"],
+            "n_salt_bridges_pka": len(salt_pairs),
+            "n_salt_bridge_residues_pka": len(salt_keys),
             "salt_bridges": salt_pairs,
+            "salt_bridges_pka": salt_pairs,
+            "salt_bridge_definitions": {
+                "tap": "3.2 A, both partners exposed, one partner per residue",
+                "pka_microenvironment": "4.0 A, any burial, multiple partners",
+            },
             "n_residues": counts["n_residues"],
         },
         "patches": patches,
         "ionizable_residues": ionizable_rows,
+        "structure_quality": quality,
         "recommendations": [],
         "warnings": warnings,
     }

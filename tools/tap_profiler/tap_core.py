@@ -198,6 +198,7 @@ class Residue:
 
     imgt_pos: Optional[int] = None
     imgt_ins: str = ""
+    bfactor: Optional[float] = None
     rel_sasa: float = 0.0
     is_surface: bool = False
     is_cdr: bool = False
@@ -296,6 +297,11 @@ def parse_pdb(path: str) -> List[Residue]:
                     resname=resname, aa=AA3TO1[resname],
                 ))
             residues[index[key]].atoms.append((raw_name, element, x, y, z))
+            if name == "CA":
+                try:
+                    residues[index[key]].bfactor = float(line[60:66])
+                except (ValueError, IndexError):
+                    pass
     return residues
 
 
@@ -365,6 +371,12 @@ def parse_cif(path: str) -> List[Residue]:
                     resname=resname, aa=AA3TO1[resname],
                 ))
             residues[index[key]].atoms.append((raw_name, element, x, y, z))
+            if name == "CA":
+                try:
+                    residues[index[key]].bfactor = float(
+                        d.get("B_iso_or_equiv", ""))
+                except (TypeError, ValueError):
+                    pass
     return residues
 
 

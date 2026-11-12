@@ -38,6 +38,7 @@ from pi_core import (  # noqa: E402
     mutation_candidates,
     net_charge,
     parse_propka_pka,
+    parse_propka_summary,
     sequence_pi_table,
 )
 
@@ -255,8 +256,27 @@ def test_structure_end_to_end():
     check(result["input"]["vl_chain"] == "L", "VL chain detection")
     check(result["structure_pI"], "structure pI table missing")
     check(result["fv"]["pI_free"] is not None, "Fv pI missing")
+    check(result["fv"]["pI_selected"] is not None, "selected pI missing")
+    check(result["termini_mode"] == "capped", "Fab should default to capped termini")
     check(result["fv"]["Fv_chml"] is not None, "Fv_chml missing")
+    check(result["fv"]["Fv_chml_total"] is not None, "total Fv_chml missing")
     check(result["fv"]["SFvCSP"] is not None, "SFvCSP missing")
+    check(result["fv"]["SFvCSP_total"] is not None, "total SFvCSP missing")
+    check(result["sensitivity"]["pI_selected_range"] is not None,
+          "pKa sensitivity range missing")
+    check(len(result["sensitivity"]["pka_sets"]) == len(pi_core.PKA_SETS),
+          "sensitivity should cover every bundled pKa set")
+    curve = result["charge_curve"]
+    check(len(curve) >= 2 and all("net_charge" in p for p in curve),
+          "charge curve missing")
+    check(all(curve[i]["net_charge"] >= curve[i + 1]["net_charge"] - 1e-6
+              for i in range(len(curve) - 1)),
+          "net charge should decrease with pH")
+    check(result["structure_quality"]["n_residues"] > 0,
+          "structure quality missing")
+    check(result["tap"]["n_salt_bridges_tap"] is not None
+          and result["tap"]["n_salt_bridges_pka"] is not None,
+          "both salt-bridge definitions should be reported")
     check(result["tap"]["metrics"]["Ltot"] > 0, "TAP Ltot missing")
     check(result["patches"], "expected charge patches")
     for patch in result["patches"]:
@@ -279,6 +299,7 @@ def test_patch_candidate_filters():
         _residue("H", 13, "D", 118),                       # FR4 acid
         _residue("H", 14, "K", 42),                        # VHH hallmark
         _residue("H", 15, "D", 15, in_cdr_vicinity=True),  # vicinity acid
+        _residue("H", 16, "D", 1),                        # N-terminal acid
     ]
     patch = Patch(
         patch_id=1, sign="negative", ph=6.0, total_charge=-3.0,
@@ -295,12 +316,15 @@ def test_patch_candidate_filters():
              "charge": 1.0, "in_cdr_vicinity": False},
             {"label": "H15", "aa": "D", "region": "FR1", "rel_sasa": 50.0,
              "charge": -1.0, "in_cdr_vicinity": True},
+            {"label": "H16", "aa": "D", "region": "FR1", "rel_sasa": 50.0,
+             "charge": -1.0, "in_cdr_vicinity": False},
         ],
     )
     cands = mutation_candidates(
         patch, residues,
         interface_keys={("H", 15, " ")},
-        vhh_hallmark_keys={("H", 14, " ")})
+        vhh_hallmark_keys={("H", 14, " ")},
+        terminal_keys={("H", 16, " ")})
     labels = {c["label"] for c in cands}
     check("H10" in labels, "framework acid should be a candidate")
     check("H11" not in labels, "positive residue must not be mutated in a negative patch")
@@ -308,8 +332,15 @@ def test_patch_candidate_filters():
     check("H13" not in labels, "FR4 residue must be excluded")
     check("H14" not in labels, "VHH hallmark must be excluded")
     check("H15" in labels, "vicinity acid should remain a candidate")
+    check("H16" not in labels, "N-terminal residue must be excluded")
     h15 = [c for c in cands if c["label"] == "H15"][0]
     check(h15["risk"] == "high", "interface candidate should be high risk")
+    check(isinstance(h15.get("delta_pI_estimate"), (int, float))
+          and isinstance(h15.get("delta_charge_formulation_estimate"), (int, float)),
+          "candidate should carry what-if estimates")
+    effects = h15.get("substitution_effects", {})
+    check(effects and set(effects) <= {"Q", "N", "S", "T", "A"},
+          "candidate should carry per-substitution effects")
 
     positive = Patch(
         patch_id=2, sign="positive", ph=6.0, total_charge=2.0,
@@ -349,7 +380,8 @@ def test_reports_and_cli():
             check("# pI / Fv Charge Analysis" in fh.read(), "Markdown header")
         with open(csv_path) as fh:
             header = fh.readline()
-        check("pI_free" in header and "Fv_chml" in header, "CSV header")
+        check("pI_selected" in header and "Fv_chml_total" in header,
+              "CSV header")
 
         proc = subprocess.run(
             [sys.executable, os.path.join(TOOL, "pi_analyzer.py"), "--check"],
@@ -390,6 +422,69 @@ def test_structure_model_none():
           "microenvironment correction should change pI")
 
 
+def test_termini_and_charge_curve():
+    fab = analyze_sequence(
+        [ChainInfo(name="VH", chain_type="H", sequence=VH_4D5),
+         ChainInfo(name="VL", chain_type="L", sequence=VL_4D5)],
+        pka_set="IPC_protein", all_pka_sets=True, termini_mode="auto")
+    check(fab["termini_mode"] == "capped", "Fab auto termini should be capped")
+    check(abs(fab["fv"]["pI_selected"] - fab["fv"]["pI_capped"]) < 1e-9,
+          "Fab selected pI should equal capped pI")
+
+    vhh = analyze_sequence(
+        [ChainInfo(name="VHH", chain_type="H", sequence=VH_4D5)],
+        pka_set="IPC_protein", all_pka_sets=True, termini_mode="auto")
+    check(vhh["termini_mode"] == "free", "VHH auto termini should be free")
+    check(abs(vhh["fv"]["pI_selected"] - vhh["fv"]["pI_free"]) < 1e-9,
+          "VHH selected pI should equal free pI")
+
+    free_fab = analyze_sequence(
+        [ChainInfo(name="VH", chain_type="H", sequence=VH_4D5),
+         ChainInfo(name="VL", chain_type="L", sequence=VL_4D5)],
+        pka_set="IPC_protein", termini_mode="free")
+    check(fab["fv"]["pI_selected"] > free_fab["fv"]["pI_selected"],
+          "capped Fab pI should exceed free Fab pI")
+
+    curve = fab["charge_curve"]
+    check(len(curve) >= 10, "default pH grid should have >= 10 points")
+    check(all(curve[i]["net_charge"] >= curve[i + 1]["net_charge"] - 1e-6
+              for i in range(len(curve) - 1)),
+          "net charge should be monotonic decreasing in pH")
+    rng = fab["sensitivity"]["pI_selected_range"]
+    check(rng[0] - 0.01 <= fab["fv"]["pI_selected"] <= rng[1] + 0.01,
+          "selected pI should lie inside the sensitivity range")
+
+
+def test_propka_termini_parser():
+    text = """
+SUMMARY OF THIS PREDICTION
+       Group      pKa  model-pKa   q    RMS  (SD)
+  ASP  25 A   3.80    3.80
+  N+    1 A   8.10    8.00
+  C-  127 A   3.30    3.20
+"""
+    side, termini = parse_propka_summary(text)
+    check(side[("A", 25, " ")] == 3.80, "side-chain pKa parse")
+    check(termini[("A", "N")] == 8.10, "N-terminal PROPKA pKa parse")
+    check(termini[("A", "C")] == 3.30, "C-terminal PROPKA pKa parse")
+    check(parse_propka_pka(text) == side, "parse_propka_pka wrapper")
+
+
+def test_patch_risk_calibration():
+    low, basis = pi_core._patch_risk(0.40, "positive", False, 3.0)
+    elevated, _ = pi_core._patch_risk(0.60, "positive", False, 3.0)
+    elevated_cdr, basis_cdr = pi_core._patch_risk(0.60, "positive", True, 3.0)
+    high, _ = pi_core._patch_risk(2.50, "positive", False, 3.0)
+    check(low == "low" and elevated == "elevated" and high == "high",
+          "positive patch risk bands")
+    check(elevated_cdr in ("elevated", "high"),
+          "CDR vicinity should not lower patch risk")
+    check("cdr" in basis_cdr.lower(), "CDR penalty should be documented in basis")
+    balanced, balanced_basis = pi_core._patch_risk(0.10, "mixed", False, 0.0)
+    check(balanced == "low" and "balanced" in balanced_basis.lower(),
+          "balanced mixed patch should be low risk")
+
+
 def run_all_tests():
     tests = [
         test_pka_tables_and_aliases,
@@ -403,6 +498,9 @@ def run_all_tests():
         test_patch_candidate_filters,
         test_reports_and_cli,
         test_structure_model_none,
+        test_termini_and_charge_curve,
+        test_propka_termini_parser,
+        test_patch_risk_calibration,
     ]
     passed = failed = 0
     for test in tests:
