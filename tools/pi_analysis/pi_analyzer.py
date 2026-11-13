@@ -34,6 +34,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+import pi_core  # noqa: E402
 from pi_core import (  # noqa: E402
     PKA_SETS,
     ChainInfo,
@@ -905,15 +906,70 @@ def _parse_fasta(path: str) -> List[Tuple[str, str]]:
     return records
 
 
-def _infer_chain_type(name: str, index: int, total: int) -> str:
+def _infer_chain_type(name: str, index: int, total: int) -> Tuple[str, str]:
+    """Return (chain type, source) for one FASTA record.
+
+    ``source`` is ``"header"`` when the record name states the chain type
+    explicitly and ``"order"`` when the file order was used as a fallback.
+    """
     upper = name.upper()
     if re.search(r"(^|[_\s.-])VH([_\s.-]|$)|HEAVY|(^|[_\s.-])H([_\s.-]|$)", upper):
-        return "H"
+        return "H", "header"
     if re.search(r"(^|[_\s.-])VL([_\s.-]|$)|LIGHT|KAPPA|LAMBDA|(^|[_\s.-])L([_\s.-]|$)", upper):
-        return "L"
+        return "L", "header"
     if total == 1:
+        return "H", "order"
+    return ("H" if index == 0 else "L"), "order"
+
+
+def _infer_chain_type_from_sequence(seq: str) -> Optional[str]:
+    """Classify a sequence as a heavy or a light chain from its content.
+
+    A record name is only a hint; the sequence itself decides.  Two
+    classifiers are tried, in order of confidence:
+
+    1. ANARCI's HMM assignment (the same engine the structure path uses),
+       which returns the best domain hit together with its chain type;
+    2. the repo's portable numbering engine, whose conserved FR3 Cys anchor
+       separates the two: a heavy V domain carries Cys92 and a light one
+       Cys88, so for a well-formed domain exactly one of ``number_heavy`` /
+       ``number_light`` succeeds.
+
+    Returns ``"H"``, ``"L"`` or ``None`` when the sequence cannot be
+    classified.  ``None`` means "no opinion", not "not an antibody".
+    """
+    if not seq:
+        return None
+    try:
+        import tap_core
+        ctype = tap_core._anarci_chain_type(seq)
+    except Exception:
+        ctype = None
+    if ctype in ("H", "K", "L"):
+        return "H" if ctype == "H" else "L"
+    try:
+        from scripts.humanize import numbering as _numbering
+    except Exception:
+        return None
+    heavy_ok = light_ok = False
+    try:
+        _numbering.number_heavy(seq)
+        heavy_ok = True
+    except Exception:
+        heavy_ok = False
+    try:
+        _numbering.number_light(seq)
+        light_ok = True
+    except Exception:
+        light_ok = False
+    if heavy_ok and not light_ok:
         return "H"
-    return "H" if index == 0 else "L"
+    if light_ok and not heavy_ok:
+        return "L"
+    if heavy_ok and light_ok:
+        # A heavy-like domain that also numbers as a light chain is VHH-like.
+        return "H"
+    return None
 
 
 def _load_fasta_chains(path: str) -> List[ChainInfo]:
@@ -933,9 +989,22 @@ def _load_fasta_chains(path: str) -> List[ChainInfo]:
     if len(cleaned) == 1:
         return [ChainInfo(name="VHH", chain_type="H", sequence=cleaned[0][1])]
 
-    types = [_infer_chain_type(name, i, 2) for i, (name, _seq) in enumerate(cleaned)]
+    inferred = [_infer_chain_type(name, i, 2) for i, (name, _seq) in enumerate(cleaned)]
+    types = [t for t, _src in inferred]
+    sources = [src for _t, src in inferred]
+
+    # An explicit header wins, but the sequence content is used whenever the
+    # header does not state the chain type: file order alone is a guess, and
+    # a two-record FASTA whose light chain comes first would otherwise be
+    # assigned backwards.
+    if sources[0] == "order" or sources[1] == "order":
+        content = [_infer_chain_type_from_sequence(seq)
+                   for _name, seq in cleaned]
+        if content[0] and content[1] and content[0] != content[1]:
+            types = [content[0], content[1]]
+
     if types[0] == types[1]:
-        # Ambiguous headers: preserve file order as VH, VL.
+        # Still ambiguous: preserve file order as VH, VL.
         return [
             ChainInfo(name="VH", chain_type="H", sequence=cleaned[0][1]),
             ChainInfo(name="VL", chain_type="L", sequence=cleaned[1][1]),
@@ -1023,6 +1092,23 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                         help="Path to the JOY psa executable")
     parser.add_argument("--tap-thresholds", choices=("2024", "2019", "exscientia", "legacy"),
                         default="2024", help="TAP flag thresholds (default: 2024)")
+    parser.add_argument("--provenance", choices=("auto", "predicted", "experimental"),
+                        default="auto",
+                        help="How to read the B-factor column: auto (header, "
+                             "then file content), predicted (pLDDT), or "
+                             "experimental (crystallographic B-factor)")
+    parser.add_argument("--patch-cutoff", type=float, default=pi_core.PATCH_CUTOFF,
+                        metavar="A",
+                        help="3D proximity cutoff for the charge-patch graph "
+                             "(default: {:.1f} A)".format(pi_core.PATCH_CUTOFF))
+    parser.add_argument("--temperature", type=float, default=298.15, metavar="K",
+                        help="Temperature for the Debye-Huckel screening "
+                             "(default: 298.15 K)")
+    parser.add_argument("--propka-inactive-threshold", type=float,
+                        default=pi_core.PROPKA_INACTIVE_PKA, metavar="PKA",
+                        help="PROPKA pKa at or above which a group is treated "
+                             "as non-ionizable (default: {:.0f})".format(
+                                 pi_core.PROPKA_INACTIVE_PKA))
     parser.add_argument("--patch-calibration", default=None, metavar="FILE",
                         help="JSON file with local patch risk bands "
                              "({'positive': {...}, 'negative': {...}, "
@@ -1088,6 +1174,10 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                 ph_grid=ph_grid,
                 name=args.name,
                 patch_calibration=patch_calibration,
+                provenance_override=args.provenance,
+                patch_cutoff=args.patch_cutoff,
+                temperature=args.temperature,
+                propka_inactive_threshold=args.propka_inactive_threshold,
             )
         except Exception as exc:
             print("  ERROR: {}".format(exc), file=sys.stderr)
@@ -1126,6 +1216,10 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
                     ph_grid=ph_grid,
                     name=args.name or pdb_path.stem,
                     patch_calibration=patch_calibration,
+                    provenance_override=args.provenance,
+                patch_cutoff=args.patch_cutoff,
+                temperature=args.temperature,
+                propka_inactive_threshold=args.propka_inactive_threshold,
                 )
             except Exception as exc:
                 print("  ERROR: {}".format(exc), file=sys.stderr)
@@ -1218,16 +1312,31 @@ pKa sets: Bjellqvist (ExPASy), IPC_protein, EMBOSS, Sillero, Nozaki_Tanford.
 
     if len(results) > 1 and (args.json or args.all_formats):
         combined = os.path.join(args.output, "combined_pi_results.json")
+        # The combined file is a cross-structure summary, but it must carry the
+        # same contract as the individual reports: a consumer has to be able
+        # to tell which pKa model produced a number and whether a metric was
+        # computed at all.  An omitted field reads like a clean flag, so
+        # `analysis_type` / `unavailable_metrics` / `structure_model` are
+        # included here as well.
         with open(combined, "w", encoding="utf-8") as fh:
             json.dump([{
                 "name": r.get("name", ""),
                 "input": r.get("input", {}),
                 "pka_set": r.get("pka_set", ""),
+                "structure_model": r.get("structure_model", ""),
+                "analysis_type": r.get("analysis_type", ""),
+                "unavailable_metrics": r.get("unavailable_metrics", []),
+                "termini_mode": r.get("termini_mode", ""),
+                "ionic_strength": r.get("ionic_strength", ""),
                 "fv": r.get("fv", {}),
+                "chains": r.get("chains", {}),
                 "sensitivity": r.get("sensitivity", {}),
+                "charge_curve": r.get("charge_curve", []),
                 "structure_quality": r.get("structure_quality", {}),
                 "tap": r.get("tap", {}),
+                "patch_calibration": r.get("patch_calibration", {}),
                 "n_patches": len(r.get("patches", []) or []),
+                "patches": r.get("patches", []),
                 "recommendations": r.get("recommendations", []),
                 "warnings": r.get("warnings", []),
             } for r in results], fh, indent=2, ensure_ascii=False)

@@ -103,7 +103,7 @@ PKA_SETS: Dict[str, Dict[str, object]] = {
         "H": 5.98, "K": 10.0, "R": 12.0,
         "Nterm_overrides": {
             "A": 7.59, "M": 7.00, "S": 6.93, "P": 8.36,
-            "T": 6.82, "V": 7.44, "E": 7.70,
+            "T": 6.82, "V": 7.44, "E": 7.70, "D": 7.00,
         },
         "Cterm_overrides": {"D": 4.55, "E": 4.75},
     },
@@ -140,6 +140,36 @@ PKA_SET_ALIASES = {
     "nozaki": "Nozaki_Tanford",
     "nozaki_tanford": "Nozaki_Tanford",
     "nozaki-tanford": "Nozaki_Tanford",
+}
+
+# Residue-specific terminal pKa offsets.
+#
+# The pKa of a terminal group is shifted by the side chain of the adjacent
+# residue: an N-terminal Asp is markedly less basic than the generic value
+# (the neighbouring carboxylate withdraws electron density), an N-terminal
+# Pro is more basic (its alpha-amino group is a secondary amine), and a
+# C-terminal Asp/Glu raises the pKa of the alpha-carboxyl because the
+# resulting dianion is destabilised.
+#
+# The offsets are the residue-specific model pKa values of Grimsley et al.
+# (2009) for the N-terminus and of Bjellqvist (1993) for the C-terminus,
+# expressed relative to their generic value (7.50 and 3.55 respectively).
+# The offset is a property of the *residue*, not of the pKa reference set,
+# so it is applied as a delta to the generic terminal value of every
+# bundled set.
+#
+# Without this, the terminal behaviour of the same antibody would change
+# with the arbitrary choice of pKa set - a systematic bias rather than a
+# random one - and the residue-specific effect would simply be absent for
+# the four sets that do not define their own overrides.
+TERMINAL_PKA_OFFSETS: Dict[str, Dict[str, float]] = {
+    "N": {
+        "A": 0.09, "C": 0.00, "D": -0.50, "E": 0.20, "M": -0.50,
+        "P": 0.86, "S": -0.57, "T": -0.68, "V": -0.06,
+    },
+    "C": {
+        "D": 1.00, "E": 1.20,
+    },
 }
 
 # IMGT region boundaries used by the pipeline / TAP.
@@ -186,6 +216,9 @@ HBOND_CUTOFF = 3.5          # A, polar N/O ... N/O
 HBOND_ANGLE_MIN = 120.0     # deg, antecedent-donor...acceptor angle
 DISULFIDE_CUTOFF = 2.5      # A, SG ... SG
 PATCH_CUTOFF = 8.0          # A, exposed charged-residue patch graph
+# A PROPKA pKa at or above this value marks the group as non-ionizable
+# (PROPKA's own convention for "outside the titratable range").
+PROPKA_INACTIVE_PKA = 20.0
 
 # Terminus modelling.  A Fab/VHH V-domain C-terminus is normally fused to a
 # constant domain or tag, so the "auto" default caps it for Fab and leaves it
@@ -492,14 +525,31 @@ def normalize_pka_set(name: str) -> str:
 
 
 def _pka_value(pka_set: str, aa: str, terminal: Optional[str] = None) -> float:
-    """Return the model pKa for a side chain or a terminus."""
+    """Return the model pKa for a side chain or a terminus.
+
+    For a terminus the residue-specific effect of the adjacent side chain is
+    applied (see :data:`TERMINAL_PKA_OFFSETS`): the set's own override wins
+    if it defines one, otherwise the uniform residue offset is added to the
+    set's generic terminal value.  The result is that the terminal pKa of a
+    given antibody behaves consistently across all bundled pKa sets.
+    """
     table = PKA_SETS[pka_set]
     if terminal == "N":
-        overrides = table.get("Nterm_overrides", {})
-        return float(overrides.get(aa, table["Nterm"]))  # type: ignore[union-attr]
+        overrides = table.get("Nterm_overrides", {}) or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if aa in overrides:
+            return float(overrides[aa])  # type: ignore[arg-type]
+        base = float(table["Nterm"])  # type: ignore[arg-type]
+        return base + TERMINAL_PKA_OFFSETS["N"].get(aa, 0.0)
     if terminal == "C":
-        overrides = table.get("Cterm_overrides", {})
-        return float(overrides.get(aa, table["Cterm"]))  # type: ignore[union-attr]
+        overrides = table.get("Cterm_overrides", {}) or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if aa in overrides:
+            return float(overrides[aa])  # type: ignore[arg-type]
+        base = float(table["Cterm"])  # type: ignore[arg-type]
+        return base + TERMINAL_PKA_OFFSETS["C"].get(aa, 0.0)
     return float(table[aa])  # type: ignore[index]
 
 
@@ -518,16 +568,25 @@ def resolve_termini_mode(mode: str, kind: str) -> str:
     return "capped" if kind == "fab" else "free"
 
 
-def debye_kappa(ionic_strength: float) -> float:
-    """Approximate inverse Debye length in 1/A (298 K, I in mol/L)."""
+def debye_kappa(ionic_strength: float, temperature: float = 298.15) -> float:
+    """Approximate inverse Debye length in 1/A.
+
+    The reference coefficient (0.3291 A^-1 at 298 K for I in mol/L) is
+    scaled for temperature as ``kappa ~ 1/sqrt(T)``, which is the dominant
+    temperature dependence of the Debye length; the smaller change of the
+    water dielectric constant is neglected (about 1 % over 20-30 C).
+    """
     if ionic_strength is None or ionic_strength <= 0.0:
         return 0.0
-    return DEBYE_KAPPA_COEFF * math.sqrt(float(ionic_strength))
+    t_kelvin = max(1.0, float(temperature))
+    scale = math.sqrt(298.15 / t_kelvin)
+    return DEBYE_KAPPA_COEFF * math.sqrt(float(ionic_strength)) * scale
 
 
-def _screening_factor(distance: float, ionic_strength: float) -> float:
+def _screening_factor(distance: float, ionic_strength: float,
+                      temperature: float = 298.15) -> float:
     """Distance-dependent electrostatic screening factor in (0, 1]."""
-    kappa = debye_kappa(ionic_strength)
+    kappa = debye_kappa(ionic_strength, temperature)
     if kappa <= 0.0:
         return 1.0
     return math.exp(-kappa * max(0.0, float(distance)))
@@ -754,18 +813,41 @@ def charge_curve(
     ]
 
 
-def detect_structure_provenance(path: str) -> str:
+def detect_structure_provenance(path: str) -> Tuple[str, str]:
     """Classify the B-factor semantics of a structure file.
 
-    Returns ``"experimental"`` (B-factors are crystallographic displacement
-    factors in A^2), ``"predicted"`` (B-factor column carries pLDDT, as in
-    AlphaFold/AF3 models) or ``"unknown"``.
+    Returns ``(provenance, basis)`` where *provenance* is:
+
+    * ``"experimental"`` - B-factors are crystallographic displacement
+      factors in A^2, so a *low* mean means the model is well ordered;
+    * ``"predicted"`` - the B-factor column carries pLDDT (AlphaFold2/3,
+      ESMFold, ...), so a *low* mean means low confidence;
+    * ``"unknown"`` - the semantics could not be established.
+
+    *basis* records how the call was made (``"header"``, ``"content"`` or
+    ``"none"``) so the report can state the evidence instead of implying a
+    certainty that does not exist.
 
     The distinction matters: for a refined crystal structure a *low* mean
     B-factor means the model is well ordered, while for a predicted model a
     *low* mean B-factor means low confidence.  Treating one as the other
-    inverts the message, so the provenance is read from the file header
-    instead of guessed from the numeric range.
+    inverts the message.
+
+    The header is consulted first, but a header is **not** required: AF2,
+    AF3 and ESMFold all write bare ATOM records with no HEADER/REMARK block
+    at all, so a header-only test silently disables the pLDDT reading for
+    exactly the files the tool is most often pointed at.  When the header is
+    inconclusive the file content is inspected instead:
+
+    * a standard crystallographic entry always carries ``CRYST1`` and usually
+      ``SSBOND`` and non-water ``HETATM`` records - any of those means
+      ``experimental``;
+    * a file with none of those records whose B-factors all lie inside the
+      pLDDT range [0, 100] is treated as ``predicted``.
+
+    The content call is a documented inference, not a certainty, so the
+    report says so, and ``--provenance`` can override it in either
+    direction.
     """
     try:
         with open(path, "r", errors="replace") as fh:
@@ -778,16 +860,58 @@ def detect_structure_provenance(path: str) -> str:
                 if len(head) >= 400:
                     break
     except OSError:
-        return "unknown"
+        return "unknown", "none"
     text = "".join(head)
     upper = text.upper()
     if ("EXPDTA" in upper or "REMARK   2 RESOLUTION" in upper
             or "_EXPTL.METHOD" in upper or "REMARK   3" in upper):
-        return "experimental"
+        return "experimental", "header"
     if ("ALPHAFOLD" in upper or "ALPHAFOLD3" in upper
             or "_MA_MAJOR_VERSION" in upper or "PLDDT" in upper):
-        return "predicted"
-    return "unknown"
+        return "predicted", "header"
+    return _detect_provenance_from_content(path)
+
+
+# Records that only a refined crystallographic entry carries.
+_CRYSTAL_ONLY_RECORDS = ("CRYST1", "SSBOND", "ANISOU")
+# HETATM residues that do not indicate a crystallographic experiment.
+_NON_CRYSTAL_HETATM = ("HOH", "DOD", "WAT")
+
+
+def _detect_provenance_from_content(path: str) -> Tuple[str, str]:
+    """Infer the B-factor semantics from the file content.
+
+    Used when the header carries no usable marker.  See
+    :func:`detect_structure_provenance` for the reasoning.
+    """
+    crystal_records = False
+    bfactors: List[float] = []
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                record = line[:6].strip().upper()
+                if record in _CRYSTAL_ONLY_RECORDS:
+                    crystal_records = True
+                elif record == "HETATM":
+                    resname = line[17:20].strip().upper()
+                    if resname not in _NON_CRYSTAL_HETATM:
+                        crystal_records = True
+                if record not in ("ATOM", "HETATM"):
+                    continue
+                try:
+                    bfactors.append(float(line[60:66]))
+                except ValueError:
+                    continue
+    except OSError:
+        return "unknown", "none"
+    if crystal_records:
+        return "experimental", "content"
+    if bfactors and all(0.0 <= b <= 100.0 for b in bfactors):
+        # No crystal-only records and every B-factor inside the pLDDT
+        # range: this is the signature of a predicted model written without
+        # a header (AF2 / AF3 / ESMFold).
+        return "predicted", "content"
+    return "unknown", "none"
 
 
 def assess_structure_quality(
@@ -903,8 +1027,15 @@ def structure_quality_warnings(quality: Dict[str, object]) -> List[str]:
     mean_raw = quality.get("bfactor_mean")
     mean_bf = float(mean_raw) if isinstance(mean_raw, (int, float)) else None
     provenance = str(quality.get("provenance", "unknown"))
+    basis = str(quality.get("provenance_basis", "none"))
     if provenance == "predicted":
         # The B-factor column holds pLDDT: low values mean low confidence.
+        if basis == "content":
+            warnings.append(
+                "The structure carries no crystal records (CRYST1 / SSBOND / "
+                "non-water HETATM) and every B-factor lies in the pLDDT "
+                "range, so the column is interpreted as pLDDT; this is an "
+                "inference from the file content, not a header marker.")
         if mean_bf is not None and mean_bf < PLDDT_WARN:
             warnings.append(
                 "Low mean CA pLDDT ({:.1f}); structure-aware pI and charge "
@@ -921,9 +1052,12 @@ def structure_quality_warnings(quality: Dict[str, object]) -> List[str]:
     else:
         if mean_bf is not None:
             warnings.append(
-                "B-factor semantics could not be determined from the file "
-                "header; the B-factor column is reported but not "
-                "interpreted (mean {:.1f}).".format(mean_bf))
+                "B-factor semantics could not be determined (no crystal "
+                "records and the values are not all inside the pLDDT "
+                "range); the B-factor column is reported but not "
+                "interpreted (mean {:.1f}). Use --provenance predicted to "
+                "read it as pLDDT, or --provenance experimental to read it "
+                "as a crystallographic B-factor.".format(mean_bf))
     missing_raw = quality.get("n_missing_sidechain")
     n_missing = int(missing_raw) if isinstance(missing_raw, (int, float)) else 0
     missing_list = quality.get("missing_sidechain")
@@ -1261,7 +1395,8 @@ def _burial_factor(rel_sasa_frac: Optional[float]) -> float:
 def _pka_shift(aa: str, rel_sasa_frac: Optional[float],
                salt_distance: Optional[float],
                hbond_distance: Optional[float],
-               ionic_strength: float = IONIC_STRENGTH_DEFAULT) -> Tuple[float, str]:
+               ionic_strength: float = IONIC_STRENGTH_DEFAULT,
+               temperature: float = 298.15) -> Tuple[float, str]:
     """Transparent empirical pKa shift for the structure-aware fallback.
 
     Acidic groups: burial raises pKa (charged state penalised); salt bridge /
@@ -1286,12 +1421,12 @@ def _pka_shift(aa: str, rel_sasa_frac: Optional[float],
     if burial > 0.0:
         reasons.append("buried {:.0f}%".format(burial * 100))
     if salt_distance is not None:
-        screen = _screening_factor(salt_distance, ionic_strength)
+        screen = _screening_factor(salt_distance, ionic_strength, temperature)
         delta += (-0.8 if aa in ACIDIC else 0.8) * screen
         reasons.append("salt bridge {:.1f} A (screen {:.2f})".format(
             salt_distance, screen))
     if hbond_distance is not None:
-        screen = _screening_factor(hbond_distance, ionic_strength)
+        screen = _screening_factor(hbond_distance, ionic_strength, temperature)
         delta += (-0.3 if aa in ACIDIC else 0.3) * screen
         reasons.append("H-bond {:.1f} A (screen {:.2f})".format(
             hbond_distance, screen))
@@ -1314,6 +1449,8 @@ def structure_groups(
     propka_termini: Optional[Dict[Tuple[str, str], float]] = None,
     propka_termini_model: Optional[Dict[Tuple[str, str], float]] = None,
     chain_types: Optional[Dict[str, str]] = None,
+    temperature: float = 298.15,
+    propka_inactive_threshold: float = PROPKA_INACTIVE_PKA,
 ) -> Tuple[List[IonizableGroup], List[Terminus]]:
     """Build per-residue pKa groups for a structure-aware pI.
 
@@ -1361,16 +1498,18 @@ def structure_groups(
             else:
                 pka_eff = propka_value
                 reason = "PROPKA"
-            active = pka_eff < 20.0
+            active = pka_eff < propka_inactive_threshold
             if not active:
-                reason = "PROPKA non-ionizable (pKa >= 20)"
+                reason = "PROPKA non-ionizable (pKa >= {})".format(
+                    propka_inactive_threshold)
         elif model == "none":
             pka_eff = pka_model
             active = True
             reason = "no microenvironment correction"
         else:
             delta, reason = _pka_shift(
-                res.aa, rel, salt_dist, hbond_dist, ionic_strength)
+                res.aa, rel, salt_dist, hbond_dist, ionic_strength,
+                temperature)
             pka_eff = pka_model + delta
             active = True
         groups.append(IonizableGroup(
@@ -2753,6 +2892,21 @@ def _run_propka_on_fv(
     )
 
 
+# A single heavy chain is ambiguous: it is either a genuine VHH (free
+# C-terminus) or an isolated Fab VH / VH fusion whose C-terminus is joined
+# to CH1 or to a fusion partner (capped).  The two readings differ by the
+# C-terminal carboxylate, which is worth up to ~2 pH units of Fv pI for a
+# near-neutral Fv, so the ambiguity is stated instead of being resolved
+# silently.
+_SINGLE_HEAVY_CHAIN_WARNING = (
+    "Only one heavy chain was found and it was classified as a VHH, i.e. "
+    "with a free C-terminus. If this is actually an isolated Fab VH "
+    "(C-terminus fused to CH1) or a VH fusion construct, the C-terminus is "
+    "blocked instead: use --termini capped. The terminus model changes the "
+    "Fv pI by up to ~2 pH units for a near-neutral Fv."
+)
+
+
 def _select_chains_structure(
     residues: Sequence["tap_core.Residue"],
     vh_chain: Optional[str] = None,
@@ -2790,6 +2944,7 @@ def _select_chains_structure(
             raise ValueError(
                 "Only one light chain found; an Fv requires VH+VL. "
                 "Pass --vh-chain/--vl-chain or provide a paired structure.")
+        warnings.append(_SINGLE_HEAVY_CHAIN_WARNING)
         return cid, None, warnings, "vhh"
 
     # Two or more chains: use the validated TAP selector.
@@ -2813,6 +2968,7 @@ def _select_chains_structure(
         # Single H-like chain among several (e.g. antigen) -> VHH.
         if h and not l:
             vh = max(h, key=lambda c: len([r for r in residues if r.chain == c]))
+            warnings.append(_SINGLE_HEAVY_CHAIN_WARNING)
             return vh, None, warnings, "vhh"
         raise ValueError(
             "Cannot identify Fv chains automatically (chains: {}). "
@@ -2837,6 +2993,10 @@ def analyze_structure(
     ph_grid: Optional[Sequence[float]] = None,
     name: str = "",
     patch_calibration: Optional[PatchCalibration] = None,
+    provenance_override: str = "auto",
+    patch_cutoff: float = PATCH_CUTOFF,
+    temperature: float = 298.15,
+    propka_inactive_threshold: float = PROPKA_INACTIVE_PKA,
 ) -> Dict[str, object]:
     """Structure-aware pI + TAP + charge-patch analysis for an Fv/VHH."""
     pka_set = normalize_pka_set(pka_set)
@@ -2846,6 +3006,15 @@ def analyze_structure(
         raise ValueError("--disulfide must be auto, exclude, or free")
     if ionic_strength < 0.0:
         raise ValueError("--ionic-strength must be >= 0")
+    if provenance_override not in ("auto", "predicted", "experimental"):
+        raise ValueError(
+            "--provenance must be auto, predicted, or experimental")
+    if patch_cutoff <= 0.0:
+        raise ValueError("--patch-cutoff must be > 0")
+    if temperature <= 0.0:
+        raise ValueError("--temperature must be > 0")
+    if propka_inactive_threshold <= 0.0:
+        raise ValueError("--propka-inactive-threshold must be > 0")
 
     warnings: List[str] = []
     all_residues = tap_core.load_residues(pdb_path)
@@ -2894,9 +3063,9 @@ def analyze_structure(
     #    used for PSH/PPC/PNC and must not change;
     #  * the patch map uses the documented 8 A patch-graph cutoff.
     pair_dist = tap_core.build_pair_distances(fvi)
-    patch_pair_dist = (pair_dist if tap_core.NEIGHBOUR_CUTOFF >= PATCH_CUTOFF
+    patch_pair_dist = (pair_dist if tap_core.NEIGHBOUR_CUTOFF >= patch_cutoff
                        else tap_core.build_pair_distances(
-                           fvi, cutoff=PATCH_CUTOFF))
+                           fvi, cutoff=patch_cutoff))
     vhh_hallmark_keys: Set[Tuple[str, int, str]] = set()
     if kind == "vhh" and vh is not None:
         for r in fvi:
@@ -3008,9 +3177,13 @@ def analyze_structure(
                 "selected; use --structure-model propka for PROPKA pKa values.")
 
     # Structure quality (B-factor semantics, missing side chains, breaks).
-    provenance = detect_structure_provenance(pdb_path)
+    provenance, provenance_basis = detect_structure_provenance(pdb_path)
+    if provenance_override and provenance_override != "auto":
+        provenance = provenance_override
+        provenance_basis = "user-specified"
     quality = assess_structure_quality(
         fvi, kind, chain_types=chain_types, provenance=provenance)
+    quality["provenance_basis"] = provenance_basis
     warnings.extend(structure_quality_warnings(quality))
 
     # Sequence pI table (using the modelled V-domain sequences).
@@ -3049,6 +3222,8 @@ def analyze_structure(
             propka_termini=propka_term_arg,
             propka_termini_model=propka_term_model_arg,
             chain_types=chain_types,
+            temperature=temperature,
+            propka_inactive_threshold=propka_inactive_threshold,
         )
         pi_free = isoelectric_point(groups_s, termini_s)
         pi_capped = isoelectric_point(groups_s, termini_s, capped_cterm=True)
@@ -3108,6 +3283,8 @@ def analyze_structure(
         propka_termini=propka_term_arg,
         propka_termini_model=propka_term_model_arg,
         chain_types=chain_types,
+        temperature=temperature,
+        propka_inactive_threshold=propka_inactive_threshold,
     )
     groups_by_key = {(g.structure_chain, g.resseq, g.icode): g for g in groups}
     chain_table: Dict[str, Dict[str, object]] = {}
@@ -3191,7 +3368,7 @@ def analyze_structure(
         for patch in cluster_patches(
                 fvi, patch_pair_dist, patch_ph, groups_by_key=groups_by_key,
                 interface_keys=interface_keys, terminal_keys=terminal_keys,
-                calibration=patch_calibration):
+                calibration=patch_calibration, cutoff=patch_cutoff):
             patch_counter += 1
             row = {
                 "patch_id": patch_counter,
@@ -3259,6 +3436,7 @@ def analyze_structure(
         "structure_model": structure_model,
         "sasa_engine": engine,
         "ionic_strength": ionic_strength,
+        "temperature": temperature,
     }
 
     if pI_range and (pI_range[1] - pI_range[0]) >= 0.5:
@@ -3292,6 +3470,9 @@ def analyze_structure(
         "sasa_engine": engine,
         "termini_mode": resolved_termini,
         "ionic_strength": ionic_strength,
+        "temperature": temperature,
+        "patch_cutoff": patch_cutoff,
+        "propka_inactive_threshold": propka_inactive_threshold,
         "analysis_type": "structure",
         "unavailable_metrics": [],
         "sequence_pI": seq_table,

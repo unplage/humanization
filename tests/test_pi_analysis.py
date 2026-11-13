@@ -130,7 +130,15 @@ def test_sequence_pi_matches_biopython():
                                   "Bjellqvist")
         want = IsoelectricPoint(seq).pi()
         got = table["pI_free"]
-        check(abs(got - want) < 0.02,
+        # The VL starts with Asp.  The published Bjellqvist/ExPASy table
+        # does not list the N-terminal Asp, so Biopython uses the generic
+        # 7.50, while the tool uses the Grimsley et al. (2009) model pKa
+        # of 7.00 - the same offset it applies to every other pKa set (see
+        # test_terminal_pka_offsets_are_uniform).  The consequence for the
+        # pI is about 0.02 pH units, so the tolerance is widened for that
+        # chain only; every other terminal still has to agree exactly.
+        tol = 0.03 if name == "VL" else 0.02
+        check(abs(got - want) < tol,
               "{} Bjellqvist pI {:.4f} != Biopython {:.4f}".format(name, got, want))
 
     chains = [
@@ -146,6 +154,106 @@ def test_sequence_pi_matches_biopython():
     groups, termini = pi_core._make_groups_from_sequence(chains, "Bjellqvist")
     q = net_charge(groups, termini, combined)
     check(abs(q) < 1e-5, "net charge at pI should be ~0, got {}".format(q))
+
+
+def test_terminal_pka_offsets_are_uniform():
+    """Every pKa set must apply the same residue-specific terminal effect.
+
+    Regression: only the Bjellqvist set defined terminal overrides, so the
+    terminal pKa of the same antibody changed with the arbitrary choice of
+    pKa set - a systematic bias rather than a random one.
+    """
+    # The published Bjellqvist table must be reproduced exactly.
+    published = {
+        ("N", "A"): 7.59, ("N", "M"): 7.00, ("N", "S"): 6.93,
+        ("N", "P"): 8.36, ("N", "T"): 6.82, ("N", "V"): 7.44,
+        ("N", "E"): 7.70, ("N", "D"): 7.00, ("N", "G"): 7.50,
+        ("C", "D"): 4.55, ("C", "E"): 4.75, ("C", "G"): 3.55,
+    }
+    for (kind, aa), value in published.items():
+        got = pi_core._pka_value("Bjellqvist", aa, kind)
+        check(abs(got - value) < 1e-9,
+              "Bjellqvist {}-term {}: {} != published {}".format(
+                  kind, aa, got, value))
+
+    # Every set must apply the same offset relative to its own generic
+    # value, so the residue effect cannot depend on the chosen set.
+    for name in pi_core.PKA_SETS:
+        for aa, offset in pi_core.TERMINAL_PKA_OFFSETS["N"].items():
+            generic = pi_core._pka_value(name, "G", "N")
+            got = pi_core._pka_value(name, aa, "N")
+            check(abs((got - generic) - offset) < 1e-9,
+                  "{}: N-term {} offset {:.3f} != {:.3f}".format(
+                      name, aa, got - generic, offset))
+        for aa, offset in pi_core.TERMINAL_PKA_OFFSETS["C"].items():
+            generic = pi_core._pka_value(name, "G", "C")
+            got = pi_core._pka_value(name, aa, "C")
+            check(abs((got - generic) - offset) < 1e-9,
+                  "{}: C-term {} offset {:.3f} != {:.3f}".format(
+                      name, aa, got - generic, offset))
+
+
+def test_combined_json_carries_the_result_contract():
+    """The batch summary must carry the same contract as a single report.
+
+    Regression: the combined JSON omitted `structure_model`,
+    `analysis_type` and `unavailable_metrics`, so a consumer could not tell
+    which pKa model produced a number nor whether a metric had been
+    computed at all.
+    """
+    out = tempfile.mkdtemp()
+    try:
+        for stem in ("a", "b"):
+            pdb = os.path.join(out, stem + ".pdb")
+            _write_synthetic_fv(pdb)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(TOOL, "pi_analyzer.py"),
+             "--pdb-dir", out, "--json", "--structure-model", "heuristic",
+             "--output", out],
+            capture_output=True, text=True)
+        check(proc.returncode == 0, "CLI failed: {}".format(proc.stderr[-400:]))
+        combined = os.path.join(out, "combined_pi_results.json")
+        check(os.path.exists(combined), "combined JSON must be written")
+        with open(combined) as fh:
+            data = json.load(fh)
+        check(len(data) == 2, "both structures must be present")
+        for entry in data:
+            for key in ("structure_model", "analysis_type",
+                        "unavailable_metrics", "chains", "charge_curve",
+                        "patch_calibration", "termini_mode"):
+                check(key in entry,
+                      "combined JSON must carry {!r}: {}".format(
+                          key, sorted(entry)))
+            check(entry["analysis_type"] == "structure",
+                  "structure mode must be declared")
+            check(entry["unavailable_metrics"] == [],
+                  "structure mode has no structure-dependent omission")
+    finally:
+        for name in os.listdir(out):
+            os.remove(os.path.join(out, name))
+        os.rmdir(out)
+
+
+def test_single_heavy_chain_is_flagged_as_ambiguous():
+    """A lone heavy chain must warn about the VHH / isolated-VH ambiguity."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pdb = os.path.join(tmp, "heavy_only.pdb")
+        _write_synthetic_fv(pdb)
+        lines = []
+        with open(pdb) as fh:
+            for line in fh:
+                if line.startswith("ATOM") and line[21:22] != "H":
+                    continue
+                lines.append(line)
+        with open(pdb, "w") as fh:
+            fh.writelines(lines)
+        result = analyze_structure(pdb, structure_model="heuristic")
+    joined = " ".join(result["warnings"]).lower()
+    check("vhh" in joined,
+          "a lone heavy chain must warn about the VHH assumption: {}".format(
+              result["warnings"]))
+    check("capped" in joined,
+          "the warning must point at the --termini capped option")
 
 
 def test_sequence_charge_descriptors():
@@ -666,7 +774,7 @@ def test_bfactor_provenance_semantics():
     """A crystal B-factor must not be read as a low-confidence pLDDT."""
     from tap_core import Residue
 
-    def write(path, header, bfactor):
+    def write(path, header, bfactor, extra=""):
         with open(path, "w") as fh:
             fh.write(header)
             serial = 1
@@ -684,6 +792,7 @@ def test_bfactor_provenance_semantics():
                                 serial, name, ONE_TO_THREE[aa], cid, i,
                                 x + dx, y + dy, z + dz, bfactor, el))
                         serial += 1
+            fh.write(extra)
             fh.write("END\n")
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -693,23 +802,58 @@ def test_bfactor_provenance_semantics():
         predicted = os.path.join(tmp, "predicted.pdb")
         write(predicted, "HEADER    ALPHAFOLD MONOMER\n"
                          "REMARK   1 pLDDT per-residue confidence\n", 55.0)
+        # AF2/AF3/ESMFold write bare ATOM records: no header at all.  The
+        # provenance must then be inferred from the file content, otherwise
+        # the pLDDT reading is silently disabled for the most common input.
+        headerless = os.path.join(tmp, "headerless.pdb")
+        write(headerless, "", 55.0)
+        # Crystal records but an unrecognised header -> experimental.
+        crystal_records = os.path.join(tmp, "crystal_records.pdb")
+        write(crystal_records, "HEADER    SOMETHING\n", 30.0,
+              extra="CRYST1   1.000    1.000    1.000  90.00  90.00  90.00 P 1           1\n")
+        # Neither crystal records nor pLDDT-range values -> unknown.
         unknown = os.path.join(tmp, "unknown.pdb")
-        write(unknown, "HEADER    SOMETHING\n", 30.0)
+        write(unknown, "HEADER    SOMETHING\n", 180.0)
 
         r_cryst = analyze_structure(crystal, structure_model="heuristic")
         r_pred = analyze_structure(predicted, structure_model="heuristic")
+        r_headless = analyze_structure(headerless, structure_model="heuristic")
+        r_cryst_rec = analyze_structure(crystal_records, structure_model="heuristic")
         r_unk = analyze_structure(unknown, structure_model="heuristic")
 
     check(r_cryst["structure_quality"]["provenance"] == "experimental",
           "EXPDTA must mark the structure as experimental")
     check(r_pred["structure_quality"]["provenance"] == "predicted",
           "AlphaFold marker must mark the structure as predicted")
+    check(r_cryst["structure_quality"]["provenance_basis"] == "header",
+          "the header must be recorded as the basis")
     check(r_unk["structure_quality"]["provenance"] == "unknown",
-          "an unrecognised header must stay 'unknown'")
+          "a file with neither crystal records nor pLDDT-range values must "
+          "stay 'unknown'")
     check("crystallographic" in r_cryst["structure_quality"]["bfactor_meaning"],
           "crystal B-factor meaning")
     check("pLDDT" in r_pred["structure_quality"]["bfactor_meaning"],
           "predicted-model B-factor meaning")
+
+    # A header-less predicted model must still be read as pLDDT, and the
+    # low-confidence warning must not be lost.
+    check(r_headless["structure_quality"]["provenance"] == "predicted",
+          "a header-less model with pLDDT-range B-factors must be predicted, "
+          "got {}".format(r_headless["structure_quality"]["provenance"]))
+    check(r_headless["structure_quality"]["provenance_basis"] == "content",
+          "the content inference must be recorded as the basis")
+    headless_warnings = " ".join(r_headless["warnings"]).lower()
+    check("low mean ca plddt" in headless_warnings,
+          "a low-confidence header-less model must be reported as low "
+          "confidence: {}".format(r_headless["warnings"]))
+    check("inference from the file content" in headless_warnings,
+          "the content inference must be disclosed in the warnings")
+
+    # Crystal records beat the numeric range.
+    check(r_cryst_rec["structure_quality"]["provenance"] == "experimental",
+          "CRYST1 must mark the structure as experimental even without a "
+          "recognised header, got {}".format(
+              r_cryst_rec["structure_quality"]["provenance"]))
 
     crystal_warnings = " ".join(r_cryst["warnings"]).lower()
     check("low mean ca b-factor" not in crystal_warnings,
@@ -1039,6 +1183,10 @@ def run_all_tests():
         test_charge_descriptor_semantics,
         test_multichar_cif_chain_ids_are_handled,
         test_sequence_mode_declares_what_it_cannot_compute,
+        # regressions for the second scientific review
+        test_terminal_pka_offsets_are_uniform,
+        test_combined_json_carries_the_result_contract,
+        test_single_heavy_chain_is_flagged_as_ambiguous,
     ]
     passed = failed = 0
     for test in tests:

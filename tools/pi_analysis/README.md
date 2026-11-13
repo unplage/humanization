@@ -35,9 +35,35 @@ computational estimate - confirm by cIEF/IEX.
 | `Sillero` | - | 8.20 | 3.20 | 4.00 | 4.50 | 9.00 | 10.00 | 6.40 | 10.40 | 12.00 |
 | `Nozaki_Tanford` | `nozaki`, `nozaki-tanford` | 7.50 | 3.80 | 4.00 | 4.40 | 9.50 | 9.60 | 6.30 | 10.40 | 12.00 |
 
-Bjellqvist also uses residue-specific N-terminal overrides
-(A 7.59, M 7.00, S 6.93, P 8.36, T 6.82, V 7.44, E 7.70) and C-terminal
-overrides (D 4.55, E 4.75).
+The N- and C-terminal pKa are **residue-specific in every bundled set**: the
+side chain of the terminal residue shifts the pKa of the adjacent group (an
+N-terminal Asp is less basic, an N-terminal Pro more basic, a C-terminal
+Asp/Glu raises the pKa of the alpha-carboxyl because the resulting dianion
+is destabilised). The offsets are the residue-specific model pKa values of
+Grimsley et al. (2009) for the N-terminus and of Bjellqvist (1993) for the
+C-terminus, expressed relative to the generic value of each set, and they
+are applied to **all** sets:
+
+| terminal residue | N-term offset | C-term offset |
+|---|---|---|
+| A | +0.09 | - |
+| C | 0.00 | - |
+| D | -0.50 | +1.00 |
+| E | +0.20 | +1.20 |
+| M | -0.50 | - |
+| P | +0.86 | - |
+| S | -0.57 | - |
+| T | -0.68 | - |
+| V | -0.06 | - |
+
+Because the offset is a property of the residue and not of the reference
+set, the terminal behaviour of a given antibody no longer depends on the
+arbitrary choice of pKa set. For `Bjellqvist` this reproduces the published
+table exactly (A 7.59, M 7.00, S 6.93, P 8.36, T 6.82, V 7.44, E 7.70,
+D 7.00 for the N-terminus; D 4.55, E 4.75 for the C-terminus). The only
+visible consequence is that an **N-terminal Asp** now uses the Grimsley
+model pKa of 7.00 where ExPASy/Biopython use the generic 7.50, which moves
+the pI of such a chain by about 0.02 pH units.
 
 Default: `IPC_protein`. Use `--all-pka-sets` to report every set and see how
 sensitive the result is to the pKa model. For comparison with classic ExPASy
@@ -123,9 +149,8 @@ Before interpreting a structure, the tool reports:
 - truncated N/C termini.
 
 The B-factor column means different things in different files, so the tool
-reads the provenance from the file header (`EXPDTA` / `REMARK 2 RESOLUTION` /
-`_exptl.method` -> experimental; AlphaFold/AF3 markers -> predicted) and
-interprets the numbers accordingly:
+establishes the **provenance** of the file first and interprets the numbers
+accordingly:
 
 | provenance | B-factor column | low value means | warning |
 |---|---|---|---|
@@ -135,8 +160,35 @@ interprets the numbers accordingly:
 
 Interpreting a crystal structure's low mean B-factor as "low confidence"
 (inverting its meaning) would have flagged every well-refined structure as
-unreliable, so the provenance is now established rather than guessed from the
+unreliable, so the provenance is established rather than guessed from the
 numeric range.
+
+**How the provenance is established.** The file header is consulted first
+(`EXPDTA` / `REMARK 2 RESOLUTION` / `_exptl.method` -> experimental;
+AlphaFold/AF3 markers -> predicted). A header is **not** required, though:
+AF2, AF3 and ESMFold all write bare `ATOM` records with no `HEADER`/`REMARK`
+block at all, so a header-only test would silently disable the pLDDT reading
+for exactly the files the tool is most often pointed at. When the header is
+inconclusive the file content is inspected instead:
+
+- a standard crystallographic entry always carries `CRYST1` and usually
+  `SSBOND` and non-water `HETATM` records - any of those means
+  `experimental`;
+- a file with **none** of those records whose B-factors all lie inside the
+  pLDDT range [0, 100] is treated as `predicted`.
+
+The content call is a documented inference, not a certainty, so the report
+says so explicitly and records it in `structure_quality.provenance_basis`
+(`header`, `content` or `none`). Use `--provenance predicted` /
+`--provenance experimental` to override the inference in either direction.
+
+The completeness of the modelled C-terminus is checked per chain type: a
+VH/VHH runs to IMGT 128 while a VL ends at IMGT 127, so a chain truncated
+before its own boundary is treated as blocked at that end. A single heavy
+chain is reported as a VHH (free C-terminus) with an explicit warning,
+because an isolated Fab VH or a VH fusion construct would instead have a
+blocked C-terminus, and the two readings differ by up to ~2 pH units of Fv
+pI for a near-neutral Fv.
 
 ### Salt bridges and pKa uncertainty
 
@@ -212,16 +264,27 @@ Structure mode reports `analysis_type: "structure"` and an empty
 `unavailable_metrics` list.
 
 **Practical route from sequence to structure:** a single-sequence predicted
-model (ESMFold / AF2) is enough to obtain the missing metrics. The tool
-recognises AlphaFold/AF3 files from their header and interprets their
-B-factor column as pLDDT, so a predicted model can be fed in directly.
+model (ESMFold / AF2 / AF3) is enough to obtain the missing metrics. The
+tool interprets the B-factor column of a predicted model as pLDDT and
+reports the low-confidence warning, so a predicted model can be fed in
+directly. AF2/AF3/ESMFold files carry no header at all, so the provenance
+is inferred from the file content (no crystal records + pLDDT-range
+B-factors) and the inference is stated in the report; `--provenance
+predicted` forces it.
 
 FASTA handling:
 
 - one record -> VHH;
 - two records -> VH/VL; headers containing VH/VL, H/L, heavy/light, kappa or
   lambda are used to assign chains even when VL appears first;
-- ambiguous two-record files are treated as VH then VL.
+- when the header does **not** state the chain type, the sequence itself
+  decides: ANARCI's HMM assignment is used when available, otherwise the
+  repo's portable numbering engine, whose conserved FR3 Cys anchor
+  separates the two (a heavy V domain carries Cys92, a light one Cys88).
+  A two-record file whose light chain comes first is therefore assigned
+  correctly even with uninformative headers;
+- when neither the header nor the sequence can classify a chain, the file
+  order is used (VH then VL).
 
 ## Requirements
 
@@ -281,6 +344,7 @@ python3 tools/pi_analysis/pi_analyzer.py --fasta inputs/antibody.fasta --all-for
 | `--structure-model {propka,heuristic,none}` | `propka` | Structure pKa model (propka falls back to heuristic if PROPKA3 is missing) |
 | `--termini {auto,free,capped,blocked}` | `auto` | Terminus model (Fab capped, VHH free) |
 | `--ionic-strength M` | `0.15` | Debye-Huckel screening ionic strength |
+| `--temperature K` | `298.15` | Temperature for the Debye-Huckel screening (kappa ~ 1/sqrt(T)) |
 | `--ph-grid START:STOP:STEP` | `4:10:0.5` | pH grid for the charge curve |
 | `--ph-curve` | off | Print charge-vs-pH in the text report |
 | `--vh-chain`, `--vl-chain` | auto | Explicit structure chain IDs (`--vh-chain` alone = VHH) |
@@ -288,6 +352,9 @@ python3 tools/pi_analysis/pi_analyzer.py --fasta inputs/antibody.fasta --all-for
 | `--psa-binary PATH` | - | JOY `psa` executable |
 | `--tap-thresholds {2024,2019,exscientia,legacy}` | `2024` | TAP flag bands |
 | `--patch-calibration FILE` | - | JSON file with local patch risk bands (replaces the documented defaults) |
+| `--patch-cutoff A` | `8.0` | 3D proximity cutoff of the charge-patch graph |
+| `--propka-inactive-threshold PKA` | `20.0` | PROPKA pKa at or above which a group is non-ionizable |
+| `--provenance {auto,predicted,experimental}` | `auto` | How to read the B-factor column (auto: header, then file content) |
 | `--max-patches N` | `12` | Patches shown in text/Markdown; 0 = all |
 | `--ionizable` | off | Include per-residue pKa table |
 | `--json`, `--markdown`, `--csv`, `--text`, `--all-formats` | off | Reports |
@@ -305,7 +372,12 @@ python3 tools/pi_analysis/pi_analyzer.py --fasta inputs/antibody.fasta --all-for
 | `<stem>_pi.csv` | One-row summary |
 | `<stem>_pi_patches.csv` | One row per charge patch |
 
-Batch runs also write `combined_pi_results.json`.
+Batch runs also write `combined_pi_results.json`. It carries the same
+contract as a single report - `analysis_type`, `unavailable_metrics`,
+`structure_model`, `termini_mode`, `chains`, `charge_curve`,
+`patch_calibration` and the full `patches` list - so a consumer of the
+batch summary can tell which pKa model produced a number and whether a
+metric was computed at all. (An omitted field reads like a clean flag.)
 
 The JSON contains:
 
@@ -318,8 +390,8 @@ The JSON contains:
 - `sensitivity`: selected pI for every bundled pKa set and the resulting range;
 - `charge_curve`: net charge sampled across pH;
 - `structure_quality`: B-factor statistics **with the file provenance**
-  (`provenance`, `bfactor_meaning`), missing side chains, chain breaks,
-  truncated termini;
+  (`provenance`, `provenance_basis`, `bfactor_meaning`), missing side
+  chains, chain breaks, truncated termini;
 - per-chain pI (`free`/`capped`/`selected`) and net charge;
 - `fv`: selected/free/capped pI, pI range, net charge, total and surface
   `Fv_chml`/`SFvCSP` (plus `SFvCSP_basis`, which records whether the `SFvCSP`
@@ -464,6 +536,19 @@ flag and candidate substitutions.
 - The pI window, the TAP thresholds and the charge-asymmetry limit come from
   mammalian IgG/Fab work. For a VHH they are applied by analogy only, and the
   report states this.
+- The pI is a **variable-domain** quantity and the termini model is part of
+  it: `free` (both termini ionizable), `capped` (C-terminus amidated or
+  fused, the Fab default) and `blocked` (both termini blocked) are all
+  reported. For a near-neutral Fv the free/capped difference can reach ~2
+  pH units, so the construct's actual termini state has to be stated.
+- The B-factor semantics are established from the file, not guessed from the
+  numeric range. When the file carries no usable marker and no crystal
+  records, the interpretation is an **inference** from the content and is
+  labelled as such (`provenance_basis: content`); `--provenance` overrides it.
+- The salt-bridge/H-bond microenvironment model is a screening heuristic.
+  In `propka` mode the environmental contribution is transferred onto every
+  bundled pKa set, so the reported pKa-set spread is the spread of the
+  *reference* pKa values, not a spread of PROPKA runs.
 
 ### Follow-up workflow
 
