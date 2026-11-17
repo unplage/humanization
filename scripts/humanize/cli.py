@@ -144,7 +144,8 @@ def cmd_rmsd(args):
     from humanize.sequences import parse_input
     from humanize.numbering import number_heavy, number_light
     from humanize.structure import (
-        _AA3TO1, count_clashes, load_model, match_pdb_chain, structure_rmsd,
+        _AA3TO1, count_clashes, load_model, match_pdb_chain,
+        plddt_scale_for_model, resseq_sort_key, structure_rmsd,
     )
     from humanize.pipeline import (
         align_pos_map, build_cdr_framework_sets, pdb_chain_pos_map,
@@ -172,6 +173,10 @@ def cmd_rmsd(args):
               "pass --donor-chain", file=sys.stderr)
         return 1
     donor_pos = pdb_chain_pos_map(dmodel, dlabel, donor)
+    if not donor_pos:
+        print("[humanize] could not map donor residues onto the structure "
+              "chain; check the donor/model sequences", file=sys.stderr)
+        return 1
     cdr_sets, framework = build_cdr_framework_sets(donor, args.scheme)
 
     results = {}
@@ -188,8 +193,9 @@ def cmd_rmsd(args):
             print(f"[humanize] could not match a chain in {vpath}",
                   file=sys.stderr)
             continue
-        ca = sorted((a.resseq, a.resname)
-                    for a in vchains[vlabel] if a.name == "CA")
+        ca = sorted(((a.resseq, a.resname)
+                     for a in vchains[vlabel] if a.name == "CA"),
+                    key=lambda t: (resseq_sort_key(t[0]), t[1]))
         vseq = "".join(_AA3TO1.get(rn, "X") for _, rn in ca)
         try:
             vnum = number_heavy(vseq) if ctype == "H" else number_light(vseq)
@@ -205,6 +211,10 @@ def cmd_rmsd(args):
         vpos = align_pos_map(donor, vseq, vmodel, vlabel)
         if vpos is None:
             vpos = pdb_chain_pos_map(vmodel, vlabel, vnum)
+        if not vpos:
+            print(f"[humanize] could not map variant residues in {vpath}; "
+                  f"skipping", file=sys.stderr)
+            continue
         donor_regions = {r.pos: r.region for r in donor.residues}
         res = structure_rmsd(
             dmodel, dlabel, donor_pos, vmodel, vlabel, vpos, cdr_sets, framework,
@@ -212,7 +222,8 @@ def cmd_rmsd(args):
         clashes = count_clashes(vmodel)
         res["n_clashes"] = clashes["n_clashes"]
         res["worst_clash"] = clashes["worst"]
-        by_res = {a.resseq: a.plddt for a in vmodel.atoms
+        plddt_scale = plddt_scale_for_model(vmodel)
+        by_res = {a.resseq: a.plddt * plddt_scale for a in vmodel.atoms
                   if a.chain == vlabel and a.name == "CA" and a.plddt > 0}
         cdr_all = set().union(*cdr_sets.values()) if cdr_sets else set()
         cdr_vals = [by_res[vpos[p]] for p in cdr_all

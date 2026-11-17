@@ -1437,8 +1437,11 @@ def test_loop_class_weighting():
           hints.loop_contacts("H1") == {"CDR1": 1, "CDR2": 0},
           str(hints.loop_contacts("H1")))
     check("per-loop min distance measured",
-          hints.loop_min_dist("H2").get("CDR1", 0) > 90
+          hints.loop_min_dist("H2").get("CDR2", 0) > 90
           and hints.loop_min_dist("H1").get("CDR2", 0) > 15,
+          str(hints.loop_min_dist("H1")))
+    check("adjacent residue is not a loop-shell contact",
+          "CDR1" not in hints.loop_min_dist("H2"),
           str(hints.loop_min_dist("H2")))
     classes = hints.loop_classes()
     check("loop class fingerprint measured",
@@ -1793,14 +1796,19 @@ def test_multi_model_consensus_fields():
         m = PDBModel()
         for i in range(1, 9):
             m.atoms.append(PDBAtom("CA", "ALA", "A", i, i * 3.0, 0.0, 0.0, 90.0))
-            m.atoms.append(PDBAtom("CB", "ALA", "A", i, i * 3.0 + 1.0, 1.0, 0.0, 90.0))
+            # Residue 4 packs against CDR H6 but is not its sequence
+            # neighbour, so it is a genuine side-chain contact.
+            cb_x = 18.0 if i == 4 else i * 3.0 + 1.0
+            m.atoms.append(PDBAtom("CB", "ALA", "A", i, cb_x, 1.0, 0.0, 90.0))
         m.atoms.append(PDBAtom("CA", "ALA", "C", 1, 6.0 + shift, 2.0, 0.0, 90.0))
         return m
 
     pm = {f"H{i}": i for i in range(1, 9)}
     single = compute_hints(mk_model(), "A", pm, {"H6": 6}, antigen_chains=["C"])
-    check("cdr_contact uses all side-chain atoms",
-          single.data["cdr_contact"].get("H5") is True)
+    check("cdr_contact uses non-adjacent side-chain atoms",
+          single.data["cdr_contact"].get("H4") is True)
+    check("adjacent residue is not a CDR contact",
+          single.data["cdr_contact"].get("H5") is False)
     check("antigen contact detected", single.data["antigen_contact"].get("H3") is True)
 
     import tempfile as _tf
@@ -1815,7 +1823,7 @@ def test_multi_model_consensus_fields():
 
         for i in range(1, 9):
             atom("A", i, "CA", i * 3.0, 0.0, 0.0)
-            atom("A", i, "CB", i * 3.0 + 1.0, 1.0, 0.0)
+            atom("A", i, "CB", 18.0 if i == 4 else i * 3.0 + 1.0, 1.0, 0.0)
         atom("C", 1, "CA", 6.0 + shift, 2.0, 0.0)
         with open(path, "w") as fh:
             fh.write("\n".join(lines) + "\n")
@@ -1840,11 +1848,11 @@ def test_multi_model_consensus_fields():
               cons.data.get("loop_lengths") == {"CDR1": 1, "CDR2": 1},
               str(cons.data.get("loop_lengths")))
         check("consensus preserves per-loop distances",
-              "CDR1" in cons.loop_min_dist("H5"),
-              str(cons.loop_min_dist("H5")))
+              "CDR1" in cons.loop_min_dist("H4"),
+              str(cons.loop_min_dist("H4")))
         check("consensus preserves side-chain loop distances",
-              "CDR1" in cons.loop_min_dist_sc("H5"),
-              str(cons.loop_min_dist_sc("H5")))
+              "CDR1" in cons.loop_min_dist_sc("H4"),
+              str(cons.loop_min_dist_sc("H4")))
 
 
 def test_tool_kabat_mapping():
@@ -2185,6 +2193,11 @@ def test_structural_score_and_plddt():
     print("structural score + pLDDT")
     from humanize.backmut import _noisy_or, _plddt_factor
     from humanize.config import WEIGHTS
+    from humanize.structure import (
+        PDBAtom, PDBModel, chain_sequence, looks_like_predicted_structure,
+        parse_cif_atom_site, plddt_scale_for_model, resseq_sort_key,
+        _encode_resseq_icode, _AA3TO1,
+    )
 
     check("noisy-OR accumulates independent evidence",
           _noisy_or([0.85, 0.80]) > 0.85,
@@ -2195,17 +2208,88 @@ def test_structural_score_and_plddt():
     check("pLDDT high -> full weight", _plddt_factor(90) >= 0.999)
     check("pLDDT monotonic", _plddt_factor(60) < _plddt_factor(80))
 
+    # 0-1 pLDDT (some predictors) must be scaled to 0-100 exactly once.
+    m01 = PDBModel([
+        PDBAtom("CA", "ALA", "H", _encode_resseq_icode(1, " "), 0, 0, 0,
+                plddt=0.85),
+    ])
+    m100 = PDBModel([
+        PDBAtom("CA", "ALA", "H", _encode_resseq_icode(1, " "), 0, 0, 0,
+                plddt=85.0),
+    ])
+    check("0-1 pLDDT is scaled to 0-100",
+          plddt_scale_for_model(m01) == 100.0
+          and plddt_scale_for_model(m100) == 1.0)
+    check("generic 'model' filename is not treated as pLDDT",
+          not looks_like_predicted_structure("/tmp/model.pdb"))
+    check("AF3 filename marker enables pLDDT",
+          looks_like_predicted_structure("/tmp/af3_model.pdb"))
+
+    # Insertion codes must sort 99 < 100 < 100A < 100B < 101, not after 101.
+    ins_model = PDBModel([
+        PDBAtom("CA", "ALA", "H", _encode_resseq_icode(r, ic), 0, 0, 0)
+        for r, ic in ((101, " "), (100, "A"), (99, " "), (100, "B"),
+                      (100, " "))
+    ])
+    check("insertion codes sort between 100 and 101",
+          chain_sequence({"H": ins_model.atoms}, "H") == "AAAAA"
+          and [resseq_sort_key(a.resseq)
+               for a in sorted(ins_model.atoms, key=lambda a: resseq_sort_key(a.resseq))]
+          == [(99, " "), (100, " "), (100, "A"), (100, "B"), (101, " ")])
+
+    # mmCIF insertion codes must survive parsing.
+    cif = """data_test
+loop_
+_atom_site.group_PDB
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.B_iso_or_equiv
+ATOM CA ALA H 100 ? 0.0 0.0 0.0 90.0
+ATOM CA ALA H 100 A 1.0 0.0 0.0 90.0
+ATOM CA ALA H 101 ? 2.0 0.0 0.0 90.0
+"""
+    with tempfile.TemporaryDirectory() as td:
+        cp = os.path.join(td, "ins.cif")
+        with open(cp, "w") as fh:
+            fh.write(cif)
+        cm = parse_cif_atom_site(cp)
+    check("CIF insertion codes parsed",
+          cm is not None
+          and sorted((resseq_sort_key(a.resseq) for a in cm.atoms))
+          == [(100, " "), (100, "A"), (101, " ")])
+
+    # A tagged model (3 extra N-terminal residues) must map by alignment to
+    # its real PDB numbering, not to index+1.
+    from humanize.pipeline import pdb_chain_pos_map
+    aa3 = {v: k for k, v in _AA3TO1.items()}
+    donor = number_heavy(M4D5_VH)
+    tagged = PDBModel([
+        PDBAtom("CA", aa3.get(aa, "ALA"), "H", 10 + i, 0, 0, 0)
+        for i, aa in enumerate("GGG" + donor.sequence)
+    ])
+    pm = pdb_chain_pos_map(tagged, "H", donor)
+    check("tagged model maps to actual PDB numbering",
+          pm.get(donor.residues[0].pos) == 13
+          and pm.get(donor.residues[-1].pos) == len(donor.sequence) + 12,
+          str(pm))
+
     db = load_germline_db(os.path.join(ROOT, "data", "germline"))
     donor = number_heavy(M4D5_VH)
     vg = [g for g in db.v_genes if g.gene_id == "IGHV3-66*01"][0]
     base = analyze_backmutations(donor, vg)
     h27 = next((c for c in base.candidates if c.position == "H27"
                 and "canonical" in c.features and "vernier" in c.features), None)
-    check("multi-feature structural score uses noisy-OR",
+    check("correlated literature features use max, not noisy-OR",
           h27 is not None
           and abs(h27.structural_score
-                  - round(_noisy_or([WEIGHTS["structural"]["canonical"],
-                                     WEIGHTS["structural"]["vernier"]]), 2)) < 0.02,
+                  - round(max(WEIGHTS["structural"]["canonical"],
+                              WEIGHTS["structural"]["vernier"]), 2)) < 0.02,
           str(h27.structural_score if h27 else None))
 
 

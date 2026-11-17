@@ -50,24 +50,38 @@ CSV, so the penalty is never hidden.
 | vhh_hallmark | 1.00 | keep-donor, never revert |
 | disulfide_cys | 1.00 | keep-donor, never revert |
 
-The structural score combines the present features with a **noisy-OR**
-(`1 - Π(1 - w_i)`), so independent pieces of evidence reinforce each other
-instead of collapsing to the single strongest feature. It is then made
-**structure-adaptive** (per antibody) in four ways:
+The structural score combines evidence by **independence class**, not as one
+flat pool:
+
+- **Literature roles** (`interface_core`, `vernier`, `canonical`,
+  `interface_extended`) are correlated annotations of the same underlying
+  packing/loop relationship, so the group contributes its **maximum** weight
+  (`max(w_i)`), not a noisy-OR sum.
+- **Directly measured geometry** (`cdr_contact`, `antigen_contact`,
+  `vhvl_contact`, `loop_shell`, disulfide/hallmark locks) is independent
+  per-antibody evidence and uses **noisy-OR** (`1 - Π(1 - w_i)`).
+- **Burial** (`buried`) is a separate axis. It is combined with the non-burial
+  score by noisy-OR, but it is never multiplied by the exposure factor — its
+  meaning is already "not exposed".
+
+It is then made **structure-adaptive** (per antibody) in four ways:
 
 1. **Fractional contacts.** A CDR contact is weighted by how it is formed:
    side-chain-mediated (`cdr_contact_sc` = 0.85) is functional — a side-chain
    swap can break it — while a backbone-only contact (`cdr_contact_bb` = 0.30)
    is fixed β-sandwich geometry that no side-chain substitution changes.
 2. **Exposure modulation** (`config.STRUCTURAL_EXPOSURE_FACTOR`, applied only
-   to *non-functional* positions): deeply buried positions are boosted (1.15)
-   and exposed ones down-weighted (0.70), continuously in relSASA when
-   available, else from the binary buried hint. The same literature position
-   therefore scores differently across antibodies whose local packing differs.
-   Positions with a functional contact are left untouched.
+   to the *non-burial, non-functional* part): deeply buried positions are
+   boosted (1.15) and exposed ones down-weighted (0.70), continuously in
+   relSASA when available, else from the binary buried hint. The same
+   literature position therefore scores differently across antibodies whose
+   local packing differs. Positions with a functional contact are left
+   untouched; the separate `buried` evidence is not multiplied again.
 3. **pLDDT factor**: continuous confidence weighting
    (`0.2 + 0.8·clip((pLDDT-50)/40, 0, 1)`, unknown pLDDT = 1.0), so
-   low-confidence structural evidence is down-weighted smoothly.
+   low-confidence structural evidence is down-weighted smoothly. Models that
+   write pLDDT as a 0–1 probability are detected and scaled to 0–100 exactly
+   once (`plddt_scale_for_model`).
 4. **Per-antibody loop-class correction** (`loopclass.py`, see
    `docs/theory.md` §2.6): the feature *set* is corrected before scoring, not
    just reweighted. A `canonical` claim whose predicted loop is > 8 A away is
@@ -78,6 +92,18 @@ instead of collapsing to the single strongest feature. It is then made
    neighbourhood, not a packing contact). When the canonical claim survives,
    its weight is scaled by the modelled confidence of the loop it supports
    (mean pLDDT: 1.0 at >= 80, 0.60 at <= 50).
+
+Contact measurements exclude **same-chain i±1 residues**: adjacent backbone
+atoms are covalently close (< 4.5 A) by construction and are not functional
+CDR/framework/loop contacts. This applies to `cdr_contact*`,
+`framework_nbr` and `loop_min_dist*`.
+
+PDB insertion codes are stored as unique dictionary keys
+(`resseq * 1000 + ord(icode)`) but every ordering operation uses the decoded
+`(resseq, icode)` key, so the order is `99 < 100 < 100A < 100B < 101`. CIF
+`pdbx_PDB_ins_code` is parsed, and donor→structure residue mapping uses
+sequence alignment (no `index+1` guess; unmappable positions emit a warning
+and carry no structural hints).
 
 Without structure all four reduce to identity, so the portable path is
 unchanged. The correction is skipped for a position whose model is missing a
@@ -232,7 +258,7 @@ CDR3 or the antigen it may need to stay donor. This is evaluated against the
 resulting `T_FR4` candidates are included in the V2 variant.
 
 Trigger: a donor/J mismatch at a J-region position whose structure-derived
-score meets `FR4_REVERSION_THRESHOLD` (0.4) — `cdr3_contact` 0.45,
+score meets `FR4_REVERSION_THRESHOLD` (0.55) — `cdr3_contact` 0.45,
 `antigen_contact` 0.35, `buried` 0.15, `interface_core` 0.05. An exposed
 mismatch with no CDR3/antigen contact is kept human (reverting it would only
 add a non-human surface residue).

@@ -71,10 +71,31 @@ def _encode_resseq_icode(resseq: int, icode: str) -> int:
     iCode into resseq as ``resseq * 1000 + ord(icode)`` so that 100A →
     100065 and 100B → 100066, while plain residues (1–999) never collide
     with the encoded range (≥ 100000).
+
+    The encoded value is a *unique key only*: it must not be used for
+    numeric ordering (100065 > 101 would put 100A after 101).  Use
+    :func:`resseq_sort_key` for any residue-order operation.
     """
     if icode and icode not in (" ", "\x00", ""):
         return resseq * 1000 + ord(icode)
     return resseq
+
+
+def _decode_resseq_icode(encoded: int) -> Tuple[int, str]:
+    """Inverse of :func:`_encode_resseq_icode` -> (resseq, icode)."""
+    if encoded >= 100000:
+        base, code = divmod(encoded, 1000)
+        return base, (chr(code) if code else " ")
+    return encoded, " "
+
+
+def resseq_sort_key(encoded: int) -> Tuple[int, str]:
+    """Order encoded residue numbers as (resseq, insertion-code).
+
+    Plain residues sort before insertion-coded residues at the same resseq
+    (100 < 100A < 100B < 101), regardless of the integer key used in dicts.
+    """
+    return _decode_resseq_icode(encoded)
 
 
 def parse_pdb(path: str) -> Optional[PDBModel]:
@@ -131,11 +152,16 @@ def parse_cif_atom_site(path: str) -> Optional[PDBModel]:
                         try:
                             b_iso = d.get("B_iso_or_equiv", "0")
                             plddt = float(b_iso) if b_iso not in (".", "?") else 0.0
+                            icode = d.get("pdbx_PDB_ins_code", " ")
+                            if icode in (".", "?", None):
+                                icode = " "
+                            resseq_raw = int(d.get("auth_seq_id",
+                                                    d.get("label_seq_id", "0")))
                             model.atoms.append(PDBAtom(
                                 name=d.get("auth_atom_id", d.get("label_atom_id", "?")),
                                 resname=d.get("auth_comp_id", d.get("label_comp_id", "?")),
                                 chain=d.get("auth_asym_id", d.get("label_asym_id", "?")),
-                                resseq=int(d.get("auth_seq_id", d.get("label_seq_id", "0"))),
+                                resseq=_encode_resseq_icode(resseq_raw, icode),
                                 x=float(d["Cartn_x"]),
                                 y=float(d["Cartn_y"]),
                                 z=float(d["Cartn_z"]),
@@ -189,8 +215,9 @@ def longest_common_run(a: str, b: str) -> int:
 
 def chain_sequence(pdb_chains: Dict[str, list], chain_id: str) -> str:
     """One-letter sequence of a PDB chain from its CA atoms (in resseq order)."""
-    cas = sorted((a.resseq, a.resname) for a in pdb_chains[chain_id]
-                 if a.name == "CA")
+    cas = sorted(((a.resseq, a.resname) for a in pdb_chains[chain_id]
+                  if a.name == "CA"),
+                 key=lambda t: (resseq_sort_key(t[0]), t[1]))
     return "".join(_AA3TO1.get(rn, "X") for _, rn in cas)
 
 
@@ -309,7 +336,8 @@ def _loop_conformation(by_res, chain_label, loop_resseqs):
     well-ordered backbones; an irregular loop has no class to support, so the
     canonical-support weight is scaled down (see loopclass.py).
     """
-    chain_res = sorted(r for (ch, r) in by_res if ch == chain_label)
+    chain_res = sorted((r for (ch, r) in by_res if ch == chain_label),
+                       key=resseq_sort_key)
     index = {r: i for i, r in enumerate(chain_res)}
     out = {}
     for loop, resseqs in loop_resseqs.items():
@@ -539,8 +567,11 @@ def looks_like_predicted_structure(path: str) -> bool:
     if not path:
         return False
     name = os.path.basename(path).lower()
+    # Do NOT use the generic token "model": many experimental files are
+    # named model.pdb / 1abc_model.pdb, and treating their temperature
+    # factors as pLDDT would silently disable the structure evidence.
     if any(k in name for k in ("af3", "alphafold", "boltz", "colabfold",
-                                "openfold", "esmfold", "model")):
+                                "openfold", "esmfold")):
         return True
     try:
         with open(path, "rt", errors="ignore") as fh:
@@ -567,6 +598,21 @@ def _compute_buriedness(
         if data:
             return data, "freesasa"
     return _shrake_rupley_buriedness(model, chain_label, resseq_to_pos), "shrake-rupley"
+
+
+def plddt_scale_for_model(model: PDBModel) -> float:
+    """Return 100.0 for 0–1 pLDDT output, else 1.0 for native 0–100 pLDDT.
+
+    AF3 and its derivatives normally write 0–100 into the B-factor column,
+    but some pipelines/tools write probabilities in 0–1.  Treating a 0.85
+    probability as 0.85 pLDDT would down-weight every structural feature by
+    ~40x, so detect the scale once per model.
+    """
+    vals = [a.plddt for a in model.atoms
+            if a.name == "CA" and a.plddt > 0]
+    if vals and max(vals) <= 1.0:
+        return 100.0
+    return 1.0
 
 
 def compute_hints(
@@ -644,8 +690,9 @@ def compute_hints(
     # Per-loop mean pLDDT: a canonical class only exists for a reliably
     # modelled loop, so the canonical claim is scaled by this confidence.
     loop_plddt: Dict[str, float] = {}
-    loop_classes = _loop_conformation(by_res, chain_label,
-                                      {k: sorted(v) for k, v in loop_resseq_set.items()})
+    loop_classes = _loop_conformation(
+        by_res, chain_label,
+        {k: sorted(v, key=resseq_sort_key) for k, v in loop_resseq_set.items()})
     loop_min_dist: Dict[str, Dict[str, float]] = {}
     loop_min_dist_sc: Dict[str, Dict[str, float]] = {}
     loop_contact_count: Dict[str, Dict[str, int]] = {}
@@ -654,13 +701,16 @@ def compute_hints(
     # map resseq -> kabat pos
     resseq_to_pos = {v: k for k, v in position_map.items()}
 
+    plddt_scale = plddt_scale_for_model(model) if use_plddt else 1.0
     if use_plddt:
         plddt_by_resseq: Dict[Tuple[str, int], float] = {}
         for a in model.atoms:
             if a.chain == chain_label and a.name == "CA" and a.plddt > 0:
-                plddt_by_resseq.setdefault((chain_label, a.resseq), a.plddt)
+                plddt_by_resseq.setdefault((chain_label, a.resseq),
+                                           a.plddt * plddt_scale)
         for loop, rs in loop_resseq_set.items():
-            vals = [plddt_by_resseq[(chain_label, r)] for r in sorted(rs)
+            vals = [plddt_by_resseq[(chain_label, r)]
+                    for r in sorted(rs, key=resseq_sort_key)
                     if (chain_label, r) in plddt_by_resseq]
             if vals:
                 loop_plddt[loop] = round(sum(vals) / len(vals), 2)
@@ -673,7 +723,7 @@ def compute_hints(
             if a.chain == chain_label and a.plddt > 0:
                 pos = resseq_to_pos.get(a.resseq)
                 if pos and pos not in plddt_by_pos:
-                    plddt_by_pos[pos] = a.plddt
+                    plddt_by_pos[pos] = a.plddt * plddt_scale
 
     # Solvent accessibility from a validated implementation. FreeSASA is used
     # for PDB input; Shrake-Rupley (pure Python) covers CIF input and any
@@ -695,6 +745,25 @@ def compute_hints(
             buried[pos] = None
         else:
             buried[pos] = is_buried
+
+    # Residue order per chain, used to exclude immediate sequence neighbours.
+    # Covalent i±1 proximity (<4.5 A is normal for adjacent CA/backbone atoms)
+    # is fixed by the polypeptide backbone and is not a functional contact;
+    # counting it as CDR/framework packing would promote nearly every residue
+    # at a loop boundary.
+    chain_order: Dict[str, List[int]] = {}
+    for (ch, resseq) in by_res:
+        chain_order.setdefault(ch, []).append(resseq)
+    chain_index: Dict[str, Dict[int, int]] = {}
+    for ch, rs in chain_order.items():
+        rs.sort(key=resseq_sort_key)
+        chain_index[ch] = {r: i for i, r in enumerate(rs)}
+
+    def _adjacent(ch1: str, r1: int, ch2: str, r2: int) -> bool:
+        if ch1 != ch2:
+            return False
+        idx = chain_index.get(ch1, {})
+        return abs(idx.get(r1, -999) - idx.get(r2, -999)) == 1
 
     cdr_contact: Dict[str, bool] = {}
     cdr_contact_sc: Dict[str, bool] = {}
@@ -724,6 +793,8 @@ def compute_hints(
         for (r2, _n2, a2) in cdr_atoms:
             ppos = resseq_to_pos.get(r2[1])
             if not ppos:
+                continue
+            if _adjacent(ch, resseq, r2[0], r2[1]):
                 continue
             if any(_dist(a2, a1) < 4.5 for (_n1, a1) in atoms):
                 partners.add(ppos)
@@ -763,6 +834,8 @@ def compute_hints(
             for (och, ores), oatoms in by_res.items():
                 if och != chain_label or ores == resseq or ores in cdr_resseqs:
                     continue
+                if _adjacent(chain_label, resseq, och, ores):
+                    continue
                 osc = [(n1, a1) for n1, a1 in oatoms
                        if n1 not in {"N", "CA", "C", "O"}]
                 if any(_dist(a1, a2) < 4.5
@@ -778,17 +851,22 @@ def compute_hints(
             for loop, latoms in loop_atoms.items():
                 if resseq in loop_resseq_set[loop] or not atoms:
                     continue
+                latoms_nb = [t for t in latoms
+                             if not _adjacent(chain_label, resseq,
+                                              t[0][0], t[0][1])]
+                if not latoms_nb:
+                    continue
                 ld[loop] = min(_dist(a1, a2)
                                for (_n1, a1) in atoms
-                               for (_r2, _n2, a2) in latoms)
+                               for (_r2, _n2, a2) in latoms_nb)
                 if sidechain:
                     lds[loop] = min(_dist(a1, a2)
                                     for (_n1, a1) in sidechain
-                                    for (_r2, _n2, a2) in latoms)
-                lc[loop] = len({r2[1] for (r2, _n2, a2) in latoms
+                                    for (_r2, _n2, a2) in latoms_nb)
+                lc[loop] = len({r2[1] for (r2, _n2, a2) in latoms_nb
                                 if any(_dist(a2, a1) < 4.5
                                        for (_n1, a1) in atoms)})
-                lc_sc[loop] = len({r2[1] for (r2, _n2, a2) in latoms
+                lc_sc[loop] = len({r2[1] for (r2, _n2, a2) in latoms_nb
                                    if any(_dist(a2, a1) < 4.5
                                           for (_n1, a1) in sidechain)}) \
                     if sidechain else 0

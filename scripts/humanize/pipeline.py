@@ -29,7 +29,16 @@ from .graft import GraftResult, graft_chain
 from .mpnn import MPNNConfig
 from .numbering import NumberedChain
 from .sequences import InputChain, parse_input
-from .structure import AF3Config, StructureHints as _SH, predict_fv, looks_like_predicted_structure
+from .structure import (
+    AF3Config,
+    StructureHints as _SH,
+    chain_sequence,
+    predict_fv,
+    looks_like_predicted_structure,
+    plddt_scale_for_model,
+    resseq_sort_key,
+    _AA3TO1,
+)
 from .variants import Variant, assemble_variants
 
 
@@ -448,21 +457,24 @@ def _process_chain(
                     ag_chains = [c for c in pdb_chains if c not in used] or None
                 partner_chains = [plabel] if plabel else None
 
-                # Map donor Kabat positions to PDB residue numbers. When the
-                # PDB chain has exactly one CA per donor residue (the usual AF3
-                # case, and tagged experimental PDBs), use the *actual* PDB
-                # numbering instead of assuming resseq == index+1.
-                ca_sorted = sorted(
-                    (a.resseq, a.resname) for a in pdb_chains[label] if a.name == "CA")
-                if len(ca_sorted) == len(donor.residues):
-                    all_pos = {r.pos: ca_sorted[i][0]
-                               for i, r in enumerate(donor.residues)}
-                else:
-                    all_pos = {r.pos: r.index + 1 for r in donor.residues}
+                # Map donor Kabat positions to PDB residue numbers by sequence
+                # alignment, then fall back to a strict one-CA-per-residue
+                # positional map. Never assume resseq == index+1: tagged or
+                # truncated models would silently map every downstream position
+                # to the wrong residue.
+                model_seq = chain_sequence(pdb_chains, label)
+                all_pos = align_pos_map(donor, model_seq, model, label)
+                if not all_pos:
+                    all_pos = pdb_chain_pos_map(model, label, donor)
+                if not all_pos:
                     chain.warnings.append(
-                        f"[{chain.name}] structure chain has {len(ca_sorted)} CA "
-                        f"vs {len(donor.residues)} donor residues; assuming "
-                        f"sequential numbering")
+                        f"[{chain.name}] could not map donor residues onto "
+                        f"structure chain '{label}'; structure hints skipped")
+                elif len(all_pos) < len(donor.residues):
+                    chain.warnings.append(
+                        f"[{chain.name}] structure chain '{label}' covers "
+                        f"{len(all_pos)}/{len(donor.residues)} donor residues; "
+                        f"missing positions have no structural hints")
                 donor_struct = (model, label, all_pos)
                 from .graft import is_cdr_loop_position, loop_of_position
                 cdrs = {p: n for p, n in all_pos.items()
@@ -813,14 +825,19 @@ def build_cdr_framework_sets(
 def pdb_chain_pos_map(model, chain: str, numbered: NumberedChain) -> Dict[str, int]:
     """Map numbered Kabat positions to PDB residue numbers for one chain.
 
-    Prefers the actual PDB numbering when the chain has exactly one CA per
-    numbered residue; otherwise falls back to sequential 1..N.
+    Uses the actual PDB numbering when there is exactly one CA per numbered
+    residue; otherwise aligns the sequences and maps only aligned positions.
+    Returns {} when no trustworthy map exists (never guesses index+1).
     """
-    ca = sorted((a.resseq, a.resname)
-                for a in model.atoms if a.chain == chain and a.name == "CA")
+    ca = sorted(((a.resseq, a.resname) for a in model.atoms
+                 if a.chain == chain and a.name == "CA"),
+                key=lambda t: (resseq_sort_key(t[0]), t[1]))
+    if not ca:
+        return {}
     if len(ca) == len(numbered.residues):
         return {r.pos: ca[i][0] for i, r in enumerate(numbered.residues)}
-    return {r.pos: r.index + 1 for r in numbered.residues}
+    ca_seq = "".join(_AA3TO1.get(rn, "X") for _, rn in ca)
+    return align_pos_map(numbered, ca_seq, model, chain) or {}
 
 
 def align_pos_map(donor_numbered, vseq: str, model, chain: str,
@@ -837,8 +854,9 @@ def align_pos_map(donor_numbered, vseq: str, model, chain: str,
     """
     from .fr_indel import _needleman_wunsch
 
-    ca = sorted((a.resseq, a.resname)
-                for a in model.atoms if a.chain == chain and a.name == "CA")
+    ca = sorted(((a.resseq, a.resname) for a in model.atoms
+                 if a.chain == chain and a.name == "CA"),
+                key=lambda t: (resseq_sort_key(t[0]), t[1]))
     if len(ca) != len(vseq):
         return None
     aln = _needleman_wunsch(list(donor_numbered.sequence), list(vseq))
@@ -861,7 +879,8 @@ def align_pos_map(donor_numbered, vseq: str, model, chain: str,
 def _plddt_by_pos(model, label: str, numbered: NumberedChain) -> Dict[str, float]:
     """{Kabat pos: AF3 pLDDT} for one chain (empty for experimental PDBs)."""
     pos2res = pdb_chain_pos_map(model, label, numbered)
-    by_res = {a.resseq: a.plddt for a in model.atoms
+    scale = plddt_scale_for_model(model)
+    by_res = {a.resseq: a.plddt * scale for a in model.atoms
               if a.chain == label and a.name == "CA" and a.plddt > 0}
     return {p: by_res[res] for p, res in pos2res.items() if res in by_res}
 
@@ -877,8 +896,9 @@ def _measure_variant(donor_struct, config: PipelineConfig, donor_numbered,
     # Two independent numbering runs (donor FASTA vs variant PDB sequence)
     # can place CDR insertions at different anchor residues; pairing by
     # label alone then mismatches residues and inflates CDR-RMSD.
-    ca = sorted((a.resseq, a.resname)
-                for a in vmodel.atoms if a.chain == vlabel and a.name == "CA")
+    ca = sorted(((a.resseq, a.resname) for a in vmodel.atoms
+                 if a.chain == vlabel and a.name == "CA"),
+                key=lambda t: (resseq_sort_key(t[0]), t[1]))
     vseq = "".join(_AA3TO1.get(rn, "X") for _, rn in ca)
     vpos = align_pos_map(donor_numbered, vseq, vmodel, vlabel)
     if vpos is None:

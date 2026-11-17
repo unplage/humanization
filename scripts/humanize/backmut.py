@@ -769,27 +769,58 @@ def analyze_backmutations(
         features = loop_corr.features
 
         # ---- structural score ----
-        # Noisy-OR combination: independent pieces of structural evidence
-        # accumulate (multiple weak features reinforce each other) instead of
-        # being collapsed to the single strongest feature by max().
+        # Evidence is combined by independence class, not as one flat pool:
+        #   literature group -> max (correlated role annotations)
+        #   measured group   -> noisy-OR (independent per-antibody geometry)
+        #   burial           -> separate axis, never exposure-modulated
         # Fractional-contact weighting is per-antibody geometry: a
         # side-chain-mediated CDR contact is functional (a side-chain swap can
         # break it), whereas a backbone-only contact is fixed beta-sandwich
         # geometry that no side-chain substitution can change.
         w = WEIGHTS["structural"]
         rel_sasa = structure.rel_sasa(pos)
-        evidence: List[float] = []
+        # Literature role annotations are heavily correlated with one another
+        # (a vernier residue is usually also canonical/interface), so they
+        # must not be accumulated as independent evidence: take the strongest
+        # claim in that group. Directly measured structural signals (contacts,
+        # loop shell) are independent of the tables and of each other, so they
+        # still combine by noisy-OR.
+        literature_evidence: List[float] = []
+        measured_evidence: List[float] = []
+        burial_evidence = 0.0
         for f in features:
             if f == "cdr_contact":
-                evidence.append(_contact_evidence_weight(sc_contact))
+                measured_evidence.append(_contact_evidence_weight(sc_contact))
+            elif f == "buried":
+                # Solvent burial is a separate axis. Keeping it out of the
+                # noisy-OR below prevents a buried position from being counted
+                # twice (once as "buried", once via the exposure multiplier).
+                burial_evidence = max(burial_evidence, w[f])
             elif f == "canonical":
                 # class weighting: canonical classes are defined by main-chain
                 # conformation, so an irregular loop carries less class-specific
                 # support (loopclass.py sets the factor)
-                evidence.append(w[f] * loop_corr.canonical_factor)
+                literature_evidence.append(w[f] * loop_corr.canonical_factor)
+            elif f in LITERATURE_FEATURES:
+                literature_evidence.append(w[f])
             elif f in w:
-                evidence.append(w[f])
-        structural = _noisy_or(evidence)
+                measured_evidence.append(w[f])
+        lit_score = max(literature_evidence) if literature_evidence else 0.0
+        measured_score = _noisy_or(measured_evidence)
+        nonburial = _noisy_or([lit_score, measured_score])
+
+        # Structure-adaptive exposure modulation. A functional contact is
+        # important regardless of exposure, so it is left untouched; otherwise
+        # the same literature position is re-weighted by its actual packing in
+        # THIS antibody (continuous relSASA when available, binary fallback,
+        # exactly 1.0 without structure so the portable path is unchanged).
+        # Burial is deliberately excluded from this multiplier: its whole
+        # meaning is already "this position is not exposed".
+        functional_contact = (sc_contact is True) or (ag_contact is True)
+        if not functional_contact:
+            nonburial = min(
+                1.0, nonburial * _structural_exposure_factor(rel_sasa, buried))
+        structural = _noisy_or([nonburial, burial_evidence])
         # Structure mode: a literature-only claim with no direct measured
         # corroboration at this position is a weak prior, not a structural
         # fact. Discount it so ranking does not over-trust the static tables.
@@ -798,16 +829,6 @@ def analyze_backmutations(
                     and bool(structure.data))
         if lit_only:
             structural *= LITERATURE_ONLY_FACTOR
-
-        # Structure-adaptive exposure modulation. A functional contact is
-        # important regardless of exposure, so it is left untouched; otherwise
-        # the same literature position is re-weighted by its actual packing in
-        # THIS antibody (continuous relSASA when available, binary fallback,
-        # exactly 1.0 without structure so the portable path is unchanged).
-        functional_contact = (sc_contact is True) or (ag_contact is True)
-        if not functional_contact:
-            structural = min(
-                1.0, structural * _structural_exposure_factor(rel_sasa, buried))
 
         # pLDDT: continuous confidence weighting (not a hard threshold). The
         # structure evidence is scaled smoothly from 0.2 at pLDDT <= 50 to 1.0

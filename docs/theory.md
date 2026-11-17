@@ -79,10 +79,19 @@ these are 42/49/50/52.)
   Buriedness is computed by FreeSASA (accurate SASA calculation) when
   available, with a contact-counting heuristic fallback.
 - **CDR contact** (heavy atom < 4.5 A to any CDR atom): directly stabilizes
-  loop conformation → high reversion priority.
+  loop conformation → high reversion priority. Same-chain **i±1** residues are
+  excluded: adjacent backbone atoms are covalent neighbours, not functional
+  contacts. The same exclusion applies to framework packing and loop
+  distances (`framework_nbr`, `loop_min_dist*`).
 - **Antigen contact** (heavy atom < 4.5 A to antigen, complex model):
   can affect binding directly; keep donor unless proven neutral.
 - **Disulfide Cys** (e.g. VHH CDR3 disulfide partners in FR): keep donor.
+
+Residue numbering: insertion codes are unique keys but ordered by
+`(resseq, icode)` (100 < 100A < 100B < 101). Donor→structure mapping uses
+sequence alignment; if it cannot be trusted, the position is left without
+hints rather than assigned `index+1`. pLDDT written as 0–1 is scaled to
+0–100 once before use.
 
 ### 2.6 Per-antibody loop-class correction (structure mode only)
 
@@ -111,8 +120,13 @@ loop 长度、loop 平均 pLDDT。
    该证据只用于**排序**，不升级 tier：8 Å 是"邻域"而非"接触"。
 
 **防双计**：埋藏门槛与 `buried` 特征同源，因此 `loop_shell` 只加在**没有任何
-其他结构证据**（含 `buried`）的位点上——否则同一份埋藏+邻近证据会在 noisy-OR
-里被算两次（实测这会让 12-24% 的 FR 位点结构分从 0.70 虚抬到 0.91）。
+其他结构证据**（含 `buried`）的位点上——否则同一份埋藏+邻近证据会在实测组
+noisy-OR 里被算两次（实测这会让 12-24% 的 FR 位点结构分从 0.70 虚抬到 0.91）。
+文献角色集（canonical/vernier/interface）彼此高度相关，组内取 max；`buried`
+独立成轴，且不再乘暴露度因子。
+
+**邻接排除**：同链 i±1 残基的骨架原子天然 < 4.5 Å，不能作为 CDR/框架/loop
+接触证据（`cdr_contact*`、`framework_nbr`、`loop_min_dist*` 均跳过）。
 
 **多模型投票**：多模型共识时，二壳层关系必须在 ≥ 60% 的模型中成立
 （`LOOP_CLASS["vote_fraction"]`）才被采纳，避免单个噪声模型制造特征。
