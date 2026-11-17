@@ -338,32 +338,168 @@ def _loop_conformation(by_res, chain_label, loop_resseqs):
     return out
 
 
+# Reference (theoretical) maximum SASA per residue, Tien et al. 2013.
+REF_SASA = {
+    "ALA": 129.0, "ARG": 274.0, "ASN": 195.0, "ASP": 193.0,
+    "CYS": 167.0, "GLU": 223.0, "GLN": 225.0, "GLY": 104.0,
+    "HIS": 224.0, "ILE": 197.0, "LEU": 201.0, "LYS": 236.0,
+    "MET": 224.0, "PHE": 240.0, "PRO": 159.0, "SER": 155.0,
+    "THR": 172.0, "TRP": 285.0, "TYR": 263.0, "VAL": 174.0,
+}
+
+# Bondi van der Waals radii (A) for the elements found in proteins.
+VDW_RADIUS = {
+    "C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80, "P": 1.80,
+    "F": 1.47, "CL": 1.75, "BR": 1.85, "I": 1.98, "SE": 1.90,
+}
+
+PROBE_RADIUS = 1.4  # water probe, as in FreeSASA's default Lee-Richards run
+
+
+def _element_of(atom_name: str) -> str:
+    """Derive the element symbol from a (protein) PDB atom name."""
+    name = "".join(c for c in atom_name.upper() if c.isalpha())
+    if not name:
+        return "C"
+    if name[:2] in VDW_RADIUS:          # SE, CL, BR ...
+        return name[:2]
+    return name[0]
+
+
+def _fibonacci_sphere(n: int) -> List[Tuple[float, float, float]]:
+    """Unit-sphere points from a Fibonacci lattice (deterministic, no RNG)."""
+    pts = []
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    for i in range(n):
+        y = 1.0 - 2.0 * i / (n - 1)
+        r = math.sqrt(max(0.0, 1.0 - y * y))
+        theta = golden * i
+        pts.append((math.cos(theta) * r, y, math.sin(theta) * r))
+    return pts
+
+
+def _shrake_rupley_buriedness(
+    model: PDBModel,
+    chain_label: str,
+    resseq_to_pos: Dict[int, str],
+    n_points: int = 92,
+) -> Dict[str, Tuple[bool, float]]:
+    """Dependency-free Shrake & Rupley (1973) solvent-accessible surface.
+
+    Used whenever FreeSASA is unavailable **or** the structure file is not in
+    PDB format (FreeSASA cannot read mmCIF). Operates on the in-memory model,
+    so it works identically for PDB and CIF input and uses exactly the same
+    coordinates as the contact/buriedness hints.
+
+    Per atom, a Fibonacci-distributed set of probe-centre points on a sphere
+    of radius ``r_vdw + 1.4 A`` is tested against every neighbouring atom; the
+    accessible fraction of those points gives the atom's SASA. The residue
+    SASA is normalised by the Tien et al. (2013) theoretical maximum.
+
+    Returns {pos: (rel_sasa < 0.20, rel_sasa)} for residues of ``chain_label``.
+    """
+    heavy = model.heavy_atoms()
+    if not heavy:
+        return {}
+
+    atoms = []
+    for (ch, resseq), name, xyz in heavy:
+        r = VDW_RADIUS.get(_element_of(name), 1.70) + PROBE_RADIUS
+        atoms.append((ch, resseq, name, xyz, r))
+    n = len(atoms)
+
+    # Spatial hash with cell size = 2 * max radius so ±1 cell is sufficient.
+    cell = 2.0 * max(a[4] for a in atoms)
+    grid: Dict[Tuple[int, int, int], List[int]] = {}
+    for idx, (_, _, _, xyz, _) in enumerate(atoms):
+        key = (int(xyz[0] // cell), int(xyz[1] // cell), int(xyz[2] // cell))
+        grid.setdefault(key, []).append(idx)
+
+    # Pre-compute the neighbour list once (atoms whose spheres can overlap).
+    neighbours: List[List[int]] = []
+    for i, (_, _, _, (xi, yi, zi), ri) in enumerate(atoms):
+        cx, cy, cz = int(xi // cell), int(yi // cell), int(zi // cell)
+        cand: List[int] = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    cand.extend(grid.get((cx + dx, cy + dy, cz + dz), ()))
+        ri2 = ri
+        near = []
+        for j in cand:
+            if j == i:
+                continue
+            _, _, _, (xj, yj, zj), rj = atoms[j]
+            # overlap possible only if centres are closer than ri + rj
+            if (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2 < (ri2 + rj) ** 2:
+                near.append(j)
+        neighbours.append(near)
+
+    sphere = _fibonacci_sphere(n_points)
+    atom_sasa = [0.0] * n
+    # For each neighbour list, store (x, y, z, r^2) to keep the inner loop tight.
+    nb_data = [
+        [(atoms[j][3][0], atoms[j][3][1], atoms[j][3][2], atoms[j][4] ** 2)
+         for j in near]
+        for near in neighbours
+    ]
+    for i, (_, _, _, (xi, yi, zi), ri) in enumerate(atoms):
+        nb = nb_data[i]
+        if not nb:
+            atom_sasa[i] = 4.0 * math.pi * ri * ri
+            continue
+        acc = 0
+        for (ux, uy, uz) in sphere:
+            px, py, pz = xi + ux * ri, yi + uy * ri, zi + uz * ri
+            exposed = True
+            for (xj, yj, zj, rj2) in nb:
+                if (px - xj) ** 2 + (py - yj) ** 2 + (pz - zj) ** 2 < rj2:
+                    exposed = False
+                    break
+            if exposed:
+                acc += 1
+        atom_sasa[i] = 4.0 * math.pi * ri * ri * (acc / n_points)
+
+    res_sasa: Dict[Tuple[str, int], float] = {}
+    for i, (ch, resseq, _, _, _) in enumerate(atoms):
+        res_sasa[(ch, resseq)] = res_sasa.get((ch, resseq), 0.0) + atom_sasa[i]
+
+    # residue name (3-letter) from the model, for the reference-SASA lookup
+    res_name: Dict[Tuple[str, int], str] = {}
+    for a in model.atoms:
+        res_name.setdefault((a.chain, a.resseq), a.resname.upper())
+
+    out: Dict[str, Tuple[bool, float]] = {}
+    for resseq, pos in resseq_to_pos.items():
+        key = (chain_label, resseq)
+        abs_sasa = res_sasa.get(key)
+        rname = res_name.get(key)
+        if abs_sasa is None or not rname or rname not in REF_SASA:
+            continue
+        rel = abs_sasa / REF_SASA[rname]
+        out[pos] = (rel < 0.20, rel)
+    return out
+
+
 def _try_freesasa_buriedness(
     pdb_path: str,
     chain_label: str,
     resseq_to_pos: Dict[int, str],
 ) -> Optional[Dict[str, Tuple[bool, float]]]:
-    """Try to compute buriedness using FreeSASA. Returns None if unavailable.
-    
-    Returns: {pos: (is_buried, rel_sasa)} - includes relSASA for confidence interval.
+    """Compute buriedness with FreeSASA if it is installed and readable.
+
+    Returns None when FreeSASA is missing, the file is not a PDB (FreeSASA
+    cannot read mmCIF), or FreeSASA raises for any reason. The caller then
+    falls back to the in-process Shrake-Rupley implementation, so a CIF
+    donor structure — or a malformed/unsupported PDB — never aborts a run.
     """
     try:
         import freesasa
         from collections import defaultdict
-        
+
         structure = freesasa.Structure(pdb_path)
         result = freesasa.calc(structure)
-        
-        # Reference SASA values (Tien et al. 2013)
-        ref_sasa = {
-            'ALA': 129.0, 'ARG': 274.0, 'ASN': 195.0, 'ASP': 193.0,
-            'CYS': 167.0, 'GLU': 223.0, 'GLN': 225.0, 'GLY': 104.0,
-            'HIS': 224.0, 'ILE': 197.0, 'LEU': 201.0, 'LYS': 236.0,
-            'MET': 224.0, 'PHE': 240.0, 'PRO': 159.0, 'SER': 155.0,
-            'THR': 172.0, 'TRP': 285.0, 'TYR': 263.0, 'VAL': 174.0,
-        }
-        
-        # Calculate per-residue SASA
+
         sasa_by_residue = defaultdict(float)
         residue_names = {}
         for i in range(structure.nAtoms()):
@@ -371,24 +507,66 @@ def _try_freesasa_buriedness(
             res_num = structure.residueNumber(i)
             if isinstance(res_num, str):
                 res_num = int(res_num.strip())
-            area = result.atomArea(i)
-            sasa_by_residue[(chain, res_num)] += area
+            sasa_by_residue[(chain, res_num)] += result.atomArea(i)
             residue_names[(chain, res_num)] = structure.residueName(i)
-        
-        # Convert to buried/exposed with relSASA
+
         buried = {}
         for resseq, pos in resseq_to_pos.items():
             key = (chain_label, resseq)
             if key in sasa_by_residue:
-                abs_sasa = sasa_by_residue[key]
                 resname = residue_names.get(key)
-                if resname and resname in ref_sasa:
-                    rel_sasa = abs_sasa / ref_sasa[resname]
+                if resname and resname in REF_SASA:
+                    rel_sasa = sasa_by_residue[key] / REF_SASA[resname]
                     buried[pos] = (rel_sasa < 0.20, rel_sasa)
-        
         return buried if buried else None
     except ImportError:
         return None
+    except Exception:
+        # FreeSASA only parses PDB; CIF input (and unusual PDB records) raise
+        # here. Degrade to the built-in SASA instead of crashing the pipeline.
+        return None
+
+
+def looks_like_predicted_structure(path: str) -> bool:
+    """Heuristic: does this structure file carry per-residue pLDDT in B-factor?
+
+    Predictors (AF3, Boltz, ColabFold, OpenFold, ESMFold) usually name their
+    outputs with a recognisable token or write a REMARK/TITLE/category that
+    mentions the method or pLDDT. When neither is present we cannot tell a
+    prediction's pLDDT from a crystallographic B-factor, so we return False
+    and the caller emits a warning instead of silently ignoring either.
+    """
+    if not path:
+        return False
+    name = os.path.basename(path).lower()
+    if any(k in name for k in ("af3", "alphafold", "boltz", "colabfold",
+                                "openfold", "esmfold", "model")):
+        return True
+    try:
+        with open(path, "rt", errors="ignore") as fh:
+            head = "".join(fh.readline() for _ in range(80)).lower()
+    except Exception:
+        return False
+    return any(k in head for k in ("alphafold", "boltz", "colabfold",
+                                    "openfold", "esmfold", "plddt", "predicted"))
+
+
+def _compute_buriedness(
+    model: PDBModel,
+    chain_label: str,
+    resseq_to_pos: Dict[int, str],
+    pdb_path: Optional[str] = None,
+) -> Tuple[Dict[str, Tuple[bool, float]], str]:
+    """Validated buriedness: FreeSASA for PDB when available, else Shrake-Rupley.
+
+    Returns ({pos: (is_buried, rel_sasa)}, method_name).
+    """
+    is_pdb = bool(pdb_path) and pdb_path.lower().endswith((".pdb", ".ent"))
+    if is_pdb and pdb_path is not None:
+        data = _try_freesasa_buriedness(pdb_path, chain_label, resseq_to_pos)
+        if data:
+            return data, "freesasa"
+    return _shrake_rupley_buriedness(model, chain_label, resseq_to_pos), "shrake-rupley"
 
 
 def compute_hints(
@@ -397,6 +575,7 @@ def compute_hints(
     position_map: Dict[str, int],
     cdr_positions: Dict[str, int],
     antigen_chains: Optional[List[str]] = None,
+    partner_chains: Optional[List[str]] = None,
     pdb_path: Optional[str] = None,
     literature_positions: Optional[set] = None,
     use_plddt: bool = True,
@@ -433,6 +612,12 @@ def compute_hints(
                  if a[0][0] == chain_label and a[0][1] in cdr_resseqs]
     ag_atoms = ([a for a in heavy if a[0][0] in antigen_chains]
                 if antigen_chains else [])
+    # VH/VL partner chain (Fab only). A framework residue whose side chain
+    # packs against the partner is under functional selection even when it
+    # touches no CDR; the literature interface tables alone miss such
+    # positions, so this is measured evidence rather than a literature set.
+    partner_atoms = ([a for a in heavy if a[0][0] in partner_chains]
+                     if partner_chains else [])
 
     # per-loop CDR atom pools (loop-class correction, D3). ``loop_lengths``
     # is the length DEFINED by the numbering/graft map; only loops whose
@@ -490,47 +675,35 @@ def compute_hints(
                 if pos and pos not in plddt_by_pos:
                     plddt_by_pos[pos] = a.plddt
 
-    # Try FreeSASA for buriedness calculation
-    # Returns: {pos: (is_buried, rel_sasa)} or None
-    freesasa_data = None
-    if pdb_path:
-        freesasa_data = _try_freesasa_buriedness(pdb_path, chain_label, resseq_to_pos)
-    
-    # Build buried dict with confidence interval logic
+    # Solvent accessibility from a validated implementation. FreeSASA is used
+    # for PDB input; Shrake-Rupley (pure Python) covers CIF input and any
+    # environment without FreeSASA. Both normalise by the same Tien et al.
+    # reference so relSASA is directly comparable across the two paths.
+    sasa_data, sasa_method = _compute_buriedness(
+        model, chain_label, resseq_to_pos, pdb_path)
+
+    # Build buried dict with a hysteresis confidence band.
     buried: Dict[str, Optional[bool]] = {}
     rel_sasa: Dict[str, float] = {}
-    if freesasa_data:
-        for pos, (is_buried, sasa_val) in freesasa_data.items():
-            rel_sasa[pos] = sasa_val
-            # 方案3: relSASA 置信区间 0.15-0.25 → 标记为 uncertain (None)
-            if 0.15 <= sasa_val <= 0.25:
-                buried[pos] = None  # uncertain, treated as exposed
-            else:
-                buried[pos] = is_buried
-    else:
-        # Fallback to contact-based heuristic
-        for (ch, resseq), atoms in by_res.items():
-            if ch != chain_label:
-                continue
-            pos = resseq_to_pos.get(resseq)
-            if pos is None:
-                continue
-            contacts = 0
-            for (oc, oseq), oa in by_res.items():
-                if (oc, oseq) == (ch, resseq):
-                    continue
-                for _, xyz in oa:
-                    for _, axyz in atoms[: min(3, len(atoms))]:
-                        if _dist(axyz, xyz) < 6.0:
-                            contacts += 1
-                            break
-            buried[pos] = contacts >= 45
+    for pos, (is_buried, sasa_val) in sasa_data.items():
+        rel_sasa[pos] = sasa_val
+        # relSASA 0.15-0.25 is within the numerical uncertainty of both SASA
+        # engines and of what a side-chain swap can actually change. Such a
+        # position is marked UNKNOWN (None): it must neither demote (exposed
+        # rule) nor promote (buried rule) a back-mutation.
+        if 0.15 <= sasa_val <= 0.25:
+            buried[pos] = None
+        else:
+            buried[pos] = is_buried
 
     cdr_contact: Dict[str, bool] = {}
     cdr_contact_sc: Dict[str, bool] = {}
     ag_contact: Dict[str, bool] = {}
     cdr_partners: Dict[str, List[str]] = {}
     cdr_partners_sc: Dict[str, List[str]] = {}
+    partner_contact: Dict[str, bool] = {}
+    partner_contact_sc: Dict[str, bool] = {}
+    framework_nbr: Dict[str, int] = {}
     for (ch, resseq), atoms in by_res.items():
         if ch != chain_label:
             continue
@@ -567,6 +740,35 @@ def compute_hints(
                 _dist(a2, a1) < 4.5
                 for (r2, _n2, a2) in ag_atoms for (_n1, a1) in atoms
             )
+        if partner_atoms:
+            # Measured VH/VL packing contact. Backbone-only proximity is not
+            # recorded as functional evidence for the same reason as CDR
+            # contacts: a side-chain swap cannot change it.
+            partner_contact[pos] = any(
+                _dist(a2, a1) < 4.5
+                for (r2, _n2, a2) in partner_atoms for (_n1, a1) in atoms
+            )
+            if sidechain:
+                partner_contact_sc[pos] = any(
+                    _dist(a2, a1) < 4.5
+                    for (r2, _n2, a2) in partner_atoms for (_n1, a1) in sidechain
+                )
+        # Framework-packing neighbours: side-chain contacts to OTHER
+        # framework residues of the same chain (CDRs excluded). A buried,
+        # tightly packed framework position can be destabilised even by a
+        # near-isosteric substitution (cavity creation); the sequence-only
+        # 40 A^3 cutoff cannot see this.
+        if sidechain:
+            nbr = 0
+            for (och, ores), oatoms in by_res.items():
+                if och != chain_label or ores == resseq or ores in cdr_resseqs:
+                    continue
+                osc = [(n1, a1) for n1, a1 in oatoms
+                       if n1 not in {"N", "CA", "C", "O"}]
+                if any(_dist(a1, a2) < 4.5
+                       for (_n1, a1) in sidechain for (_n2, a2) in osc):
+                    nbr += 1
+            framework_nbr[pos] = nbr
         # per-loop distance / contact profile (skip the loop's own residues)
         if loop_atoms:
             ld: Dict[str, float] = {}
@@ -595,6 +797,27 @@ def compute_hints(
                 loop_min_dist_sc[pos] = lds
             loop_contact_count[pos] = lc
             loop_contact_sc_count[pos] = lc_sc
+
+    # Disulfide bonds: two Cys SG atoms within 2.5 A are covalently bonded.
+    # Recorded for the target chain so that only a *verified* disulfide (or a
+    # conserved framework one) is protected from humanisation; an unpaired
+    # (free) thiol is a developability liability and must not be frozen.
+    cys_sg = [((ch, resseq), xyz)
+              for (ch, resseq), atoms in by_res.items()
+              for name, xyz in atoms if name == "SG"]
+    disulfide: Dict[str, str] = {}
+    for i in range(len(cys_sg)):
+        (k1, x1) = cys_sg[i]
+        for j in range(i + 1, len(cys_sg)):
+            (k2, x2) = cys_sg[j]
+            if _dist(x1, x2) > 2.5:
+                continue
+            p1 = resseq_to_pos.get(k1[1]) if k1[0] == chain_label else None
+            p2 = resseq_to_pos.get(k2[1]) if k2[0] == chain_label else None
+            if p1:
+                disulfide[p1] = p2 or ""
+            if p2:
+                disulfide[p2] = p1 or ""
 
     # 方案5: 文献交叉验证 - 仅限文献位置集合
     # 如果提供了文献位置集合，仅在这些位置应用结构证据
@@ -625,8 +848,13 @@ def compute_hints(
         "antigen_contact": ag_contact,
         "cdr_partners": cdr_partners,
         "cdr_partners_sc": cdr_partners_sc,
+        "partner_contact": partner_contact,
+        "partner_contact_sc": partner_contact_sc,
+        "framework_nbr": framework_nbr,
         "plddt": plddt_by_pos,
         "rel_sasa": rel_sasa,
+        "sasa_method": sasa_method,
+        "disulfide": disulfide,
         "loop_min_dist": loop_min_dist,
         "loop_min_dist_sc": loop_min_dist_sc,
         "loop_contacts": loop_contact_count,
@@ -644,15 +872,18 @@ def compute_multi_model_consensus(
     position_map: Dict[str, int],
     cdr_positions: Dict[str, int],
     antigen_chains: Optional[List[str]] = None,
-    min_consensus: int = 3,
+    partner_chains: Optional[List[str]] = None,
+    min_consensus: Optional[int] = None,
     use_plddt: bool = True,
     cdr_loops: Optional[Dict[str, str]] = None,
 ) -> StructureHints:
     """Compute structure hints from multiple models (e.g., AF3 rank_1-N).
 
-    Buried / CDR-contact / antigen-contact calls require at least
-    ``min_consensus`` models to agree (auto-relaxed when fewer models are
-    available). CDR partner lists are unioned across models, and pLDDT /
+    Buried / CDR-contact / antigen-contact calls require a majority of the
+    models to agree. By default the threshold is the same fractional majority
+    used by the loop-class correction (``LOOP_CLASS["vote_fraction"]``, i.e.
+    2-of-3, 3-of-5), so every structure signal in a run uses one consistent
+    voting rule. CDR partner lists are unioned across models, and pLDDT /
     relSASA are averaged, so the structure-derived features consumed by
     Step 3 (minimal reversion, paratope grafting) are all preserved.
     Per-loop geometry (``cdr_loops``) is aggregated with medians / votes so
@@ -664,7 +895,9 @@ def compute_multi_model_consensus(
         position_map: {Kabat pos: residue number}
         cdr_positions: {Kabat pos: residue number} for CDR residues
         antigen_chains: Optional antigen chain ids
-        min_consensus: Minimum number of agreeing models (default: 3)
+        partner_chains: Optional partner (VH/VL) chain ids for Fab interface hints
+        min_consensus: Legacy explicit override; when None (default) the
+            fractional-majority rule is used
         use_plddt: Interpret the B-factor column as an AF3 pLDDT score.
         cdr_loops: {CDR pos: loop} passed through to compute_hints.
 
@@ -692,6 +925,10 @@ def compute_multi_model_consensus(
     loop_shell_votes: Dict[str, Dict[str, int]] = {}
     loop_contact_votes: Dict[str, Dict[str, int]] = {}
     loop_buried_votes: Dict[str, int] = {}
+    disulfide_votes: Dict[str, List[str]] = {}
+    partner_votes: Dict[str, List[bool]] = {}
+    partner_sc_votes: Dict[str, List[bool]] = {}
+    framework_nbr_vals: Dict[str, List[int]] = {}
     n_models = 0
 
     for pdb_path in pdb_paths:
@@ -702,8 +939,8 @@ def compute_multi_model_consensus(
             continue
         hints = compute_hints(
             model, chain_label, position_map, cdr_positions,
-            antigen_chains, pdb_path=pdb_path, use_plddt=use_plddt,
-            cdr_loops=cdr_loops,
+            antigen_chains, partner_chains=partner_chains,
+            pdb_path=pdb_path, use_plddt=use_plddt, cdr_loops=cdr_loops,
         )
         n_models += 1
         for pos, v in (hints.data.get("buried") or {}).items():
@@ -723,6 +960,14 @@ def compute_multi_model_consensus(
             plddt_vals.setdefault(pos, []).append(v)
         for pos, v in (hints.data.get("rel_sasa") or {}).items():
             sasa_vals.setdefault(pos, []).append(v)
+        for pos, partner in (hints.data.get("disulfide") or {}).items():
+            disulfide_votes.setdefault(pos, []).append(partner)
+        for pos, v in (hints.data.get("partner_contact") or {}).items():
+            partner_votes.setdefault(pos, []).append(bool(v))
+        for pos, v in (hints.data.get("partner_contact_sc") or {}).items():
+            partner_sc_votes.setdefault(pos, []).append(bool(v))
+        for pos, v in (hints.data.get("framework_nbr") or {}).items():
+            framework_nbr_vals.setdefault(pos, []).append(int(v))
         for pos, per_loop in (hints.data.get("loop_min_dist") or {}).items():
             for loop, d in per_loop.items():
                 loop_dist_vals.setdefault(pos, {}).setdefault(loop, []).append(d)
@@ -756,7 +1001,17 @@ def compute_multi_model_consensus(
 
     if n_models == 0:
         return StructureHints()
-    thr = min(min_consensus, n_models) if min_consensus else 1
+    # Agreement threshold. The default is the same fractional-majority rule
+    # used by the loop-class correction (LOOP_CLASS["vote_fraction"], 60%):
+    # 2-of-3, 3-of-5, ... ``min_consensus`` remains available as an explicit
+    # legacy override but is no longer used by the pipeline, because a fixed
+    # 3-of-3 requirement turned three AF3 seeds into a unanimity vote while
+    # the shell evidence in the very same run used 2-of-3.
+    if min_consensus is not None:
+        thr = min(max(1, min_consensus), n_models)
+    else:
+        from .loopclass import vote_threshold
+        thr = vote_threshold(n_models)
 
     consensus_buried: Dict[str, Optional[bool]] = {}
     for pos, vs in buried_votes.items():
@@ -785,6 +1040,24 @@ def compute_multi_model_consensus(
     }
     avg_plddt = {p: sum(v) / len(v) for p, v in plddt_vals.items() if v}
     avg_sasa = {p: sum(v) / len(v) for p, v in sasa_vals.items() if v}
+    consensus_partner = {
+        pos: sum(1 for v in vs if v) >= thr
+        for pos, vs in partner_votes.items() if len(vs) >= thr
+    }
+    consensus_partner_sc = {
+        pos: sum(1 for v in vs if v) >= thr
+        for pos, vs in partner_sc_votes.items() if len(vs) >= thr
+    }
+    consensus_framework_nbr = {
+        pos: int(statistics.median(vs)) for pos, vs in framework_nbr_vals.items()
+    }
+    consensus_disulfide: Dict[str, str] = {}
+    for pos, ps in disulfide_votes.items():
+        # Every entry here is a string: a partner position, or "" for an
+        # inter-chain bond. Both mean "bonded" and must be preserved.
+        bonded = [p for p in ps if p is not None]
+        if len(bonded) >= thr:
+            consensus_disulfide[pos] = Counter(bonded).most_common(1)[0][0]
 
     # per-loop geometry: median distance / count, modal length & class
     consensus_loop_dist = {
@@ -824,8 +1097,13 @@ def compute_multi_model_consensus(
         "antigen_contact": consensus_ag,
         "cdr_partners": consensus_partners,
         "cdr_partners_sc": consensus_partners_sc,
+        "partner_contact": consensus_partner,
+        "partner_contact_sc": consensus_partner_sc,
+        "framework_nbr": consensus_framework_nbr,
         "plddt": avg_plddt,
         "rel_sasa": avg_sasa,
+        "sasa_method": "freesasa+shrake-rupley",
+        "disulfide": consensus_disulfide,
         "loop_min_dist": consensus_loop_dist,
         "loop_min_dist_sc": consensus_loop_dist_sc,
         "loop_contacts": consensus_loop_cnt,

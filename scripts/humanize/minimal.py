@@ -230,15 +230,31 @@ def matrix_alternatives(
     is_vhh: bool = False,
     n: int = 3,
     numbering: str = "kabat",
+    structure=None,
+    calibration=None,
+    immunogenicity=None,
+    top_germlines=None,
 ) -> List[MatrixEntry]:
     """Design V2-class variants on the top-N alternative germlines.
     Each alternative gets its own back-mutation set (analyzed on its own
-    germline) — framework hopping, per BI/CUMAb evidence."""
+    germline) — framework hopping, per BI/CUMAb evidence.
+
+    ``structure``/``calibration``/``immunogenicity`` describe *donor* positions
+    (buriedness, CDR contacts, empirical tolerability, epitope score), not the
+    germline being tested, so they must be forwarded to every alternative.
+    Otherwise framework-hopping variants are scored with the sequence-only
+    ladder while the primary V2 uses the structure-refined tiers, which is
+    scientifically inconsistent. ``j_gene`` is forwarded for FR4 analysis.
+    """
     from .backmut import analyze_backmutations
 
     entries: List[MatrixEntry] = []
     for g, _s in alternatives[:n]:
-        bm = analyze_backmutations(donor, g, is_vhh=is_vhh, numbering=numbering)
+        bm = analyze_backmutations(
+            donor, g, is_vhh=is_vhh, numbering=numbering, structure=structure,
+            calibration=calibration, immunogenicity=immunogenicity,
+            j_gene=j_gene, top_germlines=top_germlines,
+        )
         positions = bm.revert_positions(("T1", "T2"))
         graft = graft_variant(donor, g, j_gene, scheme, positions,
                               is_vhh=is_vhh, numbering=numbering)

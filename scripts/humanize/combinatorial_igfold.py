@@ -6,8 +6,8 @@ structural validation of humanized antibody candidates.
 
 Usage:
     python3 scripts/humanize/combinatorial_igfold.py \
-        --input outputs/amg110_step3/step3/variants.fasta \
-        --output af3/amg110_combinatorial/ \
+        --input <outdir>/step3/variants.fasta \
+        --output <structure-dir>/ \
         --device cpu
 """
 
@@ -43,7 +43,7 @@ def parse_variants_fasta(fasta_path: str) -> Tuple[Dict[str, str], Dict[str, str
                     else:
                         l_chains[current_name] = seq
                 
-                # Parse header: >AMG110.H|H_V0|description
+                # Parse header: ><Name>.H|H_V0|description
                 parts = line[1:].split('|')
                 if len(parts) >= 2:
                     chain_type = parts[0].split('.')[-1]  # H or L
@@ -216,7 +216,7 @@ def main():
         f.write("# Combinatorial IgFold Structure Prediction\n\n")
         f.write("## Overview\n\n")
         f.write(f"This directory contains {len(combinations)} combinatorial VH+VL pairs\n")
-        f.write("for comprehensive structural validation of humanized AMG110 variants.\n\n")
+        f.write("for comprehensive structural validation of humanized variants.\n\n")
         f.write("## Combinations\n\n")
         f.write("| # | Combo | H Chain | L Chain | Description |\n")
         f.write("|---|-------|---------|---------|-------------|\n")

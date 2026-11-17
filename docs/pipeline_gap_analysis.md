@@ -72,7 +72,8 @@ Chothia interface core 是"平均化"的 packing 集，但：
 > 几何修正位置集——文献 canonical/vernier 若与测得的 loop 相距过远则剔除，
 > canonical 权重按该 loop 的平均 pLDDT 连续降权，并新增实测二壳层证据
 > `loop_shell`（弱证据，只参与排序；与 `buried` 互斥以避免 noisy-OR 双计）。
-> 阈值已在 198 个真实结构上标定（`scripts/calibrate_loop_class.py`）。
+> 阈值已用可复现脚本标定（`python3 scripts/calibrate_loop_class.py --glob '<dir>/*.pdb'`，
+> 仓库自带 5 个供体结构；细节见 `docs/theory.md` §2.6）。
 > 详见 `docs/theory.md` §2.6。interface core 的 per-antibody 几何仍待做。
 
 ## 三、Germline 选择的不足

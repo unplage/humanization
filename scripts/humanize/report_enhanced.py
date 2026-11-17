@@ -540,6 +540,87 @@ def generate_humanized_sequences(
     return "\n".join(lines)
 
 
+def generate_structure_refinement_summary(chains: List[ChainReport]) -> str:
+    """Before/after summary of the Step-3 structure-driven refinement.
+
+    Enumerates tier changes, exposed-versus-buried reclassification, the
+    pLDDT confidence gate, disulfide handling and (when present) AF3 CDR-RMSD
+    validation. This makes the structural part of the design auditable in the
+    enhanced (WeMol-style) report as well as in the main markdown report.
+    """
+    lines: List[str] = []
+    any_structure = False
+    for rep in chains:
+        sh = rep.structure_hints
+        data = getattr(sh, "data", None) or {}
+        buried_map = data.get("buried") or {}
+        plddt_map = data.get("plddt") or {}
+        cands = rep.backmut.candidates
+        if not (buried_map or plddt_map or data.get("sasa_method")
+                or rep.structure_validation):
+            continue
+        any_structure = True
+        ct = rep.input_chain.chain_type
+        lines.append(f"\n{ct} chain — structure-informed refinement")
+        lines.append("-" * 72)
+        method = data.get("sasa_method", "unknown")
+        n_models = data.get("n_models", 1)
+        lines.append(f"- SASA engine: {method}; consensus models: {n_models}")
+        # Tier distribution
+        tiers: Dict[str, int] = {}
+        for c in cands:
+            tiers[c.tier] = tiers.get(c.tier, 0) + 1
+        lines.append("- Tier distribution: "
+                     + ", ".join(f"{k}={v}" for k, v in sorted(tiers.items())))
+        # Exposure reclassification (only positions with a definite call)
+        n_buried = sum(1 for c in cands if c.buried is True)
+        n_exposed = sum(1 for c in cands if c.buried is False)
+        n_unknown = sum(1 for c in cands if c.buried is None)
+        lines.append(f"- Framework exposure: buried={n_buried}, "
+                     f"exposed={n_exposed}, uncertain/unknown={n_unknown}")
+        # Tier changes already recorded in the rationale by Step 3
+        hard = [c.position for c in cands
+                if any("demoted from T1/T2 to T3" in r for r in c.rationale)]
+        soft = [c.position for c in cands
+                if any("downgraded from T1" in r for r in c.rationale)]
+        lines.append(f"- Exposed non-contacting positions demoted T1/T2→T3 "
+                     f"({len(hard)}): {', '.join(hard) or 'none'}")
+        lines.append(f"- Buried non-disruptive pillars softened T1→T2 "
+                     f"({len(soft)}): {', '.join(soft) or 'none'}")
+        # Measured VH/VL interface contact (the partner chain is now part of
+        # the contact pool instead of being discarded).
+        measured_interface = [
+            c.position for c in cands
+            if "vhvl_interface" in (c.features or [])]
+        if measured_interface:
+            lines.append(f"- Measured VH/VL packing contacts kept as donor "
+                         f"({len(measured_interface)}): "
+                         f"{', '.join(measured_interface)}")
+        # Confidence gate
+        low_plddt = [p for p, v in plddt_map.items() if isinstance(v, (int, float)) and v < 50]
+        lines.append(f"- Low-confidence positions (pLDDT<50, structure "
+                     f"evidence neutralised): {len(low_plddt)}"
+                     + (f" — {', '.join(sorted(low_plddt))}" if low_plddt else ""))
+        # Disulfide handling
+        prot = [c.position for c in cands if "disulfide_cys" in (c.features or [])]
+        free = [c.position for c in cands if "free_cys" in (c.features or [])]
+        if prot or free:
+            lines.append(f"- Cys handling: protected disulfide={', '.join(prot) or 'none'}; "
+                         f"free/unpaired thiol (revertible)={', '.join(free) or 'none'}")
+        # Structure validation of variants
+        if rep.structure_validation:
+            lines.append("- Variant CDR-RMSD (Å) / clashes vs donor:")
+            for name, r in sorted(rep.structure_validation.items()):
+                lines.append(f"    - {name}: CDR-RMSD={r.get('cdr_rmsd')}, "
+                             f"CDR pLDDT={r.get('cdr_plddt')}, "
+                             f"clashes={r.get('clashes')}")
+        lines.append("")
+    if not any_structure:
+        return "No structure data: Step-3 refinement was not applied " \
+               "(sequence-only portable path).\n"
+    return "\n".join(lines)
+
+
 def generate_enhanced_report(
     result: RunResult,
     outdir: str,
@@ -609,7 +690,13 @@ def generate_enhanced_report(
     lines.append("5. Humanized Sequences")
     lines.append("-" * 80)
     lines.append(generate_humanized_sequences(result.chains))
-    
+
+    lines.append("")
+    # 6. Structure-Informed Refinement (Step 3)
+    lines.append("6. Structure-Informed Refinement")
+    lines.append("-" * 80)
+    lines.append(generate_structure_refinement_summary(result.chains))
+
     return "\n".join(lines)
 
 

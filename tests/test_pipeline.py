@@ -10,6 +10,7 @@ Covers:
   * VHH hallmark protection
   * end-to-end run on the example inputs
 """
+import math
 import os
 import sys
 import tempfile
@@ -207,6 +208,168 @@ def test_dev_risk_position_sensitivity():
           len(set(scores.values())) > 1, str(scores))
     check("at least one N scores > 0 (motif scan works)",
           any(v > 0 for v in scores.values()), str(scores))
+
+
+def test_six_remaining_scientific_fixes():
+    """Regression for the six remaining scientific issues fixed in round 2."""
+    from humanize.backmut import (
+        _assign_tier_with_structure, _assign_tier,
+        _is_disruptive_swap_structured, FR4_REVERSION_THRESHOLD,
+    )
+    from humanize.config import FR4_REVERSION_THRESHOLD as CFG_FR4
+    print("six remaining scientific fixes")
+
+    # #1 FR4 joint evidence: isolated side-chain CDR3 contact (0.45) must NOT
+    # pass the 0.55 threshold; buried + CDR3 (0.60) must pass.
+    check("FR4 threshold raised to joint-evidence level",
+          FR4_REVERSION_THRESHOLD == CFG_FR4 == 0.55,
+          str(FR4_REVERSION_THRESHOLD))
+
+    # #2 soft demotion T1->T2 and buried T2->T3 are applied in analyze_backmutations;
+    # verified by the structure-mode E2E check (H45 protected / H80 demoted).
+
+    # #3 structured disruptive test: deep burial + many framework neighbours
+    # + moderate volume strain => disruptive even if <40 A^3.
+    check("near-isosteric deep-core swap is disruptive with packing",
+          _is_disruptive_swap_structured("L", "V", 0.02, 7) is True)
+    check("same swap in shallow burial is not flagged",
+          _is_disruptive_swap_structured("L", "V", 0.15, 7) is False)
+    check("huge volume change always disruptive",
+          _is_disruptive_swap_structured("K", "A", 0.5, 0) is True)
+
+    # #4 depth-aware burial: shallow burial + near-isosteric => T3,
+    # shallow burial + disruptive => T2.
+    check("shallow buried near-isosteric -> T3",
+          _assign_tier_with_structure(["buried"], True, False, "N", "H76",
+                                      rel_sasa=0.104, human_aa="S") == "T3")
+    check("shallow buried disruptive -> T2",
+          _assign_tier_with_structure(["buried"], True, False, "K", "H40",
+                                      rel_sasa=0.147, human_aa="A") == "T2")
+    check("deep buried near-isosteric -> T2",
+          _assign_tier_with_structure(["buried"], True, False, "L", "H80",
+                                      rel_sasa=0.0, human_aa="M") == "T2")
+    # FR-indel path uses the same depth-aware rule
+    check("FR-indel shallow buried near-isosteric -> T3",
+          _assign_tier(["buried"], True, False, "N", "H76", rel_sasa=0.104, human_aa="S") == "T3")
+
+    # #6 FR-indel measured VH/VL contact counts as interface evidence
+    check("FR-indel with measured VH/VL contact -> T2",
+          _assign_tier(["vhvl_interface"], None, False, "A", "H45") == "T2")
+
+
+def test_composite_bounded_and_penalty_preserved():
+    """Composite stays in [0, 100] yet a larger chemical liability ranks lower."""
+    from humanize.backmut import _blend_composite
+    print("composite bounded, penalty preserved")
+    neutral = _blend_composite(1.0, 0.8, 0.0)
+    mild = _blend_composite(1.0, 0.8, -0.4)
+    strong = _blend_composite(1.0, 0.8, -1.1)
+    extreme = _blend_composite(1.0, 0.8, -5.0)
+    check("composite within [0,100] for all chem values",
+          all(0.0 <= v <= 100.0 for v in (neutral, mild, strong, extreme)),
+          f"{neutral}, {mild}, {strong}, {extreme}")
+    check("larger liability never scores higher",
+          neutral > mild > strong >= extreme,
+          f"{neutral} > {mild} > {strong} >= {extreme}")
+    check("strong liability floors at 0", strong == 0.0 and extreme == 0.0,
+          f"{strong}, {extreme}")
+    check("positive chemical term unchanged",
+          abs(_blend_composite(1.0, 0.8, 0.5) - 86.5) < 0.05,
+          str(_blend_composite(1.0, 0.8, 0.5)))
+
+
+def test_exposure_uses_measured_rel_sasa():
+    """The immunogenicity benefit must use the measured relSASA, not the binary
+    buried flag: collapsing relSASA >= 0.25 into 'maximally exposed' discarded
+    most of the measured exposure information and over-credited intermediate
+    positions, while the structural/chemical terms already use relSASA."""
+    from humanize.backmut import StructureHints
+    print("exposure from measured relSASA")
+    h = StructureHints({"rel_sasa": {"H1": 0.05, "H2": 0.45, "H3": 0.90},
+                        "buried": {"H1": True, "H2": False, "H3": False}})
+    check("deeply buried clamps to 0.15", h.exposure("H1") == 0.15, str(h.exposure("H1")))
+    check("intermediate exposure is continuous (not 0.85)", h.exposure("H2") == 0.45, str(h.exposure("H2")))
+    check("fully exposed clamps to 0.85", h.exposure("H3") == 0.85, str(h.exposure("H3")))
+    # binary fallback when relSASA is missing, and unknown without structure
+    hb = StructureHints({"buried": {"H1": True, "H2": False}})
+    check("binary fallback when no relSASA", hb.exposure("H1") == 0.15
+          and hb.exposure("H2") == 0.85, str((hb.exposure("H1"), hb.exposure("H2"))))
+    check("no structure -> 0.5", StructureHints().exposure("H1") == 0.5)
+
+
+def test_consensus_majority_threshold():
+    """Structure consensus uses the same 60% majority as loop-shell voting."""
+    from humanize.loopclass import vote_threshold
+    print("consensus majority threshold")
+    check("3 models need 2 votes (not unanimity)", vote_threshold(3) == 2,
+          str(vote_threshold(3)))
+    check("5 models need 3 votes", vote_threshold(5) == 3,
+          str(vote_threshold(5)))
+
+
+def test_partner_chain_contact_is_measured():
+    """Fab: the VH/VL partner chain is present in the donor structure and its
+    side-chain contacts ARE functional evidence. Previously the partner was
+    excluded from the contact pool, so an interface-core residue that packs
+    only against the partner (no CDR contact) was demoted as if it had no
+    functional support. Regression: the measured contact keeps the tier."""
+    from humanize.structure import PDBModel, PDBAtom, compute_hints
+    atoms = []
+    # two chains: A (target, 4 residues) and B (partner).
+    # A2/A3/A4 side chains lie ~4 A from B1 side chains -> functional contact.
+    # A1's side chain is deliberately pulled 9 A away while its BACKBONE stays
+    # 2.5 A from B1's side chain -> backbone-only proximity, not functional.
+    for i in range(1, 5):
+        cbz = 9.0 if i == 1 else 2.5
+        for name, (x, y, z) in (("N", (i * 4.0, 0.0, 0.0)),
+                                ("CA", (i * 4.0, 1.4, 0.0)),
+                                ("C", (i * 4.0, 2.2, 1.3)),
+                                ("CB", (i * 4.0, 1.4, cbz))):
+            atoms.append(PDBAtom(name=name, resname="ALA", chain="A",
+                                 resseq=i, x=x, y=y, z=z))
+    for j in range(1, 5):
+        for name, (x, y, z) in (("N", (j * 4.0, 0.0, 0.0)),
+                                ("CA", (j * 4.0, 1.4, 0.0)),
+                                ("C", (j * 4.0, 2.2, 1.3)),
+                                ("CB", (j * 4.0, 1.4, 2.5))):
+            atoms.append(PDBAtom(name=name, resname="ALA", chain="B",
+                                 resseq=j, x=x, y=y, z=z))
+    model = PDBModel(atoms=atoms)
+    pos_map = {f"H{i}": i for i in range(1, 5)}
+    hints = compute_hints(model, "A", pos_map, {}, ["B"], partner_chains=["B"])
+    check("partner side-chain contact detected",
+          hints.partner_contact_sc("H", "H2") is True,
+          str(hints.data.get("partner_contact_sc")))
+    check("backbone-only proximity is not a partner (side-chain) contact",
+          hints.partner_contact_sc("H", "H1") is False
+          and hints.partner_contact("H", "H1") is True,
+          f"sc={hints.partner_contact_sc('H','H1')} "
+          f"any={hints.partner_contact('H','H1')}")
+    hints_no_partner = compute_hints(model, "A", pos_map, {}, ["B"])
+    check("without partner_chains no partner hints at all",
+          hints_no_partner.data.get("partner_contact_sc") == {},
+          str(hints_no_partner.data.get("partner_contact_sc")))
+
+
+def test_shrake_rupley_fallback():
+    """Pure-Python SASA works on the in-memory model (CIF/no-FreeSASA path)."""
+    from humanize.structure import PDBModel, PDBAtom, _shrake_rupley_buriedness
+    # Deterministic synthetic model: no dependency on any local structure file.
+    atoms = []
+    for i in range(1, 13):
+        for name in ("N", "CA", "C", "O", "CB"):
+            atoms.append(PDBAtom(name=name, resname="ALA", chain="A",
+                                 resseq=i, x=float(i) * 3.8, y=0.0, z=0.0))
+    model = PDBModel(atoms=atoms)
+    r2p = {i: f"H{i}" for i in range(1, 13)}
+    result = _shrake_rupley_buriedness(model, "A", r2p)
+    check("SR returns buriedness for every mapped residue",
+          len(result) == len(r2p), f"{len(result)} vs {len(r2p)}")
+    check("SR returns (bool, finite non-negative relSASA) per residue",
+          all(isinstance(b, bool) and isinstance(v, float)
+              and math.isfinite(v) and v >= 0.0
+              for b, v in result.values()),
+          str(list(result.values())[:5]))
 
 
 def test_insertion_chem_delta():
@@ -2504,24 +2667,54 @@ def test_fr4_cdr3_specific_contact():
                                     hints_cdr1_only, "kabat")
     check("CDR1-only contact is NOT a cdr3_contact (no T_FR4)",
           cand is None, str(cand))
-    # Genuinely near CDR3 -> candidate with the CDR3 feature
+    # Backbone-only proximity (e.g. Gly at 4.4 A) must not trigger FR4
+    # reversion: a side-chain swap cannot change a backbone contact.
+    hints_backbone_only = StructureHints({
+        "cdr_contact": {"H105": True},
+        "loop_min_dist": {"H105": {"CDR3": 4.4}},
+        "loop_min_dist_sc": {"H105": {}},   # no side chain (Gly-like)
+    })
+    cand_bb = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
+                                       hints_backbone_only, "kabat")
+    check("backbone-only Gly CDR3 proximity is NOT a cdr3_contact",
+          cand_bb is None, str(cand_bb))
+    # A genuine side-chain CDR3 contact alone is NOT enough: FR4 is J-encoded
+    # (human by construction) and needs joint structural evidence.
+    hints_sc_only = StructureHints({
+        "cdr_contact": {"H105": True},
+        "loop_min_dist": {"H105": {"CDR3": 3.0}},
+        "loop_min_dist_sc": {"H105": {"CDR3": 2.7}},
+    })
+    cand_sc = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
+                                       hints_sc_only, "kabat")
+    check("isolated side-chain CDR3 contact does not trigger FR4 reversion",
+          cand_sc is None, str(cand_sc))
+    # Side-chain CDR3 contact + burial -> joint evidence -> candidate
     hints_cdr3 = StructureHints({
         "cdr_contact": {"H105": True},
+        "buried": {"H105": True},
         "loop_min_dist": {"H105": {"CDR1": 9.0, "CDR2": 9.0, "CDR3": 3.0}},
+        "loop_min_dist_sc": {"H105": {"CDR3": 2.7}},
     })
     cand3 = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
                                      hints_cdr3, "kabat")
-    check("CDR3 proximity yields T_FR4 candidate",
+    check("CDR3 side-chain contact + burial yields T_FR4 candidate",
           cand3 is not None and cand3.tier == "T_FR4"
           and "cdr3_contact" in cand3.features,
           str(cand3.features if cand3 else None))
-    # No loop geometry -> fall back to the generic contact hint (legacy)
-    hints_legacy = StructureHints({"cdr_contact": {"H105": True}})
+    # No loop geometry -> fall back to the generic contact hint, which must
+    # likewise be corroborated by burial to pass the joint-evidence threshold
+    hints_legacy = StructureHints({"cdr_contact": {"H105": True},
+                                   "buried": {"H105": True}})
     cand_fb = _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
                                        hints_legacy, "kabat")
-    check("without loop geometry falls back to generic contact",
+    check("legacy generic contact + burial yields T_FR4",
           cand_fb is not None and cand_fb.tier == "T_FR4",
           str(cand_fb.tier if cand_fb else None))
+    hints_legacy_alone = StructureHints({"cdr_contact": {"H105": True}})
+    check("legacy generic contact alone does not trigger FR4",
+          _evaluate_fr4_structural("H105", 105, "H", dmap, gmap,
+                                   hints_legacy_alone, "kabat") is None)
 
 
 def main():
@@ -2554,6 +2747,12 @@ def main():
     test_cvi_single_source()
     test_j_gene_selection_unified()
     test_fr4_cdr3_specific_contact()
+    test_six_remaining_scientific_fixes()
+    test_composite_bounded_and_penalty_preserved()
+    test_exposure_uses_measured_rel_sasa()
+    test_consensus_majority_threshold()
+    test_partner_chain_contact_is_measured()
+    test_shrake_rupley_fallback()
     test_developability_scan()
     test_input_validation()
     test_humanness_adapter()

@@ -10,8 +10,9 @@ Covers:
   * text/JSON/Markdown/CSV renderers and the CLI
   * PROPKA .pka parsing (no PROPKA binary required)
 
-Structure tests build a deterministic synthetic Fv from the tracked 4D5
-sequences, so they do not depend on af3/ or inputs/ (both gitignored).
+Structure tests build a deterministic synthetic Fv from tracked benchmark
+sequences, so they do not depend on any gitignored local structure or input
+directory.
 """
 
 from __future__ import annotations

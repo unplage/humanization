@@ -35,28 +35,45 @@ INTERFACE_EXTENDED = {
     "L": {32, 50, 53},
 }
 
-# Canonical-structure framework support residues (Chothia & Lesk 1987).
-CANONICAL = {
-    "H": {24, 26, 27, 29, 33, 34, 47, 48, 49, 57, 58, 71, 78, 94},
-    "L": {2, 25, 33, 34, 36, 37, 45, 46, 48, 49, 58, 64, 71, 90, 94, 97, 98},
+# Conserved framework disulfides (Kabat) present in essentially all Ig
+# domains: VH Cys22-Cys92 and VL Cys23-Cys88. These are fold-stabilising and
+# must never be reverted. Every OTHER donor Cys is protected only when a
+# structure actually verifies an SG-SG bond; an unpaired thiol is a
+# developability liability, not a reason to keep the donor residue.
+CONSERVED_DISULFIDE_CYS = {
+    "H": frozenset({22, 92}),
+    "L": frozenset({23, 88}),
 }
 
 # Per-loop canonical support residues (Chothia & Lesk 1987; Al-Lazikani
-# et al. 1997). Splitting the CANONICAL union into "which loop does this
+# et al. 1997). Splitting the canonical union into "which loop does this
 # position support" is what makes the per-antibody loop-class correction
 # (loopclass.py) possible: a canonical position only counts when the loop it
 # is supposed to support is actually coupled to it in THIS antibody's
 # structure. Loop names are the grafted CDR windows (kabat/chothia/abm/imgt).
+#
+# This table is the SINGLE SOURCE OF TRUTH: CANONICAL below is derived from
+# it, so a position cannot be canonical without a loop claim (uncorrectable)
+# nor claim a loop it does not support (dead data). Kabat numbering: H94 is
+# the CDR3 stem anchor, NOT CDR1; L98 is the FR4/J anchor, not a V-gene
+# framework position; L51/53/55 are CDR2 loop residues, not framework support.
 CANONICAL_SUPPORT_BY_LOOP = {
     "H": {
-        "CDR1": {24, 26, 27, 29, 33, 34, 94},
+        "CDR1": {24, 26, 27, 29, 33, 34},
         "CDR2": {47, 48, 49, 57, 58, 71, 78},
+        "CDR3": {94},
     },
     "L": {
-        "CDR1": {2, 25, 33, 71},
-        "CDR2": {48, 49, 51, 53, 55, 58, 64},
-        "CDR3": {34, 36, 46, 49, 90, 94, 97, 98},
+        "CDR1": {2, 25, 33, 37, 71},
+        "CDR2": {45, 46, 48, 49, 58, 64},
+        "CDR3": {34, 36, 90, 94, 97},
     },
+}
+
+# Canonical-structure framework support residues (derived — see above).
+CANONICAL = {
+    chain: frozenset().union(*(frozenset(ps) for ps in loops.values()))
+    for chain, loops in CANONICAL_SUPPORT_BY_LOOP.items()
 }
 
 # CVI (canonical + vernier + interface) residue set. Single source of truth
@@ -89,9 +106,13 @@ FR4_STRUCTURAL_WEIGHTS = {
     "interface_core": 0.05,    # Position in VH/VL interface core
 }
 
-# Threshold for recommending FR4 reversion (sum of weights must exceed this)
-# Lowered to 0.4 so positions with just CDR3 contact (0.45) can be recommended
-FR4_REVERSION_THRESHOLD = 0.4
+# Threshold for recommending FR4 reversion (sum of weights must exceed this).
+# A single side-chain CDR3 contact (0.45) is NOT enough: FR4 is J-encoded and
+# human by construction, so reverting it needs joint evidence. With 0.55 a
+# buried J residue packing on CDR3 (0.45 + 0.15 = 0.60) still qualifies, while
+# an exposed FR4 residue with an isolated side-chain CDR3 contact (0.45) does
+# not. This removes the "one weak signal overrides the domain rule" failure.
+FR4_REVERSION_THRESHOLD = 0.55
 
 # ---------------------------------------------------------------------------
 # Scoring weights (documented in docs/scoring.md)
@@ -107,8 +128,16 @@ WEIGHTS = {
         "loop_shell": 0.35,      # needs structure: buried second-shell loop
                                  # proximity ADDED by the loop-class correction
                                  # (measured; weak evidence, ranking only)
-        "cdr_contact": 0.85,     # needs structure: heavy-atom < 4.5 A to CDR
+        # CDR contacts are weighted by STRUCTURAL_CONTACT_WEIGHTS below
+        # (side-chain-mediated vs backbone-only); a single `cdr_contact`
+        # weight was removed because the substitution path never read it.
         "antigen_contact": 0.60, # needs structure: heavy-atom < 4.5 A to antigen
+        "vhvl_contact": 0.70,    # needs structure (Fab): MEASURED heavy-atom
+                                 # contact with the VH/VL partner chain. A
+                                 # interface core residue packing against the
+                                 # partner is functional evidence even when it
+                                 # touches no CDR; the literature interface
+                                 # tables alone would miss such positions.
         "vhh_hallmark": 1.00,
         "disulfide_cys": 1.00,   # donor Cys paired with CDR Cys (VHH CDR3)
     },

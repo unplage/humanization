@@ -117,10 +117,14 @@ loop 长度、loop 平均 pLDDT。
 **多模型投票**：多模型共识时，二壳层关系必须在 ≥ 60% 的模型中成立
 （`LOOP_CLASS["vote_fraction"]`）才被采纳，避免单个噪声模型制造特征。
 
-**参数标定**（`scripts/calibrate_loop_class.py`，198 个真实结构，ANARCI 链型）：
-canonical→其 loop 距离中位 3.6 Å（q75 6.0 Å），仅 7.3% 超过 8 Å、0% 超过
-12 Å；vernier→最近 CDR 中位 3.2 Å，**无一个**超过 8 Å。因此 8 Å 判定只会在
-canonical 声称确实不成立时触发，12 Å 是刻意保守的兜底（实际很少触发）。
+**参数标定**（`python3 scripts/calibrate_loop_class.py --glob '<dir>/*.pdb'`，
+仓库自带 5 个供体结构，45 条 canonical / 80 条 vernier 支撑关系，ANARCI 链型）：
+canonical→其 loop 距离中位 3.3 Å（q25 2.9，q75 4.4，max 7.8 Å），0/45 超过
+8 Å；vernier→最近 CDR 中位 3.0 Å（q25 2.8，q75 3.4，max 5.9 Å），0/80 超过
+12 Å；二壳层候选占框架位点 49/275 = 17.8%。因此 8 Å / 12 Å 是略高于实测最大
+值的保守兜底，剔除分支在真实结构上很少触发（这与"该修正主要用于新增弱证据"
+的设计一致）。旧文档所引"198 个结构 / 86 条链"缺乏可复现数据集，已被本标定
+取代。
 
 **安全边界**：`CANONICAL_SUPPORT_BY_LOOP` 是 Kabat 空间表，仅 Kabat 模式做
 canonical 剔除/降权；模型缺少整条或部分 loop 时整个修正 no-op；pLDDT < 50 的

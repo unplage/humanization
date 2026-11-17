@@ -13,13 +13,16 @@ claim actually applies:
     literature "vernier" residue that is > 12 A from *every* CDR is not in any
     vernier zone and its claim is removed.
 
-    Both cutoffs are calibrated on 86 real antibody chains (see
-    ``tests/test_pipeline.py::test_loop_class_thresholds_on_real_structure``):
-    canonical support residues sit 3.2 A (median) from the loop they support
-    and only 3% exceed 8 A; vernier residues sit 3.1 A (median) from the
-    nearest loop and only 0.4% exceed 12 A. The cutoffs therefore sit just
-    outside the empirical support distribution and fire rarely on genuine
-    claims.
+    Both cutoffs were calibrated on real structures with the reproducible
+    command ``python3 scripts/calibrate_loop_class.py --glob '<dir>/*.pdb'``.
+    On the calibration set (45 canonical / 80 vernier relations) canonical
+    support residues sit 3.3 A (median, max 7.8 A) from
+    the loop they support and 0/45 exceed 8 A; vernier residues sit 3.0 A
+    (median, max 5.9 A) from the nearest CDR and 0/80 exceed 12 A. The 8 A /
+    12 A cutoffs are conservative backstops just outside the observed range,
+    so the removal branch is expected to fire rarely on genuine claims.
+    Earlier documentation citing "86 chains" or "198 structures" without a
+    reproducible dataset is superseded by these figures.
 
   * **Addition (false negative).** A framework residue in the *second shell*
     of a loop (side chain 4.5-8 A away, no side-chain contact) that no
@@ -260,8 +263,16 @@ def apply(hints, chain_type: str, pos: str, num: int, features: List[str],
         if agreed:
             best = min(agreed, key=lambda loop: hints.loop_min_dist_sc(pos).get(loop, 1e9))
             res.features.append(SHELL_FEATURE)
+            # Be precise about the threshold used: shell eligibility is
+            # relSASA <= shell_rel_sasa (0.30), whereas the candidate's
+            # `buried` flag uses < 0.20 with a 0.15-0.25 unknown band. Saying
+            # "buried" here was wrong for positions in the 0.20-0.30 band.
+            rel = hints.rel_sasa(pos)
+            depth = (f"relSASA {rel:.2f}" if rel is not None
+                     else "binary burial hint")
             res.notes.append(
-                f"loop-class: buried and side chain "
+                f"loop-class: {depth} <= {LOOP_CLASS['shell_rel_sasa']:.2f} "
+                f"(second shell eligible) and side chain "
                 f"{hints.loop_min_dist_sc(pos).get(best, 0.0):.1f} Å from "
                 f"{best} (second shell, {need}/{n_models} models; weak "
                 f"evidence, ranking only)")

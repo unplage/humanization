@@ -23,13 +23,15 @@ and one blended composite:
 composite = 100 * (0.55 * structural + 0.30 * immunogenicity + 0.15 * chemical)
 ```
 
-The `chemical` term is capped at 1.0 on the positive side, but **negative
-penalties pass through unclamped** — in particular `introduces_nglycan`
-(-0.80) must lower the composite whenever a reversion would create a new
-N-glycan motif (regression-tested in tests/test_pipeline.py). Note the
-practical range of the composite is therefore ~9-92 rather than the full
-0-100: `structural` tops out at 1.0, `immunogenicity` (benefit) spans
-0.3-0.725, and `chemical` is bounded by ±0.80 with the current weights.
+The composite is **bounded to [0, 100]**. A positive `chemical` term is
+capped at 1.0 and added, as in the formula above. A negative term (a
+reversion that re-introduces a donor liability, e.g. N-glycan) instead
+rescales the non-chemical base by `(1 - |chemical|/1.10)`: a stronger liability
+always ranks lower, but the score can no longer become negative. The
+practical range with the current weights is ~0-94 (`structural` tops out at
+1.0, `immunogenicity` spans 0.3-0.8, `chemical` is bounded by ±1.10 after
+exposure scaling). The signed chemical score itself remains in the report and
+CSV, so the penalty is never hidden.
 
 ### 1.1 Structural score (0-1) — weights in config.py
 
@@ -44,6 +46,7 @@ practical range of the composite is therefore ~9-92 rather than the full
 | cdr_contact_sc | 0.85 | AF3 structure: **side-chain** heavy atom < 4.5 A to CDR |
 | cdr_contact_bb | 0.30 | AF3 structure: backbone-only contact (β-sandwich geometry) |
 | antigen_contact | 0.60 | AF3 complex structure |
+| vhvl_contact | 0.70 | **measured** VH/VL packing contact (Fab): side chain within 4.5 Å of the partner chain; functional evidence for interface residues that touch no CDR |
 | vhh_hallmark | 1.00 | keep-donor, never revert |
 | disulfide_cys | 1.00 | keep-donor, never revert |
 
@@ -89,7 +92,10 @@ benefit = 0.3 + 0.5 * exposure * (1 - conservation)            # default proxy
 benefit = 0.3 + 0.5 * (0.4 * exposure*(1-conservation) + 0.6 * epitope)   # if MHC-II supplied
 ```
 
-- exposure: 0.85 exposed / 0.15 buried (AF3); 0.5 default without structure.
+- exposure: **measured relSASA clamped to 0.15-0.85** (AF3/Fab structure, the
+  same continuous value used by the structural and chemical terms); the binary
+  buried hint (0.85 exposed / 0.15 buried) is kept only when relSASA is
+  absent; 0.5 without any structure.
 - conservation: fraction of the **entire human germline repertoire** carrying
   the DONOR residue at that position, **weighted by each germline's
   therapeutic-antibody usage frequency** (`germline_frequency.get_frequency`).
@@ -189,10 +195,18 @@ Once per-position structure hints are available, tiers are adjusted as follows
 | Evidence | Effect | Rationale |
 |----------|--------|-----------|
 | `cdr_contact` / `antigen_contact` / `cdr_partners` | keep/raise to T1/T2 | direct functional support of the paratope |
-| `buried = True` | **keep** T1/T2 (never demote) | core/packing residues can still support the fold; a buried reversion is immunologically silent |
+| `partner_contact_sc` (measured VH/VL contact) | keep/raise to T1/T2 | interface packing is functional selection; the partner chain is in the donor structure and is now included in the contact pool instead of discarded |
+| `buried = True`, relSASA < 0.10 (deep core) | keep T2/T1 (no automatic demotion) | deep packing is structurally constrained; even an isosteric swap can matter |
+| `buried = True`, relSASA 0.10-0.20 AND disruptive swap (e.g. Lys→Ala) | keep T2 | shallow burial alone is weak, but a large volume/charge/H-bond change still creates a cavity / breaks packing |
+| `buried = True`, relSASA 0.10-0.20 AND near-isosteric swap | demote T2 → **T3** | shallow burial is not functional evidence; the human residue is preferable when the swap cannot disrupt packing |
 | `buried = False` AND no contact AND pLDDT ≥ 50 | demote T1/T2 → **T3** | surface-exposed, non-contacting residue: no structural reason to stay donor, and it carries real immunogenicity risk |
+| near-isosteric swap at a deep-core site (relSASA < 0.10) with ≥3 side-chain framework neighbours and ≥20 A³ volume strain | treated as **disruptive** | cavity creation in a tightly packed core is not visible to the sequence-only 40 A³ rule |
 | `plddt < 50` | no demotion | low-confidence structure is not trusted |
-| `interface_core` | exempt from demotion | the contact detector can miss packing partners |
+| `interface_core` | exempt from T3 demotion | literature-only label; the measured `partner_contact_sc` now supplies the same evidence when the structure permits |
+
+FR4 structural reversions now require **joint evidence** (`FR4_REVERSION_THRESHOLD` 0.55): a side-chain CDR3 contact (0.45) alone is insufficient; it must be corroborated by burial, antigen contact or interface packing (0.45 + 0.15 = 0.60 passes). FR4 is J-encoded and human by construction, so a single weak signal must not override the domain rule.
+
+Literature-only claims (vernier/canonical/interface tables) with no direct measured corroboration in the structure are discounted by `LITERATURE_ONLY_FACTOR = 0.6` in the composite; tiers are unchanged but ranking no longer over-trusts the static 1980s tables.
 
 This is symmetric: the earlier rule demoted *buried* positions but kept
 *exposed* literature positions, which could silently drop structurally

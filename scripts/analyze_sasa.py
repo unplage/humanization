@@ -58,7 +58,10 @@ def get_reference_sasa():
     }
 
 def main():
-    pdb_path = sys.argv[1] if len(sys.argv) > 1 else "af3/antibody_af3/Structure Prediction (Boltz-2)/rank_1.pdb"
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <structure.pdb>")
+        return 1
+    pdb_path = sys.argv[1]
     
     print("=" * 70)
     print("FreeSASA Analysis for antibody Antibody")

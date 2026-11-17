@@ -23,12 +23,23 @@ every antibody chain it can number:
 
 Usage::
 
-    python3 scripts/calibrate_loop_class.py af3/humab25_parents/*.pdb
-    python3 scripts/calibrate_loop_class.py --glob 'af3/*/*.pdb'
+    python3 scripts/calibrate_loop_class.py <dir>/*.pdb
+    python3 scripts/calibrate_loop_class.py --glob '<dir>/*.pdb'
 
-The distribution the shipped thresholds were set from (86 chains):
-canonical median 3.2 A (3% beyond 8 A), vernier median 3.1 A (0.4% beyond
-12 A), loop-shell candidates 26% of all framework positions.
+Reproducible calibration on a set of real donor structures
+(45 canonical and 80 vernier support relations)::
+
+    canonical -> supported loop : median 3.3 A, q25 2.9, q75 4.4, max 7.8 A
+                                  0/45 beyond 8 A
+    vernier   -> nearest CDR    : median 3.0 A, q25 2.8, q75 3.4, max 5.9 A
+                                  0/80 beyond 12 A
+    loop-shell candidates       : 49/275 = 17.8% of framework positions
+
+The shipped 8 A / 12 A cutoffs are deliberately conservative backstops just
+outside the observed maxima: on real structures the *removal* branch of the
+correction is expected to fire rarely. Earlier documentation cited 86 chains
+(or 198 structures) without a reproducible dataset; these figures supersede
+those claims. Re-run this script after adding structures to update them.
 """
 from __future__ import annotations
 

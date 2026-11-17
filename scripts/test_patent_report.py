@@ -23,8 +23,8 @@ def load_result_from_json(json_path: str) -> RunResult:
 
 
 def main():
-    json_path = "outputs/amg110_full/step3/humanization_result.json"
-    out_path = "outputs/amg110_full/step3/patent_example_report.docx"
+    json_path = os.environ.get("HUMANIZATION_RESULT_JSON", "humanization_result.json")
+    out_path = os.environ.get("PATENT_REPORT_DOCX", "patent_example_report.docx")
     
     if not os.path.exists(json_path):
         print(f"Error: JSON file not found: {json_path}")
@@ -36,7 +36,7 @@ def main():
     # In practice, you'd load the JSON and reconstruct the RunResult
     print("Note: Patent report generation requires full pipeline RunResult object.")
     print("To generate the report, run the full pipeline:")
-    print("  python3 scripts/humanize/cli.py run --input inputs/amg110.fasta --outdir outputs/test")
+    print("  python3 scripts/humanize/cli.py run --input <seq.fasta> --outdir <outdir>")
     
     return 0
 

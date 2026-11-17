@@ -110,19 +110,25 @@ def assemble_variants(
         "V0 + Tier-1 back-mutations (structural pillars)",
         t1, exclude_indel=True))
     
-    # V2a: T1 + T2a (buried + CDR contact) - minimal functional set
-    v2a_positions = _dedupe(t1 + t2a_positions)
+    # V2a: T1 + T2a (buried + CDR contact) - minimal functional set.
+    # FR4 structural reversions are functional (CDR3 packing) and are part of
+    # the V2 ladder, so they are included in every V2-tier variant.
+    v2a_positions = _dedupe(t1 + t2a_positions + t_fr4)
     v2a_desc = f"V0 + T1 + T2a ({len(t2a_positions)} buried+CDR contact)"
     if indel_ins:
         v2a_desc += " + %d FR insertion(s)" % len(indel_ins)
+    if t_fr4:
+        v2a_desc += " + %d FR4 structural reversion(s)" % len(t_fr4)
     variants.append(build(
         f"{chain_type}_V2a", v2a_desc, v2a_positions))
-    
+
     # V2b: T1 + T2a + T2b (buried + canonical/vernier/interface)
-    v2b_positions = _dedupe(t1 + t2a_positions + t2b_positions)
+    v2b_positions = _dedupe(t1 + t2a_positions + t2b_positions + t_fr4)
     v2b_desc = f"V0 + T1 + T2a/T2b ({len(t2a_positions)}+{len(t2b_positions)} structural)"
     if indel_ins:
         v2b_desc += " + %d FR insertion(s)" % len(indel_ins)
+    if t_fr4:
+        v2b_desc += " + %d FR4 structural reversion(s)" % len(t_fr4)
     variants.append(build(
         f"{chain_type}_V2b", v2b_desc, v2b_positions))
     

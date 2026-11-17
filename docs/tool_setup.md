@@ -116,7 +116,7 @@ python3 tools/immunogenicity/immunogenicity_analyzer.py --check
 
 # Analyze pipeline output (auto-discovers variants.fasta)
 python3 tools/immunogenicity/immunogenicity_analyzer.py \
-    --outdir outputs/amg110_step3/step3 \
+    --outdir <outdir>/step3 \
     --donor data/examples/mouse_4d5_fab.fasta \
     --all-formats
 

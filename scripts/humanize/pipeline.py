@@ -29,7 +29,7 @@ from .graft import GraftResult, graft_chain
 from .mpnn import MPNNConfig
 from .numbering import NumberedChain
 from .sequences import InputChain, parse_input
-from .structure import AF3Config, StructureHints as _SH, predict_fv
+from .structure import AF3Config, StructureHints as _SH, predict_fv, looks_like_predicted_structure
 from .variants import Variant, assemble_variants
 
 
@@ -145,8 +145,9 @@ def run_pipeline(
     fmt, chains = parse_input(input_path, config.format,
                               numbering=config.numbering)
     warnings: List[str] = []
-    for c in chains:
-        warnings.extend(c.warnings)
+    # Collect chain warnings AFTER _process_chain: structure-mode warnings
+    # (chain matching, sibling-model filtering, pLDDT detection, ... ) are
+    # appended during processing and would otherwise be lost.
     if fmt == "vhh_suspect":
         warnings.append(
             "single heavy chain without camelid hallmark detected - "
@@ -172,6 +173,8 @@ def run_pipeline(
             all_chains=chains,
         )
         reports.append(rep)
+    for rep in reports:
+        warnings.extend(rep.input_chain.warnings)
 
     result = RunResult(
         format=fmt,
@@ -432,14 +435,18 @@ def _process_chain(
                 # nor its partner. AF3 renumbers output chains (A/B/C), so a
                 # fixed chain id must never be assumed.
                 ag_chains = None
+                used = {label}
+                # The VH/VL partner chain is identified for every Fab, not
+                # only when an antigen is present: its packing contacts are
+                # functional evidence (VH/VL interface) that must not be
+                # discarded just because no antigen was requested.
+                partner_seq = None if fmt == "vhh" else _partner_sequence(chain, all_chains)
+                plabel = match_pdb_chain(pdb_chains, partner_seq) if partner_seq else None
+                if plabel:
+                    used.add(plabel)
                 if antigen:
-                    used = {label}
-                    partner_seq = None if fmt == "vhh" else _partner_sequence(chain, all_chains)
-                    if partner_seq:
-                        plabel = match_pdb_chain(pdb_chains, partner_seq)
-                        if plabel:
-                            used.add(plabel)
                     ag_chains = [c for c in pdb_chains if c not in used] or None
+                partner_chains = [plabel] if plabel else None
 
                 # Map donor Kabat positions to PDB residue numbers. When the
                 # PDB chain has exactly one CA per donor residue (the usual AF3
@@ -472,28 +479,87 @@ def _process_chain(
                         config.cdr_scheme, config.numbering)
                     if loop:
                         cdr_loops[p] = loop
-                # B-factor is only a pLDDT score for AF3 predictions; an
-                # experimental `--donor-structure` carries a temperature factor.
-                use_plddt = from_af3 or config.donor_structure_plddt
+                # B-factor is a pLDDT score only for predicted structures.
+                # The pipeline's own AF3 output is unambiguous; a user-supplied
+                # donor PDB/CIF is auto-detected by method markers in the name
+                # or header, and otherwise flagged with a warning so the
+                # confidence gate is never silently skipped.
+                if from_af3 or config.donor_structure_plddt:
+                    use_plddt = True
+                else:
+                    use_plddt = looks_like_predicted_structure(structure_path)
+                    if use_plddt:
+                        chain.warnings.append(
+                            f"[{chain.name}] predicted-structure markers detected "
+                            f"in {os.path.basename(structure_path)}: using B-factor "
+                            f"as pLDDT (pass an experimental structure or edit the "
+                            f"input to disable)")
+                    else:
+                        chain.warnings.append(
+                            f"[{chain.name}] donor-structure B-factor treated as a "
+                            f"temperature factor. If this is an AF3/Boltz "
+                            f"prediction, re-run with --donor-structure-plddt to "
+                            f"enable pLDDT weighting")
 
-                # Multi-model consensus over sibling models if available
+                # Multi-model consensus over sibling *models of the same
+                # structure*. The prediction tools put rank_1..rank_N (or
+                # <stem>_model_0..N) in one directory, so a directory glob is
+                # the right discovery mechanism — but a directory can also
+                # hold unrelated antibodies. Every candidate is therefore
+                # validated by requiring a chain whose sequence matches the
+                # donor exactly, and by requiring the same chain label so the
+                # single-label consensus API stays valid.
                 import glob
                 pdb_dir = os.path.dirname(structure_path)
-                found = set()
+                found = {structure_path}
                 for pat in ("rank_*.pdb", "*_model*.pdb"):
                     found.update(glob.glob(os.path.join(pdb_dir, pat)))
-                all_pdbs = sorted(found)
 
-                if len(all_pdbs) >= 3:
+                def _same_structure_chain(path):
+                    if not path or not os.path.exists(path):
+                        return False
+                    try:
+                        m = model if path == structure_path else load_model(path)
+                    except Exception:
+                        return False
+                    if not m:
+                        return False
+                    chains = {}
+                    for a in m.atoms:
+                        chains.setdefault(a.chain, []).append(a)
+                    # Require near-identical sequence, not just a shared
+                    # 20-aa exact run: different antibodies of the same
+                    # germline family can clear match_pdb_chain's run test
+                    # (framework identity often exceeds 95%). Sibling models
+                    # of the SAME prediction have identity ~1.0.
+                    if match_pdb_chain_loose(
+                            chains, donor.sequence, min_identity=0.98) != label:
+                        return False
+                    # The partner label must exist too, otherwise the
+                    # VH/VL contact hints of that model would be silently
+                    # computed against the wrong chain.
+                    return plabel is None or plabel in chains
+
+                sibling_pdbs = sorted(p for p in found if _same_structure_chain(p))
+                skipped = sorted(p for p in found if p not in sibling_pdbs)
+                if skipped and len(found) > 1:
+                    chain.warnings.append(
+                        f"[{chain.name}] ignored {len(skipped)} structure file(s) "
+                        f"in {pdb_dir or '.'} that do not match this chain "
+                        f"(different sequence/chain id): "
+                        + ", ".join(os.path.basename(p) for p in skipped[:5]))
+
+                if len(sibling_pdbs) >= 3:
                     hints = compute_multi_model_consensus(
-                        all_pdbs, label, all_pos, cdrs, ag_chains,
-                        min_consensus=3, use_plddt=use_plddt,
-                        cdr_loops=cdr_loops,
+                        sibling_pdbs, label, all_pos, cdrs, ag_chains,
+                        partner_chains=partner_chains,
+                        use_plddt=use_plddt, cdr_loops=cdr_loops,
                     )
                 else:
-                    # Single model
+                    # Single model (or fewer than 3 validated sibling models)
                     hints = _compute_hints_with_model(
                         model, label, all_pos, cdrs, ag_chains,
+                        partner_chains=partner_chains,
                         pdb_path=structure_path, use_plddt=use_plddt,
                         cdr_loops=cdr_loops)
 
@@ -582,6 +648,8 @@ def _process_chain(
             donor, matrix_alts, j_gene, config.cdr_scheme,
             is_vhh=is_vhh, n=min(3, len(matrix_alts)),
             numbering=config.numbering,
+            structure=hints, calibration=calibration,
+            immunogenicity=immunogenicity, top_germlines=top,
         )
 
     # ---- grafts (all requested schemes, for reporting) ----
@@ -935,8 +1003,10 @@ def _partner_sequence(chain: InputChain, _all_chains) -> Optional[str]:
 
 
 def _compute_hints_with_model(model, label, all_pos, cdrs, ag_chains,
+                              partner_chains=None,
                               pdb_path=None, use_plddt=True, cdr_loops=None):
     from .structure import compute_hints
     return compute_hints(model, label, all_pos, cdrs, ag_chains,
+                         partner_chains=partner_chains,
                          pdb_path=pdb_path, use_plddt=use_plddt,
                          cdr_loops=cdr_loops)

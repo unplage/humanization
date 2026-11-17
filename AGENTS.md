@@ -31,7 +31,7 @@ python3 scripts/humanize/cli.py rmsd --input ab.fasta --donor donor.pdb \
 python3 scripts/humanize/cli.py setup-germline
 
 # re-calibrate the D3 loop-class distance thresholds on real structures
-python3 scripts/calibrate_loop_class.py --glob 'af3/*/*.pdb'
+python3 scripts/calibrate_loop_class.py --glob '<dir>/*.pdb'
 ```
 
 Tests are plain scripts (pytest is NOT installed; each exits nonzero on failure):

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .config import (
     CHEMICAL_EXPOSURE_WEIGHT,
+    CONSERVED_DISULFIDE_CYS,
     EMPIRICAL_NO_EFFECT_NOTE,
     FR4_STRUCTURAL_WEIGHTS,
     FR4_REVERSION_THRESHOLD,
@@ -107,6 +108,26 @@ def _noisy_or(weights: List[float]) -> float:
     for w in weights:
         prod *= (1.0 - max(0.0, min(1.0, w)))
     return 1.0 - prod
+
+
+def _is_disruptive_swap_structured(
+    donor_aa: str, human_aa: str, rel_sasa: Optional[float],
+    framework_nbr: Optional[int],
+) -> bool:
+    """Sequence-only strain PLUS the structural cavity test.
+
+    A deeply buried, tightly packed framework residue can be destabilised by
+    a near-isosteric swap (e.g. Leu->Val): the ~26 A^3 shrinkage creates a
+    cavity that the sequence-only 40 A^3 rule cannot see. With a structure we
+    therefore additionally flag such a swap when the residue is deeply buried
+    (relSASA < 0.10) and has >= 3 side-chain framework packing neighbours.
+    """
+    if _is_disruptive_swap(donor_aa, human_aa):
+        return True
+    if rel_sasa is None or rel_sasa >= 0.10 or (framework_nbr or 0) < 3:
+        return False
+    strain = _volume_strain(donor_aa, human_aa)
+    return strain is not None and abs(strain) >= 20.0
 
 
 def _plddt_factor(plddt: Optional[float]) -> float:
@@ -297,6 +318,12 @@ class StructureHints:
       cdr_partners_sc {fr_pos: [cdr_pos, ...]}  side-chain-mediated subset
       plddt           {pos: float}     AF3 confidence score (B-factor)
       rel_sasa        {pos: float}     relative SASA (0-1)
+      sasa_method     {str}            "freesasa" / "shrake-rupley" / both
+      disulfide       {pos: partner_pos} verified SG-SG bonded Cys pairs
+                       ("" = bonded to a residue outside this chain)
+      partner_contact {pos: bool}      MEASURED VH/VL packing contact (Fab):
+                       framework residue within 4.5 A of the partner chain
+      partner_contact_sc {pos: bool}   side-chain-mediated subset (functional)
     """
 
     def __init__(self, data: Optional[dict] = None):
@@ -320,6 +347,21 @@ class StructureHints:
         d = self.data.get("antigen_contact")
         return d.get(pos) if d else None
 
+    def partner_contact(self, chain: str, pos: str) -> Optional[bool]:
+        """Measured VH/VL packing contact (Fab). None = no partner chain data."""
+        d = self.data.get("partner_contact")
+        return d.get(pos) if d else None
+
+    def partner_contact_sc(self, chain: str, pos: str) -> Optional[bool]:
+        """Side-chain-mediated VH/VL packing contact (functional evidence)."""
+        d = self.data.get("partner_contact_sc")
+        return d.get(pos) if d else None
+
+    def framework_nbr(self, pos: str) -> Optional[int]:
+        """Side-chain contacts to other framework residues of this chain."""
+        d = self.data.get("framework_nbr")
+        return d.get(pos) if d else None
+
     def cdr_partners(self, pos: str) -> set:
         d = self.data.get("cdr_partners") or {}
         v = d.get(pos) or []
@@ -338,6 +380,15 @@ class StructureHints:
     def rel_sasa(self, pos: str) -> Optional[float]:
         """Relative SASA for this position (0-1)."""
         d = self.data.get("rel_sasa")
+        return d.get(pos) if d else None
+
+    def has_disulfide_data(self) -> bool:
+        """True when a structure was analysed for SG-SG bonds."""
+        return "disulfide" in self.data
+
+    def disulfide_partner(self, pos: str) -> Optional[str]:
+        """Bonded Cys partner position; None = no verified bond / no data."""
+        d = self.data.get("disulfide")
         return d.get(pos) if d else None
 
     # -- per-loop geometry (D3 loop-class correction) -----------------------
@@ -384,10 +435,57 @@ class StructureHints:
         return bool(self.data.get("loop_min_dist"))
 
     def exposure(self, pos: str) -> float:
+        """Solvent exposure of the substituted position, 0 (buried) - 1.
+
+        Uses the measured relSASA when available (the same continuous value
+        that drives the structural and chemical terms), clamped to the
+        historical 0.15-0.85 range. Falls back to the binary buried hint, and
+        to 0.5 when nothing is known. Collapsing every relSASA >= 0.25 into
+        "maximally exposed" discarded most of the measured information and
+        over-credited the immunogenicity benefit at intermediate exposure.
+        """
+        d = self.data.get("rel_sasa")
+        if d is not None:
+            rel = d.get(pos)
+            if isinstance(rel, (int, float)):
+                return min(0.85, max(0.15, float(rel)))
         b = self.buried("", pos)
         if b is None:
             return 0.5
         return 0.15 if b else 0.85
+
+
+# Literature position sets (Foote & Winter vernier, Chothia canonical and
+# interface) are small-sample population averages from the 1980s-2000s. With
+# a structure available, a literature-only claim that is NOT corroborated by
+# any direct measured signal at THIS position is weak evidence and is
+# discounted. Tiers are unaffected (the Step-3 rules already demote exposed
+# non-contacting positions); only the ranking score is made honest.
+LITERATURE_FEATURES = frozenset(
+    {"vernier", "canonical", "interface_core", "interface_extended"})
+MEASURED_FEATURES = frozenset(
+    {"buried", "cdr_contact", "antigen_contact", "vhvl_interface",
+     "loop_shell", "disulfide_cys", "vhh_hallmark"})
+LITERATURE_ONLY_FACTOR = 0.6
+
+
+def _blend_composite(structural: float, benefit: float, chem: float) -> float:
+    """Blend three evidence channels into a bounded 0-100 score.
+
+    Positive chemical rewards are capped at 1 and added as before. A negative
+    chemical term (the reversion would re-introduce a donor liability) used to
+    be subtracted without limit, which could push the composite below zero
+    and contradict the documented 0-100 scale. It now scales the
+    structural+benefit base down instead, preserving the ordering (a larger
+    liability always ranks lower) while keeping the score in [0, 100].
+    """
+    base = WEIGHTS["blend"][0] * structural + WEIGHTS["blend"][1] * benefit
+    if chem >= 0:
+        raw = base + WEIGHTS["blend"][2] * min(1.0, chem)
+    else:
+        penalty = min(1.0, -chem / 1.10)   # worst-case exposure-scaled liability
+        raw = base * (1.0 - penalty)
+    return round(100.0 * min(1.0, max(0.0, raw)), 1)
 
 
 def _evaluate_fr4_structural(
@@ -419,13 +517,17 @@ def _evaluate_fr4_structural(
     scores = []
 
     # 1. CDR3 contact (most important - FR4 follows CDR3).
-    # Prefer the per-loop distance when geometry is available: the generic
-    # cdr_contact hint is true for ANY CDR, so a position touching only
-    # CDR1/CDR2 was previously mislabelled "cdr3_contact". Fall back to the
-    # generic hint without loop geometry (portable / legacy hints).
+    # Only a SIDE-CHAIN contact can justify reverting a framework/J residue:
+    # a backbone-proximal Gly (no side chain at all) is a fixed J-region
+    # geometry whose substitution does not change that contact, yet it used
+    # to trigger reversion at 4.4 A with the all-atom distance. Use the
+    # side-chain-specific per-loop distance whenever loop geometry exists;
+    # fall back to the generic hint only for legacy hints without any loop
+    # geometry (portable / pre-D3 path).
     dists = structure.loop_min_dist(pos)
-    if dists:
-        d3 = dists.get("CDR3")
+    dists_sc = structure.loop_min_dist_sc(pos)
+    if dists or dists_sc:
+        d3 = dists_sc.get("CDR3")
         cdr3_contact = (d3 is not None and d3 <= 4.5)
     else:
         cdr3_contact = structure.cdr_contact(chain_type, pos)
@@ -470,7 +572,7 @@ def _evaluate_fr4_structural(
     # Build rationale
     rationale_parts = [f"FR4 structural reversion: {', '.join(features)}"]
     if cdr3_contact:
-        rationale_parts.append("Contacts CDR3 loop (<4.5 Å)")
+        rationale_parts.append("Side-chain contacts CDR3 loop (<4.5 Å)")
     if ag_contact:
         rationale_parts.append("Contacts antigen (<4.5 Å)")
     if buried:
@@ -616,7 +718,19 @@ def analyze_backmutations(
         if is_vhh and chain_type == "H" and spec.is_vhh_hallmark(num):
             features.append("vhh_hallmark")
         if donor_aa == "C":
-            features.append("disulfide_cys")
+            # Conserved framework disulfides are fold-stabilising and always
+            # protected. Any other Cys is protected only when a structure
+            # verifies an SG-SG bond; with structure data and no bond it is
+            # a free thiol (developability liability) and stays revertible.
+            if num in CONSERVED_DISULFIDE_CYS.get(chain_type, ()) \
+                    or structure.disulfide_partner(pos) is not None:
+                features.append("disulfide_cys")
+            elif structure.has_disulfide_data():
+                features.append("free_cys")
+            else:
+                # No structure: cannot exclude a non-canonical disulfide,
+                # so stay conservative as in the portable path.
+                features.append("disulfide_cys")
 
         buried = structure.buried(chain_type, pos)
         cdr_contact = structure.cdr_contact(chain_type, pos)
@@ -631,6 +745,14 @@ def analyze_backmutations(
             features.append("cdr_contact")
         if ag_contact:
             features.append("antigen_contact")
+        # Measured VH/VL packing contact. Added as MEASURED evidence (not as
+        # the literature "interface_core" label): the partner chain sits in
+        # the donor structure and a side-chain contact with it is under
+        # functional selection, so it must keep the donor residue even when
+        # the position touches no CDR.
+        partner_sc = structure.partner_contact_sc(chain_type, pos)
+        if partner_sc:
+            features.append("vhvl_interface")
 
         # ---- D3: per-antibody loop-class position-set correction ----------
         # The literature sets are population averages; with a structure of
@@ -668,6 +790,14 @@ def analyze_backmutations(
             elif f in w:
                 evidence.append(w[f])
         structural = _noisy_or(evidence)
+        # Structure mode: a literature-only claim with no direct measured
+        # corroboration at this position is a weak prior, not a structural
+        # fact. Discount it so ranking does not over-trust the static tables.
+        lit_only = (bool(LITERATURE_FEATURES & set(features))
+                    and not bool(MEASURED_FEATURES & set(features))
+                    and bool(structure.data))
+        if lit_only:
+            structural *= LITERATURE_ONLY_FACTOR
 
         # Structure-adaptive exposure modulation. A functional contact is
         # important regardless of exposure, so it is left untouched; otherwise
@@ -728,9 +858,13 @@ def analyze_backmutations(
         # (no-structure) ladder: low-pLDDT structure must neither demote
         # (gated below) nor promote. Volume/polarity strain is sequence-only
         # and always applies.
-        strain = _is_disruptive_swap(donor_aa, human_aa)
+        strain = _is_disruptive_swap_structured(
+            donor_aa, human_aa, structure.rel_sasa(pos),
+            structure.framework_nbr(pos))
         tier = _assign_tier_with_structure(
             features, buried if plddt_ok else None, is_vhh, donor_aa, pos,
+            rel_sasa=structure.rel_sasa(pos) if plddt_ok else None,
+            human_aa=human_aa,
             side_chain_contact=sc_contact if plddt_ok else None,
             cdr_contact=cdr_contact if plddt_ok else None,
             antigen_contact=ag_contact if plddt_ok else None,
@@ -762,6 +896,7 @@ def analyze_backmutations(
         # and are unchanged by a side-chain swap, so they never block (A).
         structural_demoted = False
         soft_demoted = False
+        buried_soft_demoted = False
 
         # P0: Developability risk score (sequence motifs; reported on the
         # candidate - it no longer drives tier changes on its own, see above)
@@ -769,9 +904,11 @@ def analyze_backmutations(
 
         if structure.data and tier in ("T1", "T2"):
             sc_partners = structure.cdr_partners_sc(pos)
+            partner_partners = structure.partner_contact_sc(chain_type, pos)
             functional_contact = (
                 sc_contact is True or ag_contact is True
                 or bool(sc_partners)
+                or partner_partners is True
             )
             strained = strain
             if plddt_ok and not functional_contact:
@@ -780,23 +917,20 @@ def analyze_backmutations(
                     # (immunogenicity dominates; volume strain irrelevant).
                     tier = "T3"
                     structural_demoted = True
-                elif tier == "T1" and not strained:
-                    # buried core/interface pillar whose side chain does not
-                    # touch the paratope and whose human swap is
-                    # non-disruptive: recommended, but not structurally
-                    # mandatory
-                    tier = "T2"
-                    soft_demoted = True
+                elif tier in ("T1", "T2") and not strained:
+                    # A buried core/interface pillar with no functional
+                    # contact and a non-disruptive swap has no structural
+                    # necessity. T1 -> T2 stays in V2; a plain buried
+                    # T2 -> T3 (burial alone is not functional evidence).
+                    if tier == "T1":
+                        tier = "T2"
+                        soft_demoted = True
+                    else:
+                        tier = "T3"
+                        structural_demoted = True
+                        buried_soft_demoted = True
 
-        composite = round(100 * (
-            WEIGHTS["blend"][0] * structural
-            + WEIGHTS["blend"][1] * benefit
-            # positive chemical rewards are capped at 1, but negative
-            # penalties (reversions that introduce a new liability motif)
-            # must pass through unclamped,
-            # otherwise the penalty would silently vanish (regression-tested)
-            + WEIGHTS["blend"][2] * min(1, chem)
-        ), 1)
+        composite = _blend_composite(structural, benefit, chem)
 
         if structural_demoted:
             composite = min(composite, 40.0)
@@ -850,15 +984,28 @@ def analyze_backmutations(
                 elif adj == "neutral" and empirical_n >= 2:
                     empirical_note = f"empirical: no effect (ddG {empirical_ddG:+.2f}, n={empirical_n})"
 
+        if lit_only:
+            rationale_note = "literature-only position (no direct structural confirmation in this model)"
+        else:
+            rationale_note = ""
+
         rationale = _rationale_with_structure(features, tier, buried, cdr_contact, ag_contact,
                                exposure, conservation_val, donor_aa, human_aa,
                                side_chain_contact=sc_contact, dev_risk_score=dev_risk_score)
         if loop_corr.notes:
             rationale.extend(loop_corr.notes)
+        if rationale_note:
+            rationale.append(rationale_note)
         if structural_demoted:
-            rationale.append("structural: exposed without functional "
-                            "side-chain/antigen contact; "
-                            "demoted from T1/T2 to T3")
+            if buried_soft_demoted:
+                rationale.append(
+                    "structural: buried but near-isosteric with no functional "
+                    "side-chain/antigen contact; T2 demoted to T3 "
+                    "(burial alone is not functional evidence)")
+            else:
+                rationale.append("structural: exposed without functional "
+                                 "side-chain/antigen contact; "
+                                 "demoted from T1/T2 to T3")
         if soft_demoted:
             rationale.append(
                 "structural: buried with no side-chain CDR/antigen contact "
@@ -926,11 +1073,15 @@ def analyze_backmutations(
             buried = structure.buried(chain_type, pos) if structure else None
             cdr_contact = structure.cdr_contact(chain_type, pos) if structure else None
             ag_contact = structure.antigen_contact(chain_type, pos) if structure else None
+            partner_sc = (structure.partner_contact_sc(chain_type, pos)
+                          if structure else None)
 
             if buried:
                 features.append("buried")
             if cdr_contact:
                 features.append("cdr_contact")
+            if partner_sc:
+                features.append("vhvl_interface")
 
             # Structural score: noisy-OR of the indel evidence, pLDDT-weighted
             w = WEIGHTS["structural"]
@@ -961,13 +1112,12 @@ def analyze_backmutations(
             else:
                 chem = 0.0
 
-            composite = 100 * (WEIGHTS["blend"][0] * structural
-                               + WEIGHTS["blend"][1] * benefit
-                               + WEIGHTS["blend"][2] * min(1, chem))
-            composite = round(composite, 1)
+            composite = _blend_composite(structural, benefit, chem)
 
             # Tier: default T2 for insertions (need structure verification)
-            tier = _assign_tier(features, buried, is_vhh, donor_aa, pos)
+            tier = _assign_tier(features, buried, is_vhh, donor_aa, pos,
+                                rel_sasa=structure.rel_sasa(pos) if structure else None,
+                                human_aa=human_aa)
 
             rationale = ["FR insertion: donor-specific residue not in germline"]
             if buried is True:
@@ -1040,7 +1190,8 @@ def _annotate_with_functional_conservation(
     return result
 
 
-def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
+def _assign_tier(features, buried, is_vhh, donor_aa, pos,
+                 rel_sasa=None, human_aa=None) -> str:
     """Assign tier based on structural features (pre-structure adjustment).
 
     Used for FR-indel candidates; substitution candidates go through
@@ -1064,9 +1215,13 @@ def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
     # tier-deciding: it is weak, ranking-only evidence (side chain in the
     # second shell of a loop, no side-chain contact). Tier changes require
     # literature pillars or a measured contact.
-    if "cdr_contact" in features or "antigen_contact" in features:
+    if "cdr_contact" in features or "antigen_contact" in features \
+            or "vhvl_interface" in features:
         return "T2"
     if "buried" in features:
+        if (rel_sasa is not None and rel_sasa >= 0.10
+                and not _is_disruptive_swap(donor_aa, human_aa)):
+            return "T3"
         return "T2"
     if "interface_extended" in features:
         return "T2"
@@ -1075,7 +1230,8 @@ def _assign_tier(features, buried, is_vhh, donor_aa, pos) -> str:
 
 def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
                                  side_chain_contact=None, cdr_contact=None,
-                                 antigen_contact=None) -> str:
+                                 antigen_contact=None, rel_sasa=None,
+                                 human_aa=None) -> str:
     """Assign tier with structure context.
 
     Priority order:
@@ -1098,7 +1254,16 @@ def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
         return "KEEP_DONOR"
     if "disulfide_cys" in features:
         return "KEEP_DONOR"
-    
+
+    # Measured interface/packing pillars come FIRST (as documented): an
+    # interface_core residue is a mandatory revert when buried, regardless of
+    # whether its CDR proximity is side-chain or backbone mediated. Checking
+    # the contact branches first used to demote such residues to T2.
+    if "interface_core" in features:
+        return "T1" if buried is not False else "T2"
+    if "vhvl_interface" in features:
+        return "T1" if buried is True else "T2"
+
     # P0: side-chain contact takes highest priority
     if side_chain_contact is True:
         if buried is True:
@@ -1116,12 +1281,6 @@ def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
             # (no functional contact) unless a partner hint upgrades it
             return "T2"
 
-    # Interface core (VH/VL packing)
-    if "interface_core" in features:
-        if buried is False:
-            return "T2"
-        return "T1"
-    
     # Vernier zone (supports CDR conformation)
     if "vernier" in features:
         if buried is True or "canonical" in features:
@@ -1136,8 +1295,17 @@ def _assign_tier_with_structure(features, buried, is_vhh, donor_aa, pos,
     if cdr_contact is True or antigen_contact is True:
         return "T2"
     
-    # Buried in core
+    # Buried in core. Depth matters: relSASA < 0.10 is deep core packing,
+    # while 0.10-0.20 is only shallow burial and does not by itself justify
+    # a strong "revert" recommendation (it still blocks exposure demotion).
     if buried is True:
+        # Shallow burial alone does not justify a strong "revert"
+        # recommendation, but a disruptive swap (large volume/charge/H-bond
+        # change) at a shallow-buried position still does: e.g. Lys->Ala
+        # creates a cavity. Only a near-isosteric shallow-buried swap is T3.
+        if (rel_sasa is not None and rel_sasa >= 0.10
+                and not _is_disruptive_swap(donor_aa, human_aa)):
+            return "T3"
         return "T2"
     
     # Extended interface
@@ -1205,7 +1373,9 @@ def _rationale(features, tier, buried, cdr_contact, ag_contact,
         if "vhh_hallmark" in features:
             out.append("VHH hallmark residue (FR2 hydrophilic patch); must stay donor for single-domain fold")
         if "disulfide_cys" in features:
-            out.append("Framework Cys (potential CDR3 disulfide partner); must stay donor")
+            out.append("Disulfide-bonded Cys (conserved framework or SG-SG verified); must stay donor")
+    if "free_cys" in features:
+        out.append("Free/unpaired Cys in donor structure (no SG-SG partner): developability liability, revert to human")
     if "interface_core" in features:
         out.append("Core VH/VL packing interface (Chothia)")
     if "vernier" in features:
