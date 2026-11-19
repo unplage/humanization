@@ -906,16 +906,40 @@ def _parse_fasta(path: str) -> List[Tuple[str, str]]:
     return records
 
 
+# Headers are checked in two tiers.  A bare "H"/"L" token is a weak marker:
+# a name like ``H_V2_VL`` starts with a weak H but contains the strong VL
+# marker, so checking the weak tier first would assign the light chain to the
+# heavy chain.  Strong markers (VH/VL/HEAVY/LIGHT/KAPPA/LAMBDA) always win.
+_STRONG_H_MARKER = re.compile(r"(^|[_\s.-])VH([_\s.-]|$)|HEAVY")
+_STRONG_L_MARKER = re.compile(
+    r"(^|[_\s.-])VL([_\s.-]|$)|LIGHT|KAPPA|LAMBDA")
+_WEAK_H_MARKER = re.compile(r"(^|[_\s.-])H([_\s.-]|$)")
+_WEAK_L_MARKER = re.compile(r"(^|[_\s.-])L([_\s.-]|$)")
+
+
 def _infer_chain_type(name: str, index: int, total: int) -> Tuple[str, str]:
     """Return (chain type, source) for one FASTA record.
 
     ``source`` is ``"header"`` when the record name states the chain type
-    explicitly and ``"order"`` when the file order was used as a fallback.
+    explicitly, ``"ambiguous"`` when conflicting or uninformative markers
+    were found, and ``"order"`` when the file order was used as a fallback.
     """
     upper = name.upper()
-    if re.search(r"(^|[_\s.-])VH([_\s.-]|$)|HEAVY|(^|[_\s.-])H([_\s.-]|$)", upper):
+    strong_h = bool(_STRONG_H_MARKER.search(upper))
+    strong_l = bool(_STRONG_L_MARKER.search(upper))
+    if strong_h and not strong_l:
         return "H", "header"
-    if re.search(r"(^|[_\s.-])VL([_\s.-]|$)|LIGHT|KAPPA|LAMBDA|(^|[_\s.-])L([_\s.-]|$)", upper):
+    if strong_l and not strong_h:
+        return "L", "header"
+    if strong_h and strong_l:
+        # Conflicting headers: let the sequence decide.
+        return "?", "ambiguous"
+    # No strong marker: fall back to the weak tier.
+    weak_h = bool(_WEAK_H_MARKER.search(upper))
+    weak_l = bool(_WEAK_L_MARKER.search(upper))
+    if weak_h and not weak_l:
+        return "H", "header"
+    if weak_l and not weak_h:
         return "L", "header"
     if total == 1:
         return "H", "order"
@@ -993,11 +1017,16 @@ def _load_fasta_chains(path: str) -> List[ChainInfo]:
     types = [t for t, _src in inferred]
     sources = [src for _t, src in inferred]
 
-    # An explicit header wins, but the sequence content is used whenever the
-    # header does not state the chain type: file order alone is a guess, and
-    # a two-record FASTA whose light chain comes first would otherwise be
-    # assigned backwards.
-    if sources[0] == "order" or sources[1] == "order":
+    # An unambiguous explicit header wins, but the sequence content is used
+    # whenever a header is uninformative, ambiguous, or conflicting with the
+    # other record.  File order alone is only a guess, and a two-record
+    # FASTA whose light chain comes first would otherwise be assigned
+    # backwards.  In particular a header like ``H_V2_VL`` carries both a
+    # strong VL marker and a weak leading H token; with both records marked
+    # "H" the old code silently swapped the chains.
+    need_content = ("order" in sources or "ambiguous" in sources
+                    or types[0] == types[1])
+    if need_content:
         content = [_infer_chain_type_from_sequence(seq)
                    for _name, seq in cleaned]
         if content[0] and content[1] and content[0] != content[1]:

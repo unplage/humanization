@@ -1105,6 +1105,35 @@ def test_sequence_mode_declares_what_it_cannot_compute():
           "the structure report must not carry the sequence-mode scope block")
 
 
+def test_fasta_chain_assignment_with_h_prefixed_headers():
+    """A weak leading H token must not override a strong VL marker.
+
+    Regression: a two-record FASTA named ``H_V2_VL`` / ``H_V2_VH`` was
+    assigned backwards because the bare ``H_`` at the start of each record
+    name was matched before the ``VL`` marker, so both records became
+    heavy chains and the file order was used as a fallback.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cases = [
+            (">H_V2_VL\n{}\n>H_V2_VH\n{}\n", VL_4D5, VH_4D5, "VL first"),
+            (">H_V2_VH\n{}\n>H_V2_VL\n{}\n", VH_4D5, VL_4D5, "VH first"),
+            (">seq1\n{}\n>seq2\n{}\n", VL_4D5, VH_4D5,
+             "uninformative, VL first"),
+            (">VH_VL\n{}\n>VH_VL\n{}\n", VL_4D5, VH_4D5,
+             "conflicting markers"),
+        ]
+        for fmt, seq1, seq2, label in cases:
+            path = os.path.join(tmp, "c.fasta")
+            with open(path, "w") as fh:
+                fh.write(fmt.format(seq1, seq2))
+            chains = pi_analyzer._load_fasta_chains(path)
+            vh = [c for c in chains if c.chain_type == "H"][0].sequence
+            vl = [c for c in chains if c.chain_type == "L"][0].sequence
+            check(vh == VH_4D5 and vl == VL_4D5,
+                  "{}: chains assigned backwards (VH len {}, VL len {})".format(
+                      label, len(vh), len(vl)))
+
+
 def test_multichar_cif_chain_ids_are_handled():
     """mmCIF chain IDs longer than one character must not corrupt the PDB.
 
@@ -1188,6 +1217,7 @@ def run_all_tests():
         test_terminal_pka_offsets_are_uniform,
         test_combined_json_carries_the_result_contract,
         test_single_heavy_chain_is_flagged_as_ambiguous,
+        test_fasta_chain_assignment_with_h_prefixed_headers,
     ]
     passed = failed = 0
     for test in tests:
